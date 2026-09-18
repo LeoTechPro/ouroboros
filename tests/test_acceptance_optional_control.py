@@ -242,3 +242,71 @@ def test_feedback_ready_before_parking_preserves_answer_protocol(tmp_path, monke
         assert text == (ANSWER if reply == "keep" else revised)
         assert tools._ctx._acceptance_pending_review_choice == "wait"
     assert tools._ctx._task_acceptance_pending == "paid-binding"
+
+
+@pytest.mark.parametrize("order,next_action", [
+    (order, action) for order in ("ready", "pending")
+    for action in ("rewrite", "effect", "criterion", "nominate")
+] + [("ready", "held_effect")])  # Ready feedback releases admission before the rewrite.
+def test_return_order_preserves_feedback_identity_and_new_subjects(full_loop, monkeypatch, order, next_action):
+    from tests.test_loop_acceptance_gate import _order_acceptance_feedback
+    from tests.test_acceptance_async_loop import keep
+
+    f = full_loop
+    revised = ANSWER + " Budget: $12."
+    _order_acceptance_feedback(f, monkeypatch, ANSWER, order)
+    if next_action == "held_effect":
+        begins = []
+        def begin(**_kwargs):
+            begins.append(True)
+            return None if len(begins) == 2 else {"token": f"fence-{len(begins)}", "owner_message_generation": 0}
+        f.ctx.begin_acceptance_fence = begin
+        f.ctx.end_acceptance_fence = lambda **kw: {"ok": True, "status": "sealed" if kw["outcome"] == "terminal" else "released"}
+        f.ctx.inspect_acceptance_fence = lambda **_kw: {"owner_message_generation": 0}
+
+    def main(_llm, messages, *_args, **_kwargs):
+        f.model_inputs.append(copy.deepcopy(messages))
+        f.model_step += 1
+        if f.model_step == 1:
+            return {"content": "", "tool_calls": [call("task_acceptance_review", {"claim": ANSWER}, "first")]}, 0.0
+        if f.model_step == 2:
+            if order == "ready":
+                assert "Review verdict: PASS for the nominated answer" in str(messages)
+                assert "A paid acceptance panel on an earlier revision is still running" not in str(messages)
+                assert not f.ctx._task_acceptance_pending
+            if next_action == "effect":
+                return {"content": "", "tool_calls": [call("write_file", {
+                    "root": "task_drive", "path": "new-effect.txt", "content": "Additional evidence.",
+                }, "effect")]}, 0.0
+            if next_action == "nominate":
+                return {"content": "", "tool_calls": [call("task_acceptance_review", {"claim": revised}, "second")]}, 0.0
+        if f.model_step == 3 and next_action == "held_effect":
+            assert "supervisor could not atomically close" in str(messages)
+            return {"content": "", "tool_calls": [call("write_file", {
+                "root": "task_drive", "path": "new-effect.txt", "content": "Additional evidence.",
+            }, "held-effect")]}, 0.0
+        if (f.model_step == 2 or (f.model_step == 3 and next_action == "effect")
+                or (f.model_step == 4 and next_action == "held_effect")):
+            subject = {"owner_source_sha256": f.ctx._acceptance_observation["owner_source_sha256"]}
+            if next_action == "criterion":
+                subject["effective_criteria"] = "Complete report including a verified budget of $12."
+            if next_action in {"effect", "held_effect"} and f.model_step > 2:
+                subject["material_tool_indices"] = [1]
+            return {"content": json.dumps({"delivery_control": "replace", "full_answer": revised,
+                                           "acceptance_subject": subject})}, 0.0
+        assert f.model_step < 7, f.progress
+        return keep(f), 0.0
+
+    monkeypatch.setattr(loop, "call_llm_with_retry", main)
+    result, _usage, trace = f.run()
+    assert result == revised
+    assert len(f.review_sends) == (1 if next_action == "rewrite" else 2)
+    assert f.review_requests[0].subject == ANSWER
+    if next_action == "rewrite":
+        decision = trace["acceptance_decision"]
+        assert decision["reason"] == "previous_revision_accepted"
+        assert decision["reviewed_candidate_hash"] != trace["delivery_candidate"]["content_sha256"]
+        assert not trace["delivery_candidate"]["acceptance_binding"]["authoritative"]
+    else:
+        assert f.review_requests[-1].subject == revised
+        assert trace["acceptance_decision"]["reason"] != "previous_revision_accepted"

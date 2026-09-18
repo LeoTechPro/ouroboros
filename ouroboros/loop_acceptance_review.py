@@ -748,6 +748,16 @@ def _slot_cause_clause(result: Any) -> str:
     return f" Causes: {note}" if note else ""
 
 
+def _deliver_acceptance_feedback(ctx: _TaskAcceptanceContext, feedback: str) -> None:
+    """Bind feedback actually given to Main to the exact existing panel row."""
+    _loop()._append_or_merge_user_message(ctx.messages, feedback)
+    for run in reversed(ctx.llm_trace.get("review_runs") or []):
+        if (isinstance(run, dict) and run.get("authority") == "host_root"
+                and run.get("binding_hash") == ctx.review_binding.get("binding_hash")):
+            run["feedback_delivered"] = True
+            break
+
+
 def _apply_task_acceptance_result(
     ctx: _TaskAcceptanceContext,
     result: Any,
@@ -793,6 +803,9 @@ def _apply_task_acceptance_result(
             dialogue=dialogue, dissent=bool(dissent), open_obligations=open_obligations,
         )
     if task_acceptance_is_clean(result):
+        if getattr(ctx.tools._ctx, "_acceptance_review_only", False):
+            _deliver_acceptance_feedback(
+                ctx, capsule or "[Task acceptance feedback] Review verdict: PASS for the nominated answer.")
         _end_acceptance_terminal(ctx, "pass")
         if not _loop()._dispose_obligations_on_clean_pass(
             ctx.llm_trace, result, open_obligations, bool(dissent),
@@ -871,11 +884,7 @@ def _apply_task_acceptance_result(
             capsule += _loop()._format_obligations_clause(open_obligations)
         if ctx.content and ctx.content.strip():
             ctx.messages.append({"role": "assistant", "content": ctx.content})
-        _loop()._append_or_merge_user_message(ctx.messages, capsule)
-        for run in reversed(ctx.llm_trace.get("review_runs") or []):
-            if isinstance(run, dict) and run.get("authority") == "host_root":
-                run["feedback_delivered"] = True
-                break
+        _deliver_acceptance_feedback(ctx, capsule)
         # The aggregate word is not an explanation: printing DEGRADED alone read
         # as "no settled verdict" while a capsule was in fact fed back for one more
         # bounded pass. Name the pass being started and the recorded causes; a
