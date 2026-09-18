@@ -274,6 +274,12 @@ def test_return_order_preserves_feedback_identity_and_new_subjects(full_loop, mo
                 assert "Review verdict: PASS for the nominated answer" in str(messages)
                 assert "A paid acceptance panel on an earlier revision is still running" not in str(messages)
                 assert not f.ctx._task_acceptance_pending
+                runs = f.ctx._execution_trace["review_runs"]
+                index, offered = next((i, row) for i, row in enumerate(runs) if row.get("authority") == "host_root")
+                assert offered["feedback_offered"] and not offered.get("feedback_delivered")
+                assert any(source == {"task_id": f.run_args["task_id"], "run_index": index,
+                                      "binding_hash": offered["binding_hash"]}
+                           for message in messages for source in message.get("review_feedback", []))
             if next_action == "effect":
                 return {"content": "", "tool_calls": [call("write_file", {
                     "root": "task_drive", "path": "new-effect.txt", "content": "Additional evidence.",
@@ -305,6 +311,9 @@ def test_return_order_preserves_feedback_identity_and_new_subjects(full_loop, mo
     assert result == revised
     assert len(f.review_sends) == (1 if next_action == "rewrite" else 2)
     assert f.review_requests[0].subject == ANSWER
+    if order == "ready":
+        first_run = next(row for row in trace["review_runs"] if row.get("authority") == "host_root")
+        assert first_run["feedback_delivered"]  # The real loop's returned-request observer exposed it.
     if next_action in {"effect", "held_effect"}:
         effect = f.ctx.drive_root / "task_drives" / f.run_args["task_id"] / "new-effect.txt"
         assert effect.read_text(encoding="utf-8") == "Additional evidence."

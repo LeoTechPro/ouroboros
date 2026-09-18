@@ -44,7 +44,7 @@ Enforcement: `tests/test_skill_install_resources.py`, `tests/test_skill_runtime_
 ### Task contract resource policy
 
 - Outside Cyber Pro, `resource_policy.protected_artifacts` is a typed affordance policy: execute-only black-box references may run, while byte reads, copy/hash/static introspection, tracing and debugging of the declared paths are blocked (the guards: ARCHITECTURE §6 "Safety and runtime mode").
-- Observable Acceptance Claims are bounded, advisory, task-general criteria (`id`, `claim`, `surface`, `support`, `priority`). `success_criteria` is an input alias, not a second persisted carrier; `effective_acceptance_claims` is the only binder, and its read-time semantics — ingress over a closed plan wave; an OPEN wave binds nothing and is disclosed as `none_open_plan_wave` beside the non-binding `plan_claims_exhibit` — live in ARCHITECTURE §11.1 and §6 "Task acceptance". A child receives only the claims explicitly passed to its own `schedule_subagent` call. Reviewer `evidence_refs` resolve by exact membership in the already-built host packet — no fuzzy matching, filesystem reads or re-execution — and resolution changes only the clean bit and its disclosure, never actor parsing, quorum or verdict. Do not turn claims into a hard acceptance gate or a surface-specific taxonomy.
+- Acceptance claims (`id`, `claim`, `surface`, `support`, `priority`) are bounded advice, never gates/taxonomies. `success_criteria` aliases input only. `effective_acceptance_claims` binds frozen ingress over closed plan waves; after ingress, the evidence owner may select a valid current Advisory `author_plan`. OPEN critic waves bind nothing: expose `none_open_plan_wave` and non-binding `plan_claims_exhibit` (ARCHITECTURE §11.1, §6 "Task acceptance"). Children receive only explicitly passed `schedule_subagent` claims. Bind reviewer `evidence_refs` by exact host-packet membership, never fuzzy matching, file reads or re-execution; change only clean bit/disclosure, never actor parsing, quorum or verdict.
 
 Enforcement: `tests/test_protected_artifacts_policy.py` and `tests/test_acceptance_claims_wiring.py`.
 
@@ -294,13 +294,12 @@ and 23 (`delegated_transport`), both critical. The imperatives:
   re-checked) are CHECKLISTS item 18 and ARCHITECTURE §6 "Tool capability and
   execution" (`tests/test_browser_url_policy.py`,
   `tests/test_browser_isolation.py`, `tests/test_browser_redirect_chain.py`).
-- The parent is the SOLE committer of the live body: acting children return a
-  `workspace.patch`, the parent applies through `integrate_subagent_patch` and
-  its own `commit_reviewed`; `external_workspace` verifies and records without
-  re-applying; a genesis project is durable because its directory IS the
-  deliverable (disclosed residual: until it declares a `.gitignore`, small
-  text build output rides the `workspace.patch` record, bounded only by the
-  per-file source-patch boundary and git's binary verdict; there is no total
+- Acting children return `workspace.patch`; only the parent commits the live body,
+  applying via `integrate_subagent_patch` then its own `commit_reviewed`.
+  `external_workspace` verifies and records without re-applying. Edit/capture text preserves external Git authority and patch-only `self_worktree`. Capture bases prove no authorship; compare via explicit `vcs_diff`. A genesis project's directory is its durable deliverable
+  (until it declares a `.gitignore`, small
+  text build output rides `workspace.patch`, bounded by the
+  per-file source-patch boundary and Git's binary verdict; no total
   source-patch cap). The canonical/replica terminal field-custody projection
   is ONE pure reducer for copy-back and effective reads — every change adds a
   stale-replica regression at BOTH seams
@@ -364,8 +363,8 @@ The imperatives:
   never keyword matching.
 - `wait_task` and `wait_tasks` also peek the waiting actor's own mailbox (its
   execution drive, not its budget root) through the existing transport-wait
-  reader: a pending message returns control without acknowledging it or
-  stopping children — the round-top drain delivers and acknowledges it. One
+  reader: both waits disclose early return for pending mail without ACK or stopping
+  children; the round-top drain delivers and acknowledges it. One
   episode may retain only a PROVED empty mailbox (fingerprints compared before
   and after the full reader); a read failure or torn data is never proof and
   is never cached; no TTL and no ACK in peek.
@@ -944,11 +943,11 @@ and what enforces each.
   child-action controls stay strict; owner-source acknowledgement and forced
   finalization retain their rules. Context-only mail wakes waits but does not block
   owner-source acknowledgement or imply an owner revision. Empty or recognizable malformed controls retain
-  the answer (`tests/test_acceptance_optional_control.py`). Delivery under ready or pending feedback
-  buys no second panel and causes no capacity refusal
-  (`acceptance_settlement._deliver_under_running_panel`). While pending: default wait; blocking wait
-  only; Cyber Pro: never wait; advisory: early finish needs explicit
-  `"pending_review":"finish"` on delivery control. Keep the trace
+  the answer (`tests/test_acceptance_optional_control.py`). Ready or pending feedback
+  needs no extra panel or capacity refusal for delivery
+  (`acceptance_settlement._deliver_under_running_panel`). Pending: default wait;
+  Blocking waits; Cyber Pro never waits; Advisory finish needs explicit
+  `"pending_review":"finish"` in delivery control. Keep the trace
   past exit (`remember_settlement_trace`). Late settlement: attach to the ended result,
   announce once on its task card (`card_row="reviews"`); no model turn or reviewer-as-
   open-delegation. Workers never write Main's candidate/author decision; subtree/status,
@@ -958,11 +957,13 @@ and what enforces each.
   never old verdict authority. Source acknowledgement infers no semantic change from
   generation. File/diff requests impose no commit-or-revert rule; self-modification
   keeps reviewed commits (BIBLE P0/P3).
-- Post-task synthesis receives `completion_observations` from the terminal result
-  writer (ARCHITECTURE §6 "Post-task reflection"); counts come from
-  `OWNER_DELIVERY_TOOL_NAMES`, not prose; recovery uses the stored snapshot; global
-  skill state never attributes an owner click to the task; task-summary calls use the
-  `chat_observed` custody seam.
+- Before cleanup, freeze `review_evidence.task_inputs` and `completion_observations`
+  for summary/reflection (ARCHITECTURE §6 "Post-task reflection"): whole owner Q/A,
+  peer provenance and canonical split-root verification receipts. Zero exit is positive;
+  absent is unknown; unrelated passes erase no failure. Send content, not pointers;
+  recover the same snapshot. Count delivery via `OWNER_DELIVERY_TOOL_NAMES`, never
+  global skill state. Summary uses `chat_observed` custody and the task-scoped,
+  archive-aware trace reader.
 - Promoted tasks carry their host-minted root id and role on the queue payload.
   RUNNING writes preserve the actual `_task_started_ts` as `started_at` and an existing
   `queued_at`; terminal `ts` stays its own field; missing historical start facts stay
@@ -1036,28 +1037,27 @@ and what enforces each.
   silent false green. Every forced rail closes a dangling `revision_requested` via
   `loop_acceptance.terminalize_dangling_revision` (ARCHITECTURE §6 "Task acceptance").
   `PASS|FAIL|DEGRADED` is NOT narrowable; `adaptive_quorum` applies, any contributing
-  FAIL fails, DEGRADED abstains, no quorum is a terminal HOST decision. Degraded review
-  or a best-effort objective never renders as green solved on any surface (the shared
-  phase projection: DEVELOPMENT §11 "Design System"; its host mirror: ARCHITECTURE §3
-  "Chat and Projects"). No task scope review; never reuse the commit gate.
-- The improvement loop is a reviewer-authored DIALOGUE: obligation identity is the
-  reviewer's typed `disposition_kind`/`obligation_id` (unknown re-raise id → `new`,
-  disclosed); a re-raise reopens the row without wiping the agent's argument; beyond a
-  clean PASS or accepted rebuttal only the reviewers' `dialogue_status` or a real rail
-  terminates under Blocking, and Advisory also allows an explicit post-feedback author
-  finish before another paid panel, a revised answer included. Critic and author hashes
-  stay separate; controlling intent binds through the delivery-evidence fingerprint and
-  is consumed on owner/evidence supersession. No semantic host counters or keyword
-  gates (P5); the vote reduction (material-only continue, abstaining invalid votes,
-  typed `inconclusive`) is ARCHITECTURE §6 "Task acceptance". Tests must cover
-  malformed reviewer output, unknown/stale re-raise ids, partial panel failure,
-  multi-slot disagreement, replay/restart durability of obligation rows, false
-  completion, and the default when new fields are absent.
-- An explicit `max_improvement_passes` binds under every legacy policy; otherwise the
-  shared `OUROBOROS_REVIEW_MAX_CYCLES` binds under EVERY policy (`improvement passes =
-  cycles − 1`, `ouroboros/review_cycles.py`); the retired
-  `OUROBOROS_ACCEPTANCE_MAX_IMPROVEMENT_PASSES` is migrated at settings load and never
-  binds at runtime.
+  FAIL fails and DEGRADED abstains in the critic aggregate. Apply qualified Advisory
+  author completion separately, never rewriting criticism or hiding independent failed
+  effects, unaccepted review or unfinished stops (DEVELOPMENT §11; ARCHITECTURE §3).
+  No task scope review or commit-gate reuse.
+- Keep reviewer DIALOGUE evidence: typed `disposition_kind`/`obligation_id` identifies
+  obligations; disclose unknown re-raise ids as `new`. Reopen rows with
+  arguments intact. A terminal critic vote cannot deny author reaction or choose its stop. Blocking may save corrections and stop; advancement needs fresh
+  reviewer authority. Advisory may explicitly finish revisions after exposed feedback
+  or disclosed unavailability without another panel. Keep critic/author hashes separate;
+  bind intent to delivery evidence; consume it on owner/evidence supersession.
+  Queueing is not exposure; predeclared finish cannot authorize unseen feedback;
+  `author_action=stop` grants neither completion nor permission. No semantic counters or
+  keyword gates (P5). ARCHITECTURE §6 owns material-only continue, invalid-vote abstention
+  and typed `inconclusive`. Test malformed output, unknown/stale ids, partial
+  failures, disagreement, obligation replay/restart, false completion and missing fields.
+- Explicit task-local `max_improvement_passes=p` retains p author responses and p+1 paid
+  ceiling under all policies, including 0/1/6. Otherwise
+  `OUROBOROS_REVIEW_MAX_CYCLES` limits paid panels, not author responses: last feedback
+  permits work within ordinary task time/budget/cancel/round rails. The reviewer admission
+  floor applies only to new critics. Keep settings-load migration of retired
+  `OUROBOROS_ACCEPTANCE_MAX_IMPROVEMENT_PASSES`; it never binds at runtime.
 - A `PATCH_DISPOSED` row names its disposer (`disposed_by_task_id`) because a
   non-owner may write it once the owner task is terminal; wait/cancel/answer stay
   owner-only. A terminal custody obligation is disclosed additively (objective warning

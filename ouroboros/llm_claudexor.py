@@ -335,7 +335,7 @@ def _request(target: dict, messages: list, tools: list | None, parameters: dict)
     # Claudexor payloads and tool schemas are opaque here and are never walked.
     prepared = scrub_native_custody(_MessageShapingMixin._normalize_system_message_placement(messages))
     for message in prepared:
-        for name in ("_context_capsule", "acceptance_observation", "_acceptance_observation",
+        for name in ("_context_capsule", "acceptance_observation", "_acceptance_observation", "review_feedback",
                      "reasoning", "reasoning_details", "reasoning_content", "response_id", "stop_reason"):
             message.pop(name, None)
         # A direct provider's refusal is assistant content, not routing metadata.
@@ -679,6 +679,7 @@ class _ModelInvocation:
         usage.update(provider="claudexor", resolved_model=self.target["usage_model"], cost=cost, cost_final=final,
                      cost_estimated=cost is not None and not final,
                      claudexor={"operation_id": self.operation_id, "model_role": self.role,
+                                "requested_profile": str((self.payload.get("account") or {}).get("profileId") or ""),
                                 "route": copy.deepcopy(route), "cost_evidence": copy.deepcopy(result.get("cost")),
                                 "outcome": result.get("outcome"), "problem": copy.deepcopy(result.get("problem")),
                                 "requested_options": requested_options, "applied_options": applied_options,
@@ -721,7 +722,6 @@ class _ModelInvocation:
                 else "incomplete"
             )
         return copy.deepcopy(message), usage
-
     async def offload(self, function, *args):
         """A cancelled caller leaves the current I/O thread owning its gateway."""
         with self.io_lock:
