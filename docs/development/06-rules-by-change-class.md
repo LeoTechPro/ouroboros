@@ -944,9 +944,9 @@ and what enforces each.
   child-action controls stay strict; owner-source acknowledgement and forced
   finalization retain their rules. Context-only mail wakes waits but does not block
   owner-source acknowledgement or imply an owner revision. Empty or recognizable malformed controls retain
-  the answer (`tests/test_acceptance_optional_control.py`). Running-panel delivery
+  the answer (`tests/test_acceptance_optional_control.py`). Delivery under ready or pending feedback
   buys no second panel and causes no capacity refusal
-  (`acceptance_settlement._deliver_under_running_panel`). Default: wait; blocking: wait
+  (`acceptance_settlement._deliver_under_running_panel`). While pending: default wait; blocking wait
   only; Cyber Pro: never wait; advisory: early finish needs explicit
   `"pending_review":"finish"` on delivery control. Keep the trace
   past exit (`remember_settlement_trace`). Late settlement: attach to the ended result,

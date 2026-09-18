@@ -246,8 +246,8 @@ def test_feedback_ready_before_parking_preserves_answer_protocol(tmp_path, monke
 
 @pytest.mark.parametrize("order,next_action", [
     (order, action) for order in ("ready", "pending")
-    for action in ("rewrite", "effect", "criterion", "nominate")
-] + [("ready", "held_effect")])  # Ready feedback releases admission before the rewrite.
+    for action in ("rewrite", "effect", "criterion", "nominate", "held_effect")
+])
 def test_return_order_preserves_feedback_identity_and_new_subjects(full_loop, monkeypatch, order, next_action):
     from tests.test_loop_acceptance_gate import _order_acceptance_feedback
     from tests.test_acceptance_async_loop import keep
@@ -255,7 +255,7 @@ def test_return_order_preserves_feedback_identity_and_new_subjects(full_loop, mo
     f = full_loop
     revised = ANSWER + " Budget: $12."
     _order_acceptance_feedback(f, monkeypatch, ANSWER, order)
-    if next_action == "held_effect":
+    if next_action == "held_effect" and order == "ready":
         begins = []
         def begin(**_kwargs):
             begins.append(True)
@@ -281,7 +281,10 @@ def test_return_order_preserves_feedback_identity_and_new_subjects(full_loop, mo
             if next_action == "nominate":
                 return {"content": "", "tool_calls": [call("task_acceptance_review", {"claim": revised}, "second")]}, 0.0
         if f.model_step == 3 and next_action == "held_effect":
-            assert "supervisor could not atomically close" in str(messages)
+            if order == "ready":
+                assert "supervisor could not atomically close" in str(messages)
+            else:
+                assert f.waits  # The real pending-panel wait held the rewritten answer.
             return {"content": "", "tool_calls": [call("write_file", {
                 "root": "task_drive", "path": "new-effect.txt", "content": "Additional evidence.",
             }, "held-effect")]}, 0.0
@@ -302,6 +305,9 @@ def test_return_order_preserves_feedback_identity_and_new_subjects(full_loop, mo
     assert result == revised
     assert len(f.review_sends) == (1 if next_action == "rewrite" else 2)
     assert f.review_requests[0].subject == ANSWER
+    if next_action in {"effect", "held_effect"}:
+        effect = f.ctx.drive_root / "task_drives" / f.run_args["task_id"] / "new-effect.txt"
+        assert effect.read_text(encoding="utf-8") == "Additional evidence."
     if next_action == "rewrite":
         decision = trace["acceptance_decision"]
         assert decision["reason"] == "previous_revision_accepted"

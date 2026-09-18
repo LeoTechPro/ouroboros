@@ -249,6 +249,7 @@ def _deliver_under_running_panel(ctx: Any, prior_run: Any) -> Optional[bool]:
         _end_acceptance_terminal, _finish_cyber_acceptance,
         _set_applied_host_acceptance_impact, acceptance_run_pending,
     )
+    from ouroboros.loop_delivery import delivery_subject_hash
     from ouroboros.loop_messages import owner_source_sha256
     from ouroboros.outcomes import ACCEPTANCE_ACCEPTED
 
@@ -264,11 +265,9 @@ def _deliver_under_running_panel(ctx: Any, prior_run: Any) -> Optional[bool]:
         if (not run or not run.get("feedback_delivered")
                 or run.get("superseded_reason") != "delivery_candidate_replaced"):
             return None
-        from ouroboros.loop_delivery import delivery_subject_hash
-
-        reviewed_text = (run.get("request") or {}).get("subject", "")
-        if run.get("subject_hash") != delivery_subject_hash(tools_ctx, ctx.llm_trace, reviewed_text):
-            return None  # A held rewrite may have acquired new material after supersession.
+    reviewed_text = (run.get("request") or {}).get("subject", "")
+    if run.get("subject_hash") != delivery_subject_hash(tools_ctx, ctx.llm_trace, reviewed_text):
+        return None  # A held rewrite may have acquired new material after supersession.
     if run.get("superseded_by_revision") and run.get("superseded_reason") != "delivery_candidate_replaced":
         return None  # The existing subject/effect owner already invalidated this feedback.
     # Older owner premises cannot authorize this delivery (owner rule 4=A).
