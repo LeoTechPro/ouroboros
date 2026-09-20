@@ -381,6 +381,14 @@ def _safe_archive_relative_path(value: str) -> bool:
     return bool(path.parts) and not path.is_absolute() and ".." not in path.parts and ":" not in path.parts[0]
 
 
+def _safe_zip_member_type(info: zipfile.ZipInfo) -> bool:
+    """Accept directories and regular files, including ZIPs without Unix type bits."""
+    file_type = stat.S_IFMT(info.external_attr >> 16)
+    if info.is_dir():
+        return file_type in (0, stat.S_IFDIR)
+    return file_type in (0, stat.S_IFREG)
+
+
 def _explicit_binary() -> tuple[str, str]:
     raw = str(os.environ.get("OUROBOROS_CLAUDEXOR_BIN", "") or "").strip()
     if not raw:
@@ -1120,7 +1128,7 @@ class ClaudexorRuntimeManager:
                     )
                 with zipfile.ZipFile(archive) as bundle:
                     info = bundle.getinfo(artifact.executable)
-                    if info.is_dir() or stat.S_ISLNK(info.external_attr >> 16):
+                    if info.is_dir() or not _safe_zip_member_type(info):
                         raise ClaudexorRuntimeError(
                             "runtime_node_archive_invalid", "Node executable is not a regular file"
                         )
@@ -1144,7 +1152,7 @@ class ClaudexorRuntimeManager:
                                     "Node archive has a duplicate or unsafe npm path",
                                 )
                             seen.add(name)
-                            if not npm_member.is_dir() and stat.S_ISLNK(npm_member.external_attr >> 16):
+                            if not _safe_zip_member_type(npm_member):
                                 raise ClaudexorRuntimeError(
                                     "runtime_node_archive_invalid",
                                     f"Node npm entry {name!r} is a link or special file",

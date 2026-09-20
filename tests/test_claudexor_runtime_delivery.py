@@ -632,17 +632,24 @@ def test_windows_node_archive_extracts_reviewed_npm(tmp_path):
     assert (npm_root / "bin" / "npm-cli.js").read_bytes() == b"npm"
 
 
-def test_windows_node_archive_rejects_npm_symlink(tmp_path):
+@pytest.mark.parametrize(
+    ("special_member", "file_type"),
+    (("node", stat.S_IFCHR), ("npm", stat.S_IFIFO), ("npm", stat.S_IFLNK)),
+)
+def test_windows_node_archive_rejects_special_members(tmp_path, special_member, file_type):
     distribution = f"node-v{NODE_VERSION}-win-x64"
     node_member = f"{distribution}/node.exe"
     npm_cli = f"{distribution}/node_modules/npm/bin/npm-cli.js"
     archive = tmp_path / "node.zip"
     with zipfile.ZipFile(archive, "w") as bundle:
-        bundle.writestr(node_member, b"node")
-        link = zipfile.ZipInfo(npm_cli)
-        link.create_system = 3
-        link.external_attr = (stat.S_IFLNK | 0o777) << 16
-        bundle.writestr(link, "../../../outside.js")
+        for name, payload in ((node_member, b"node"), (npm_cli, b"npm")):
+            if special_member == "node" and name == node_member or special_member == "npm" and name == npm_cli:
+                entry = zipfile.ZipInfo(name)
+                entry.create_system = 3
+                entry.external_attr = (file_type | 0o777) << 16
+                bundle.writestr(entry, payload)
+            else:
+                bundle.writestr(name, payload)
     artifact = runtime.NodeRuntimeArtifact(
         archive_url="https://node.example.test/node.zip",
         sha256=hashlib.sha256(archive.read_bytes()).hexdigest(),
