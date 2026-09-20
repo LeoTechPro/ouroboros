@@ -1,7 +1,10 @@
 """Appearance through real shell documents on the selected Playwright engine."""
 import json
+
 import pytest
-from tests.test_subscription_setup_browser import capture, subscription_ui as _subscription_ui
+
+from tests.test_subscription_setup_browser import capture
+from tests.test_subscription_setup_browser import subscription_ui as _subscription_ui
 
 subscription_ui = _subscription_ui  # re-exported pytest fixture (requested by name below)
 
@@ -79,7 +82,8 @@ def test_theme_choice_reload_and_main_surfaces(subscription_ui):
 
 
 def test_theme_onboarding_tristate(subscription_ui):
-    ui = subscription_ui; page = ui['page']
+    ui = subscription_ui
+    page = ui['page']
     # Enough space for the real Accounts content: smaller windows may scroll
     # legitimately. The regression is a forced viewport-sized shell PLUS control.
     page.set_viewport_size({'width': 1360, 'height': 1080})
@@ -106,7 +110,8 @@ def test_theme_onboarding_tristate(subscription_ui):
 
 
 def test_light_contrast_and_mounted_views_follow_the_theme(subscription_ui):
-    ui = subscription_ui; page = ui['page']
+    ui = subscription_ui
+    page = ui['page']
     page.goto(ui['url'])
     page.wait_for_selector('#chat-input')
     open_appearance(page).locator('[data-theme-choice="light"]').click()
@@ -188,7 +193,8 @@ WIDGET_CHART = """() => {
 def test_widget_chart_repaints_in_place_and_releases_its_theme_listener(subscription_ui):
     """A declarative Widgets chart through the real page: mount, data update,
     OS appearance switch while visible, dispose on leave, remount after a switch."""
-    ui = subscription_ui; page = ui['page']
+    ui = subscription_ui
+    page = ui['page']
     first, refreshed = [3, 5, 4], [6, 2, 7]
     series = {'data': first}
 
@@ -268,9 +274,77 @@ def test_widget_chart_repaints_in_place_and_releases_its_theme_listener(subscrip
     assert not [path for path, _ in ui['posts'] if path == '/api/settings']
 
 
+def test_module_widget_theme_retains_state_when_hidden_and_releases_on_stop(subscription_ui):
+    """A real module frame follows a pinned theme while retained off-page.
+
+    The child owns a counter and registers an onTheme disposer. The parent
+    must preserve that frame and state across navigation, then release the
+    theme listener when the owner stops the widget.
+    """
+    ui = subscription_ui
+    page = ui['page']
+    page.emulate_media(color_scheme='dark')
+    page.add_init_script("""(() => {
+        const add = EventTarget.prototype.addEventListener;
+        const remove = EventTarget.prototype.removeEventListener;
+        window.__moduleThemeAdds = 0; window.__moduleThemeRemoves = 0;
+        window.__moduleThemeListeners = new Set();
+        EventTarget.prototype.addEventListener = function(type, fn, options) {
+            if (type === 'ouro:theme-changed' && /widget_module\\.js/.test(new Error().stack || '')) {
+                window.__moduleThemeAdds++; window.__moduleThemeListeners.add(fn);
+            }
+            return add.call(this, type, fn, options);
+        };
+        EventTarget.prototype.removeEventListener = function(type, fn, options) {
+            if (type === 'ouro:theme-changed') {
+                window.__moduleThemeRemoves++; window.__moduleThemeListeners.delete(fn);
+            }
+            return remove.call(this, type, fn, options);
+        };
+    })()""")
+    source = """(() => {
+        const root = document.getElementById('root'); let count = 0; let off = () => {};
+        root.innerHTML = '<button id="b" type="button">add</button><span id="state"></span>';
+        const paint = theme => { document.documentElement.dataset.theme = theme; root.dataset.theme = theme; root.querySelector('#state').textContent = theme + ':' + count; };
+        off = OuroborosWidget.onTheme(paint);
+        root.querySelector('#b').onclick = () => { count++; paint(document.documentElement.dataset.theme); };
+        __ouroWidgetOnDispose(() => off());
+    })();"""
+    page.route('**/api/widgets', lambda r: r.fulfill(content_type='application/json', body=json.dumps({'ui_tabs': [{
+        'skill': 'theme_probe', 'tab_id': 'module', 'title': 'Theme probe',
+        'render': {'kind': 'module', 'entry': 'theme.js', 'height': 360, 'start': 'retain', 'appearance': 'host'},
+    }]})))
+    page.route('**/api/extensions/theme_probe/module/theme.js', lambda r: r.fulfill(content_type='text/javascript', body=source))
+    page.goto(ui['url'])
+    page.wait_for_selector('#chat-input')
+    page.locator('[data-nav-page="widgets"]').click()
+    page.wait_for_selector('#page-widgets.active')
+    card = page.locator('[data-widget-key="theme_probe:module"]')
+    card.wait_for(state='visible')
+    frame_node = card.locator('iframe').element_handle()
+    frame = frame_node.content_frame()
+    frame.locator('#state').wait_for()
+    assert frame.locator('#state').inner_text() == 'dark:0'
+    frame.locator('#b').click()
+    assert frame.locator('#state').inner_text() == 'dark:1'
+    assert page.evaluate('window.__moduleThemeListeners.size') == 1
+    page.evaluate("() => { document.querySelector('[data-widget-key=\\\"theme_probe:module\\\"] iframe').__themeProbe = true; }")
+    open_appearance(page).locator('[data-theme-choice="light"]').click()
+    page.wait_for_function("document.documentElement.dataset.theme === 'light'")
+    assert page.evaluate('window.__moduleThemeListeners.size') == 1
+    assert page.evaluate("() => document.querySelector('[data-widget-key=\\\"theme_probe:module\\\"] iframe').__themeProbe === true")
+    retained = card.locator('iframe').element_handle().content_frame()
+    assert retained.locator('#state').inner_text() == 'light:1'
+    page.locator('[data-nav-page="widgets"]').click()
+    page.wait_for_selector('#page-widgets.active')
+    card.locator('[data-widget-power]').click()
+    page.wait_for_function('window.__moduleThemeListeners.size === 0')
+
+
 def test_author_kit_native_scheme_is_opt_in(subscription_ui):
     """Loading the shared kit must not recolour unrelated native page controls."""
-    ui = subscription_ui; page = ui['page']
+    ui = subscription_ui
+    page = ui['page']
     css = page.request.get(ui['url'] + '/static/ui.css').text()
     page.set_content('<html><head><style>' + css + '</style></head><body>'
                      '<input id="outside"><div class="ouro-ui"><input id="inside"></div>'

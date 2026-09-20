@@ -7,6 +7,7 @@ import {
     classifyLiveFrame,
     createNotifier,
     decideNotification,
+    attentionStatusText,
     normalizeNotifyPrefs,
     notifyStatusText,
     readNotifyPrefs,
@@ -233,6 +234,13 @@ test('the status line states what this client can actually do', () => {
     assert.match(notifyStatusText({ storageAvailable: false }), /blocks storage/);
 });
 
+test('attention status distinguishes native desktop attention from browser support', () => {
+    assert.match(attentionStatusText({ nativeAttention: true }), /system sound/);
+    assert.match(attentionStatusText({ supported: true }), /Browser notifications/);
+    assert.match(attentionStatusText({ bridge: true }), /will be confirmed/);
+    assert.match(attentionStatusText(), /no native attention bridge/);
+});
+
 function notifierFixture({ permission = 'granted', prefs = { ...ON, task_done: true } } = {}) {
     const built = [];
     class FakeNotification {
@@ -277,6 +285,88 @@ test('a granted client gets one banner per logical event, tagged for collapse', 
     assert.equal(fx.notifier.handleFrame(frame, { kind: 'chat', isMain: true }), null);
     assert.equal(fx.built.length, 1);
     assert.equal(fx.toasts.length, 0);
+});
+
+test('desktop host attention is requested once without replacing banner delivery', () => {
+    let calls = 0;
+    const notifier = createNotifier({
+        storage: fakeStorage({ [NOTIFY_PREFS_KEY]: JSON.stringify(ON) }),
+        notificationCtor: undefined,
+        audioContextCtor: null,
+        showToast: () => {},
+        documentRef: fakeDocument(),
+        hostApi: { request_attention: () => { calls += 1; return { ok: true, status: 'native_sound' }; } },
+    });
+    const result = notifier.handleFrame(
+        { role: 'system', system_type: 'task_summary', task_id: 'native-1' },
+        { kind: 'chat', isMain: true },
+    );
+    assert.equal(result.surface, 'in_app');
+    assert.equal(calls, 1);
+    notifier.destroy();
+});
+
+test('banner owns sound, while silent in-app delivery still raises the window', () => {
+    let calls = 0;
+    class FakeNotification {
+        static permission = 'granted';
+        constructor() {}
+    }
+    const bannerNotifier = createNotifier({
+        storage: fakeStorage({ [NOTIFY_PREFS_KEY]: JSON.stringify(ON) }),
+        notificationCtor: FakeNotification,
+        audioContextCtor: null,
+        hostApi: { request_attention: () => { calls += 1; return { ok: true }; } },
+        documentRef: fakeDocument(),
+    });
+    assert.equal(bannerNotifier.handleFrame(
+        { role: 'system', system_type: 'task_summary', task_id: 'banner-1' },
+        { kind: 'chat', isMain: true },
+    ).surface, 'banner');
+    assert.equal(calls, 0, 'banner sound stays with the Notification API');
+    bannerNotifier.destroy();
+
+    let soundValue = null;
+    const silentNotifier = createNotifier({
+        storage: fakeStorage({ [NOTIFY_PREFS_KEY]: JSON.stringify({ ...ON, sound: false }) }),
+        notificationCtor: undefined,
+        audioContextCtor: null,
+        hostApi: { request_attention: (sound) => { soundValue = sound; return { ok: true }; } },
+        showToast: () => {},
+        documentRef: fakeDocument(),
+    });
+    assert.equal(silentNotifier.handleFrame(
+        { role: 'system', system_type: 'task_summary', task_id: 'silent-1' },
+        { kind: 'chat', isMain: true },
+    ).surface, 'in_app');
+    assert.equal(soundValue, false);
+    silentNotifier.destroy();
+});
+
+test('in-app fallback tone is used when native window attention cannot play sound', async () => {
+    let oscillators = 0;
+    class FakeAudioContext {
+        constructor() { this.currentTime = 0; this.destination = {}; }
+        resume() {}
+        close() {}
+        createOscillator() { oscillators += 1; return { connect() {}, start() {}, stop() {} }; }
+        createGain() { return { gain: { value: 0 }, connect() {} }; }
+    }
+    const notifier = createNotifier({
+        storage: fakeStorage({ [NOTIFY_PREFS_KEY]: JSON.stringify(ON) }),
+        notificationCtor: undefined,
+        audioContextCtor: FakeAudioContext,
+        hostApi: { request_attention: () => ({ ok: true, status: 'window_only', sound_played: false }) },
+        showToast: () => {},
+        documentRef: fakeDocument(),
+    });
+    notifier.handleFrame(
+        { role: 'system', system_type: 'task_summary', task_id: 'window-only' },
+        { kind: 'chat', isMain: true },
+    );
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(oscillators, 1);
+    notifier.destroy();
 });
 
 test('a banner click focuses the window and hands the target to navigation', () => {

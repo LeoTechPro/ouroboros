@@ -5,7 +5,7 @@ import { bridgeChunkBuffer, moduleBridgeScript, moduleResizeScript } from '../mo
 
 // Runs the child bootstrap against a fake `window`; `deliver` plays a
 // parent → child message, `posted` records child → parent messages.
-function bridgeHarness({ active = false, activationApi = true } = {}) {
+function bridgeHarness({ active = false, activationApi = true, initialTheme = '' } = {}) {
     const posted = [];
     const parent = { postMessage(message) { posted.push(message); } };
     const listeners = new Map();
@@ -24,7 +24,7 @@ function bridgeHarness({ active = false, activationApi = true } = {}) {
             if (listeners.get(type) === listener) listeners.delete(type);
         },
     };
-    Function('window', moduleBridgeScript('nonce-1'))(window);
+    Function('window', moduleBridgeScript('nonce-1', '', initialTheme))(window);
     const deliver = (data, source = parent) => listeners.get('message')?.({ source, data: { nonce: 'nonce-1', ...data } });
     const chunk = (id, phase, extra = {}) => deliver({ type: 'ouro-widget-fetch-chunk', id, phase, ...extra });
     const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
@@ -179,6 +179,109 @@ test('events subscribe on the first listener, deliver {type, data}, unsubscribe 
     deliver({ type: 'ouro-widget-event', event: 'tick', data: {} }, {});
     listeners.get('message')({ source: window.parent, data: { nonce: 'other', type: 'ouro-widget-event', event: 'tick', data: {} } });
     assert.equal(seen.length, 2);
+});
+
+test('theme is opt-in, starts from the injected resolved palette and follows live updates', () => {
+    const { window, posted, deliver } = bridgeHarness({ initialTheme: 'light' });
+    const seen = [];
+    const off = window.OuroborosWidget.onTheme((theme) => seen.push(theme));
+    assert.deepEqual(seen, ['light']);
+    assert.deepEqual(posted.at(-1), { type: 'ouro-widget-theme', nonce: 'nonce-1', op: 'subscribe' });
+    // The parent may answer the handshake with the same value; it must not
+    // repaint a host widget twice at mount.
+    deliver({ type: 'ouro-widget-theme', theme: 'light' });
+    assert.deepEqual(seen, ['light']);
+    deliver({ type: 'ouro-widget-theme', theme: 'system' });
+    deliver({ type: 'ouro-widget-theme', theme: 'dark' });
+    assert.deepEqual(seen, ['light', 'dark']);
+    off();
+    assert.deepEqual(posted.at(-1), { type: 'ouro-widget-theme', nonce: 'nonce-1', op: 'unsubscribe' });
+});
+
+test('theme callbacks reject foreign sources, invalid values and dispose cleanly', async () => {
+    const { window, listeners, deliver, posted, flush } = bridgeHarness({ initialTheme: 'dark' });
+    const seen = [];
+    window.OuroborosWidget.onTheme((theme) => seen.push(theme));
+    deliver({ type: 'ouro-widget-theme', theme: 'light' }, {});
+    listeners.get('message')({ source: window.parent, data: { nonce: 'wrong', type: 'ouro-widget-theme', theme: 'light' } });
+    deliver({ type: 'ouro-widget-theme', theme: 'system' });
+    assert.deepEqual(seen, ['dark']);
+    deliver({ type: 'ouro-widget-dispose' });
+    await flush();
+    deliver({ type: 'ouro-widget-theme', theme: 'light' });
+    assert.deepEqual(seen, ['dark']);
+    const count = posted.length;
+    const lateOff = window.OuroborosWidget.onTheme(() => {});
+    lateOff();
+    assert.equal(posted.length, count);
+});
+
+test('a reentrant first theme callback still subscribes the parent once', () => {
+    const { window, posted } = bridgeHarness({ initialTheme: 'dark' });
+    let nestedOff = () => {};
+    window.OuroborosWidget.onTheme(() => {
+        nestedOff = window.OuroborosWidget.onTheme(() => {});
+    });
+    assert.equal(posted.filter((message) => message.type === 'ouro-widget-theme' && message.op === 'subscribe').length, 1);
+    nestedOff();
+});
+
+test('a listener replaced during a live theme delivery never receives null', () => {
+    const { window, deliver } = bridgeHarness({ initialTheme: 'dark' });
+    const seen = [];
+    let off = () => {};
+    off = window.OuroborosWidget.onTheme((theme) => {
+        seen.push(['first', theme]);
+        if (theme === 'light') {
+            off();
+            window.OuroborosWidget.onTheme((next) => seen.push(['replacement', next]));
+        }
+    });
+    deliver({ type: 'ouro-widget-theme', theme: 'light' });
+    assert.deepEqual(seen, [['first', 'dark'], ['first', 'light']]);
+    deliver({ type: 'ouro-widget-theme', theme: 'light' });
+    assert.deepEqual(seen, [['first', 'dark'], ['first', 'light'], ['replacement', 'light']]);
+});
+
+test('unsubscribing a sibling during delivery suppresses its pending callback', () => {
+    const { window, deliver } = bridgeHarness({ initialTheme: 'dark' });
+    const seen = [];
+    let live = false;
+    let offSibling = () => {};
+    window.OuroborosWidget.onTheme(() => {
+        if (live) offSibling();
+        seen.push('first');
+    });
+    offSibling = window.OuroborosWidget.onTheme(() => seen.push('sibling'));
+    live = true;
+    deliver({ type: 'ouro-widget-theme', theme: 'light' });
+    assert.deepEqual(seen, ['first', 'sibling', 'first']);
+});
+
+test('re-registering the same sibling callback does not duplicate live delivery', () => {
+    const { window, deliver } = bridgeHarness({ initialTheme: 'dark' });
+    const seen = [];
+    let live = false;
+    let offSibling = () => {};
+    const sibling = (theme) => {
+        seen.push(['sibling', theme]);
+    };
+    window.OuroborosWidget.onTheme((theme) => {
+        seen.push(['first', theme]);
+        if (live && theme === 'light') {
+            offSibling();
+            offSibling = window.OuroborosWidget.onTheme(sibling);
+        }
+    });
+    offSibling = window.OuroborosWidget.onTheme(sibling);
+    live = true;
+    deliver({ type: 'ouro-widget-theme', theme: 'light' });
+    assert.deepEqual(seen, [
+        ['first', 'dark'],
+        ['sibling', 'dark'],
+        ['first', 'light'],
+        ['sibling', 'light'],
+    ]);
 });
 
 test('dispose awaits hooks (bridge live), acks, then fails pending work and unlistens', async () => {

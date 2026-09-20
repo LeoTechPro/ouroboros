@@ -210,7 +210,7 @@ const BRIDGE_ARTIFACTS_RE = /^\/api\/tasks\/[^/]+\/artifacts\//;
  * from the parent. A cross-origin parent (not our shell) throws and resolves
  * to null.
  */
-function shellBridgeApi(win) {
+export function shellBridgeApi(win) {
     try {
         const host = win.pywebview || (win.parent && win.parent !== win ? win.parent.pywebview : null);
         return host?.api || null;

@@ -893,8 +893,9 @@ inside its own module or route-iframe page, override them, or design a completel
 independent interface. `.ouro-ui` supplies font and native dark-control context;
 the named classes opt controls into the recipes, with no page-wide reset.
 The kit reads the installed source at a new mount; retained frames keep the styling
-they loaded. It introduces no theme polling, forced remount or mandatory visual
-conformance. Author layout, validation, operations and loading feedback remain
+they loaded. A module may opt into the existing `OuroborosWidget.onTheme` signal
+and apply its own `data-theme` rules, but the kit introduces no theme polling,
+forced remount or mandatory visual conformance. Author layout, validation, operations and loading feedback remain
 author-owned; the small source recipes are in `docs/examples/author_ui_kit/`.
 
 ---
@@ -962,8 +963,9 @@ task are one event, not two: whichever arrives first rings, and the other is
 collapsed. The same holds for the several wire shapes a finished task has.
 
 **One sound.** At most one sound per event. Where the system shows a banner, the
-system owns the sound; where delivery falls back into the application, the app
-plays one short tone. Never both.
+system owns the sound; where a desktop bridge is available, the launcher owns
+one system sound (or reports that it could not play one); otherwise the app
+plays one short tone. Never both, and the Sound choice remains authoritative.
 
 **Each open window is its own client.** Settings, permission and the
 duplicate-collapsing that keeps one event to one notification all belong to one
@@ -979,9 +981,13 @@ the conversation. No reply is composed from the banner.
 owner turns message text on, because a banner can appear on a shared screen.
 
 **Deliberately absent.** No numeric badge, no repeated reminder, no inline
-reply, no tray icon, no Telegram escalation, and in this version no native dock
-attention — the packaged launcher cannot gain a new bridge method before it is
-rebuilt, and the interface should not promise what the running build cannot do.
+reply, no tray icon, no Telegram escalation, and no promise of a native
+Notification Center/toast banner or attention after the application closes.
+When the packaged desktop launcher exposes its optional `request_attention`
+bridge, a live notification may raise that window and ask the operating system
+for one standard sound. This is a native attention cue, not proof that a
+system banner was delivered; unsupported or older launchers fall back to the
+browser banner or in-app toast and report that capability honestly.
 
 **Settings.** The controls live on **Settings → Appearance**, under the theme
 block, and are stored per client exactly like the appearance choice: the desktop

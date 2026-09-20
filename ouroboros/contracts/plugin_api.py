@@ -385,6 +385,12 @@ class PluginAPI(Protocol):
         module served only for a live tab and bridged to this skill's route prefix.
         Same-origin SPA modules are outside this contract.
 
+        A module may declare ``render.appearance`` as ``host``, ``independent`` or
+        ``fixed`` for author/reviewer intent. The declaration does not style the
+        frame or gate legacy payloads: a module that wants the resolved host
+        palette opts into ``OuroborosWidget.onTheme(callback)``. Declarative
+        widgets already inherit host appearance; route iframes have no bridge.
+
         ``render.start`` declares the card's launch policy: ``"auto"`` starts when
         the Widgets page is shown and stops when the owner leaves; ``"manual"``
         shows a Start button and leaving the page is an ordered Stop; ``"retain"``

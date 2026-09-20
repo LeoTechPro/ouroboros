@@ -16,19 +16,22 @@ export function bridgeChunkBuffer(view) {
 //                   ouro-widget-fetch-pull {id} · ouro-widget-download {id, name, source}
 //                   ouro-widget-open-external {id, url}
 //                   ouro-widget-events {op: subscribe | unsubscribe} · ouro-widget-disposed
+//                   ouro-widget-theme {op: subscribe | unsubscribe}
 //                   ouro-widget-error {kind: error | rejection | csp, message, source, line}
 //   parent → child  ouro-widget-fetch-chunk {id, phase: headers | data | end | error, …}
 //                   ouro-widget-open-external-result {id, result}
-//                   ouro-widget-event {event, data} · ouro-widget-dispose
+//                   ouro-widget-event {event, data} · ouro-widget-theme {theme: light | dark}
+//                   · ouro-widget-dispose
 // Every bridged fetch streams: the child rebuilds a real Response over a
 // ReadableStream fed by `data` frames (binary by default), so text/json/blob
 // and incremental body reads all work. No default timeout — `init.timeoutMs`
 // is the author's opt-in bound; `init.signal` aborts through the parent.
-export function moduleBridgeScript(nonce, routeBase = '') {
+export function moduleBridgeScript(nonce, routeBase = '', initialTheme = '') {
     return `
         (() => {
             const nonce = ${JSON.stringify(nonce)};
             const routeBase = ${JSON.stringify(routeBase)};
+            const initialTheme = ${JSON.stringify(initialTheme)};
             const safeExternalUrl = (${safeExternalUrl.toString()});
             let seq = 0;
             let disposing = false;
@@ -41,12 +44,35 @@ export function moduleBridgeScript(nonce, routeBase = '') {
             const originalOpen = window.open;
             const cleanup = new Set();
             const eventListeners = new Set();
+            const themeListeners = new Set();
+            let theme = ['light', 'dark'].includes(initialTheme) ? initialTheme : null;
+            let themeRefreshNeeded = false;
             const post = (message) => window.parent.postMessage({ ...message, nonce }, '*');
             const abortError = () => new DOMException('The operation was aborted.', 'AbortError');
             const onDispose = (fn) => {
                 if (typeof fn !== 'function') return;
                 if (disposing) { try { fn(); } catch {} return; }
                 cleanup.add(fn);
+            };
+            const notifyTheme = (callback) => {
+                try { callback(theme); } catch (error) { console.error('widget theme listener failed', error); }
+            };
+            const onTheme = (callback) => {
+                if (disposing || disposed || typeof callback !== 'function') return () => {};
+                const firstListener = themeListeners.size === 0;
+                const listener = { callback };
+                themeListeners.add(listener);
+                if (theme && !themeRefreshNeeded) notifyTheme(callback);
+                if (firstListener && themeListeners.size && !disposed) {
+                    post({ type: 'ouro-widget-theme', op: 'subscribe' });
+                }
+                return () => {
+                    if (!themeListeners.delete(listener)) return;
+                    if (!themeListeners.size && !disposed) {
+                        themeRefreshNeeded = true;
+                        post({ type: 'ouro-widget-theme', op: 'unsubscribe' });
+                    }
+                };
             };
             // Ordered dispose: every hook runs first (async hooks are awaited and
             // the bridge keeps streaming for them), then the parent gets the
@@ -74,6 +100,9 @@ export function moduleBridgeScript(nonce, routeBase = '') {
                 externalLinks.forEach(({ reject }) => reject(new Error('widget disposed')));
                 externalLinks.clear();
                 eventListeners.clear();
+                themeListeners.clear();
+                theme = null;
+                themeRefreshNeeded = false;
                 window.removeEventListener('message', onMessage);
                 window.removeEventListener('error', onError);
                 window.removeEventListener('unhandledrejection', onRejection);
@@ -89,6 +118,16 @@ export function moduleBridgeScript(nonce, routeBase = '') {
                 }
                 // The bridge answers during the hooks; frames are refused only once disposed.
                 if (disposed) return;
+                if (msg.type === 'ouro-widget-theme') {
+                    if (disposing || !themeListeners.size || !['light', 'dark'].includes(msg.theme)) return;
+                    if (msg.theme === theme && !themeRefreshNeeded) return;
+                    theme = msg.theme;
+                    themeRefreshNeeded = false;
+                    Array.from(themeListeners).forEach((listener) => {
+                        if (themeListeners.has(listener)) notifyTheme(listener.callback);
+                    });
+                    return;
+                }
                 if (msg.type === 'ouro-widget-event') {
                     const detail = { type: String(msg.event || ''), data: msg.data };
                     eventListeners.forEach((callback) => {
@@ -311,7 +350,7 @@ export function moduleBridgeScript(nonce, routeBase = '') {
             };
             window.document?.addEventListener('click', clickExternal);
             window.document?.addEventListener('click', clickDownload);
-            window.OuroborosWidget = { fetch: request, onEvent, download, openExternal: (url) => openExternal(url) };
+            window.OuroborosWidget = { fetch: request, onEvent, onTheme, download, openExternal: (url) => openExternal(url) };
         })();
     `;
 }

@@ -316,7 +316,7 @@ def test_register_ui_tab_promotes_bounded_frame_geometry(tmp_path):
         tmp_path,
         "frameui",
         "def register(api):\n"
-        "    api.register_ui_tab('quota', 'Quota', render={'kind': 'module', 'entry': 'widget.js', 'height': 640.4, 'max_height': 4096})\n",
+        "    api.register_ui_tab('quota', 'Quota', render={'kind': 'module', 'entry': 'widget.js', 'height': 640.4, 'max_height': 4096, 'appearance': ' host '})\n",
         permissions=["widget"],
     )
     err = extension_loader.load_extension(loaded, lambda: {}, drive_root=drive_root)
@@ -326,6 +326,7 @@ def test_register_ui_tab_promotes_bounded_frame_geometry(tmp_path):
     assert tab["max_height"] == 4096
     assert tab["render"]["height"] == 640
     assert tab["render"]["max_height"] == 4096
+    assert tab["render"]["appearance"] == "host"
     extension_loader.unload_extension("frameui")
 
 
@@ -395,6 +396,34 @@ def test_validate_ui_render_normalizes_module_entry_once():
     """The stored entry is the stripped filename, so the loader's capture key and
     the module URL the page builds from ``render.entry`` agree (A9/A11)."""
     assert validate_ui_render({"kind": "module", "entry": "  widget.js "})["entry"] == "widget.js"
+
+
+@pytest.mark.parametrize("appearance", ["host", "independent", "fixed"])
+def test_validate_ui_render_accepts_module_appearance_intent(appearance):
+    render = validate_ui_render({
+        "kind": "module", "entry": "widget.js", "appearance": f"  {appearance} ",
+    })
+    assert render["appearance"] == appearance
+
+
+def test_validate_ui_render_leaves_legacy_module_appearance_absent():
+    render = validate_ui_render({"kind": "module", "entry": "widget.js"})
+    assert "appearance" not in render
+
+
+@pytest.mark.parametrize("appearance", ["", "system", 1, False])
+def test_validate_ui_render_rejects_invalid_module_appearance(appearance):
+    with pytest.raises(ExtensionRegistrationError, match="appearance"):
+        validate_ui_render({"kind": "module", "entry": "widget.js", "appearance": appearance})
+
+
+@pytest.mark.parametrize("kind_render", [
+    {"kind": "declarative", "schema_version": 1, "components": [], "appearance": "host"},
+    {"kind": "iframe", "route": "view", "appearance": "host"},
+])
+def test_validate_ui_render_rejects_appearance_on_non_module(kind_render):
+    with pytest.raises(ExtensionRegistrationError, match="module widgets only"):
+        validate_ui_render(kind_render)
 
 
 _UI_TAB_REJECTION_CASES = [

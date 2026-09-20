@@ -38,8 +38,11 @@ Settings → Appearance controls the host document only. Module and route iframe
 have independent roots: CSS variables and `ouroboros.theme` do not propagate.
 The kit delivers a stylesheet snapshot, not the host's current choice; without
 an author-set `data-theme="light"` it uses that stylesheet's default palette.
-There is no theme message, poller or forced remount. Do not assume that fetching
-the kit again synchronizes appearance.
+Modules may opt into the host's resolved palette with
+`OuroborosWidget.onTheme(theme => { document.documentElement.dataset.theme = theme; })`.
+Keep the returned unsubscribe in the module disposer. The bridge delivers
+`light` or `dark` without applying styles or forcing a remount; route iframes
+have no bridge. Fetching the kit again alone does not synchronize appearance.
 
 Authors may set their own root's `data-theme`, track their document's media
 query, or keep a fixed palette. Native `Canvas`/`CanvasText` colours follow the

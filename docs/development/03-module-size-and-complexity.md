@@ -283,8 +283,12 @@ are client-local, carry no `s-` field and are excluded from the settings-dirty
 tracker, so they neither reach `/api/settings` nor offer to discard unsaved
 settings (`tests/test_notifications_static.py` asserts those causes, not only
 their effects). Delivery degrades rather than disappearing, and the status line
-says which surface this client has. Importance must not acquire a new host
-field, a text heuristic or a second model call.
+says which surface this client has. The optional desktop bridge is invoked at
+delivery time, feature-detected per call, and returns a capability fact rather
+than a banner/delivery claim; it may raise the existing window and request one
+system sound, but it must not add a scheduler, persistence or background
+process. Importance must not acquire a new host field, a text heuristic or a
+second model call.
 
 ### Invariant: UI resources carry a disposer
 

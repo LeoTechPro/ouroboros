@@ -9,6 +9,7 @@ import { apiFetch, extensionRoutePath, extensionRoutePrefix } from './api_client
 import { escapeHtmlAttr as escapeHtml } from './utils.js';
 import { bridgeChunkBuffer, moduleBridgeScript, moduleResizeScript } from './widget_frame.js';
 import { boundedNumber, WIDGET_DISPOSE_ACK_TIMEOUT_MS, WIDGET_REQUEST_TIMEOUT_MS } from './widget_job.js';
+import { onThemeChange } from './theme_palette.js';
 import { setWidgetCardFault } from './widget_card.js';
 import { downloadViaHostBridge, downloadBlobViaHostBridge, openExternalViaHostBridge } from './ui_helpers.js';
 
@@ -137,12 +138,20 @@ export async function mountModuleWidget(mount, tab, render, mountSignal = null, 
         .replace(/<!--/g, '<\\!--');
     const autoHeight = render.height === undefined || render.height === null;
     const maxHeight = frameMaxHeight(render);
-    const bridge = moduleBridgeScript(nonce, `${window.location.origin}${expectedPrefix}`);
+    const resolvedTheme = () => {
+        const candidate = window.ouroTheme?.theme || document.documentElement?.dataset?.theme;
+        return ['light', 'dark'].includes(candidate) ? candidate : 'dark';
+    };
+    const initialTheme = resolvedTheme();
+    const bridge = moduleBridgeScript(nonce, `${window.location.origin}${expectedPrefix}`, initialTheme);
     const resizeBridge = autoHeight
         ? moduleResizeScript(
             nonce, WIDGET_FRAME_DEFAULT_HEIGHT, maxHeight, WIDGET_FRAME_BORDER_RESERVE,
         )
         : '';
+    // The initial theme is carried inside the bridge bootstrap, not as a
+    // document attribute: a module must explicitly subscribe before it gets
+    // appearance data or changes its own palette.
     const srcdoc = `<!doctype html><html><head><meta http-equiv="Content-Security-Policy" content="${csp}"></head><body><div id="root"></div><script>${bridge}</script><script>${resizeBridge}</script><script>${escapeScript(moduleSource)}</script></body></html>`;
     // The document goes in through the `srcdoc` property (no attribute
     // escaping round-trip of a module-sized payload); the frame carries the
@@ -156,8 +165,26 @@ export async function mountModuleWidget(mount, tab, render, mountSignal = null, 
     let disposed = false;
     let disposing = null;
     let onDisposed = null;
+    let themeSubscribed = false;
+    let stopTheme = () => {};
     const post = (message, transfer = []) => {
         if (!disposed) iframe.contentWindow?.postMessage({ ...message, nonce }, '*', transfer);
+    };
+    const postTheme = () => {
+        const theme = resolvedTheme();
+        if (themeSubscribed) post({ type: 'ouro-widget-theme', theme });
+    };
+    const startTheme = () => {
+        if (!themeSubscribed) {
+            themeSubscribed = true;
+            stopTheme = onThemeChange(postTheme);
+        }
+        postTheme();
+    };
+    const stopThemeSubscription = () => {
+        themeSubscribed = false;
+        stopTheme();
+        stopTheme = () => {};
     };
     // The skill's namespaced WebSocket events — the same `ws_prefix` filter the
     // declarative `subscription` uses — forwarded only while the child subscribes.
@@ -301,6 +328,12 @@ export async function mountModuleWidget(mount, tab, render, mountSignal = null, 
             setWidgetCardFault(mount.closest('[data-widget-key]'), `${label}: ${detail || 'unknown'}`);
             return;
         }
+        if (msg.type === 'ouro-widget-theme') {
+            if (disposing) return;
+            if (msg.op === 'subscribe') startTheme();
+            else if (msg.op === 'unsubscribe') stopThemeSubscription();
+            return;
+        }
         if (msg.type === 'ouro-widget-events') {
             if (msg.op === 'subscribe') messageHandlers?.add(onWsMessage);
             else if (msg.op === 'unsubscribe') messageHandlers?.delete(onWsMessage);
@@ -338,6 +371,7 @@ export async function mountModuleWidget(mount, tab, render, mountSignal = null, 
                 if (disposed) return;
                 disposed = true;
                 clearTimeout(ackTimer);
+                stopThemeSubscription();
                 pendingRequests.forEach((controller) => controller.abort());
                 pendingRequests.clear();
                 messageHandlers?.delete(onWsMessage);

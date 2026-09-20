@@ -8,7 +8,7 @@ import pathlib
 import re
 from typing import Any, Dict
 
-from ouroboros.contracts.plugin_api import ExtensionRegistrationError, VALID_EXTENSION_ROUTE_METHODS
+from ouroboros.contracts.plugin_api import VALID_EXTENSION_ROUTE_METHODS, ExtensionRegistrationError
 from ouroboros.skill_loader import SkillPayloadUnreadable, _iter_payload_files
 
 _EXTENSION_SHORT_MAX = 24
@@ -36,6 +36,9 @@ WIDGET_FRAME_MAX_HEIGHT = 8192
 # enum; ``gateway/ui_preferences.py`` imports it for the owner's per-card override.
 WIDGET_START_MODES = ("auto", "manual", "retain")
 _START_MODE_DEFAULTS = {"module": "manual", "iframe": "manual", "declarative": "auto"}
+# Appearance is an author declaration for framed module surfaces.  Delivery is
+# still opt-in through OuroborosWidget.onTheme so legacy payloads remain live.
+WIDGET_APPEARANCE_MODES = ("host", "independent", "fixed")
 
 
 def _text(value: Any) -> str:
@@ -122,6 +125,24 @@ def _validate_start_mode(render: Dict[str, Any], *, kind: str) -> None:
             "a declarative widget is drawn by the host and has nothing to start"
         )
     render["start"] = mode
+
+
+def _validate_appearance(render: Dict[str, Any], *, kind: str) -> None:
+    """Validate the optional appearance declaration without changing legacy payloads."""
+    if "appearance" not in render:
+        return
+    raw = render.get("appearance")
+    appearance = raw.strip() if isinstance(raw, str) else raw
+    if kind != "module":
+        raise ExtensionRegistrationError(
+            "ui render appearance is supported for module widgets only"
+        )
+    if appearance not in WIDGET_APPEARANCE_MODES:
+        raise ExtensionRegistrationError(
+            f"ui render appearance {appearance!r} is unsupported; "
+            f"expected one of {list(WIDGET_APPEARANCE_MODES)}"
+        )
+    render["appearance"] = appearance
 
 
 def _validate_frame_geometry(render: Dict[str, Any], *, kind: str) -> None:
@@ -395,6 +416,7 @@ def validate_ui_render(render: Dict[str, Any]) -> Dict[str, Any]:
     if kind not in _UI_RENDER_KINDS:
         raise ExtensionRegistrationError(f"ui render kind {kind!r} is unsupported; expected one of {sorted(_UI_RENDER_KINDS - {''})}")
     _validate_start_mode(clean, kind=kind)
+    _validate_appearance(clean, kind=kind)
     if kind in {"iframe", "module"}:
         _validate_frame_geometry(clean, kind=kind)
     if kind == "iframe" and not _text(clean.get("route")):
@@ -484,6 +506,7 @@ def validate_settings_schema(schema: Dict[str, Any]) -> Dict[str, Any]:
 __all__ = [
     "WIDGET_FRAME_MAX_HEIGHT",
     "WIDGET_FRAME_MIN_HEIGHT",
+    "WIDGET_APPEARANCE_MODES",
     "WIDGET_START_MODES",
     "validate_runtime_ui_render",
     "read_module_sources",

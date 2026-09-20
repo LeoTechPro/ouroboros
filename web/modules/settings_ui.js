@@ -786,6 +786,7 @@ export function renderSettingsPage() {
                                 <button type="button" class="btn btn-default btn-sm" data-notify-test>Send a test notification</button>
                             </div>
                             <div class="settings-inline-note" data-notify-status role="status" aria-live="polite"></div>
+                            <div class="settings-inline-note" data-notify-attention-status role="status" aria-live="polite"></div>
                         </div>
                     </div>
                 </section>

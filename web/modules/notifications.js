@@ -31,6 +31,7 @@
 
 import { TERMINAL_TASK_STATUSES } from './chat_activity.js';
 import { getLogTaskGroupId } from './log_events.js';
+import { shellBridgeApi } from './ui_helpers.js';
 
 export const NOTIFY_PREFS_KEY = 'ouroboros.notifications';
 
@@ -300,6 +301,17 @@ export function notifyStatusText({ enabled, supported, permission, storageAvaila
     return 'System banners are enabled for this client.';
 }
 
+/** Explain the separate native-attention capability without calling it a banner. */
+export function attentionStatusText({ enabled = true, nativeAttention = false, supported = false, status = '', bridge = false } = {}) {
+    if (!enabled) return 'Notifications are off; no attention is requested from this system.';
+    if (status === 'window_only') return 'Desktop attention can raise this window, but its system sound is unavailable; the app tone is used when needed.';
+    if (status === 'unsupported' || status === 'unavailable') return 'Desktop attention is unavailable in this launcher; browser or in-app delivery remains available.';
+    if (status === 'native_sound' || nativeAttention) return 'Desktop attention is available; the launcher may raise this window and use the system sound.';
+    if (bridge) return 'This desktop client exposes an attention bridge; its sound capability will be confirmed on the next alert.';
+    if (supported) return 'Browser notifications are available; desktop attention depends on the client.';
+    return 'This client has no native attention bridge; alerts stay inside the app.';
+}
+
 /* ---------------------------------------------------------------- shell ---- */
 
 export function createNotifier({
@@ -310,6 +322,7 @@ export function createNotifier({
     onActivate = null,
     focusWindow = () => globalThis.focus?.(),
     documentRef = globalThis.document,
+    hostApi = null,
 } = {}) {
     let prefs = readNotifyPrefs(storage);
     let storageAvailable = true;
@@ -317,6 +330,8 @@ export function createNotifier({
     let audioCtx = null;
     let activate = onActivate;
     let toast = showToast;
+    let nativeAttention = false;
+    let attentionStatus = '';
     const seen = new Set();
     /* Task lineage as the WIRE states it. A finished child and a finished root
        share one log shape with no lineage field
@@ -397,7 +412,19 @@ export function createNotifier({
                 // Fall through to the in-app path below.
             }
         }
-        if (decision.sound) tone();
+        const api = hostApi || shellBridgeApi(globalThis);
+        const nativeCue = typeof api?.request_attention === 'function';
+        if (nativeCue) {
+            try {
+                void Promise.resolve(api.request_attention(Boolean(decision.sound))).then((result) => {
+                    if (destroyed) return;
+                    nativeAttention = Boolean(result?.ok);
+                    attentionStatus = String(result?.status || 'unavailable');
+                    if (decision.sound && result?.sound_played !== true) tone();
+                    syncSettings();
+                }).catch(() => { if (!destroyed && decision.sound) tone(); });
+            } catch { if (decision.sound) tone(); }
+        } else if (decision.sound) tone();
         const line = decision.body ? `${decision.title}: ${decision.body}` : decision.title;
         try {
             // The in-app surface must reach the source too, so the returned node
@@ -440,12 +467,24 @@ export function createNotifier({
             if (key !== 'enabled') input.disabled = !prefs.enabled;
         }
         for (const node of root.querySelectorAll('[data-notify-status]')) {
-            node.textContent = notifyStatusText({
+            const next = notifyStatusText({
                 enabled: prefs.enabled,
                 supported: supported(),
                 permission: permission(),
                 storageAvailable,
             });
+            if (node.textContent !== next) node.textContent = next;
+        }
+        for (const node of root.querySelectorAll('[data-notify-attention-status]')) {
+            const api = hostApi || shellBridgeApi(globalThis);
+            const next = attentionStatusText({
+                enabled: prefs.enabled,
+                nativeAttention,
+                supported: supported(),
+                status: attentionStatus,
+                bridge: typeof api?.request_attention === 'function',
+            });
+            if (node.textContent !== next) node.textContent = next;
         }
         for (const button of root.querySelectorAll('[data-notify-test]')) {
             button.disabled = !prefs.enabled;

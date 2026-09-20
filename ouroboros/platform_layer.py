@@ -10,6 +10,7 @@ import pathlib
 import platform
 import re
 import signal
+import shutil
 import subprocess
 import sys
 import threading
@@ -147,6 +148,55 @@ def bootstrap_process_path() -> list[str]:
     if added:
         os.environ["PATH"] = PATH_SEP.join([*added, *existing])
     return added
+
+
+def request_native_attention(
+    show_window: Optional[Callable[[], None]] = None, *, sound: bool = True,
+) -> dict[str, object]:
+    """Request one best-effort window/sound cue without claiming a banner."""
+    window_attention = ""
+    if show_window is not None:
+        try:
+            show_window()
+            window_attention = "launcher"
+        except Exception as exc:
+            log.debug("Native window attention failed: %s", exc)
+    if not sound:
+        if window_attention:
+            return {"ok": True, "status": "window_only", "sound_played": False,
+                    "window_attention": window_attention}
+        return {"ok": False, "status": "unsupported", "reason": "no_window_attention"}
+    try:
+        if IS_MACOS:
+            path = "/System/Library/Sounds/Glass.aiff"
+            if not pathlib.Path(path).is_file():
+                raise FileNotFoundError(path)
+            proc = subprocess.run(["/usr/bin/afplay", path], check=False,
+                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=2)
+            if proc.returncode:
+                raise RuntimeError(f"sound_exit_{proc.returncode}")
+        elif IS_WINDOWS:
+            import winsound
+            winsound.MessageBeep(winsound.MB_ICONASTERISK)
+        elif IS_LINUX and (command := shutil.which("canberra-gtk-play")):
+            proc = subprocess.run([command, "-i", "message-new-instant"], check=False,
+                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=2)
+            if proc.returncode:
+                raise RuntimeError(f"sound_exit_{proc.returncode}")
+        elif not window_attention:
+            return {"ok": False, "status": "unsupported", "reason": "no_system_attention_backend"}
+        else:
+            raise RuntimeError("no_system_sound_backend")
+        result: dict[str, object] = {"ok": True, "status": "native_sound", "sound_played": True}
+        if window_attention:
+            result["window_attention"] = window_attention
+        return result
+    except Exception as exc:
+        log.debug("Native attention sound failed: %s", exc)
+        if window_attention:
+            return {"ok": True, "status": "window_only", "sound_played": False,
+                    "window_attention": window_attention, "sound_reason": type(exc).__name__}
+        return {"ok": False, "status": "unavailable", "reason": type(exc).__name__}
 
 
 def scrub_repo_from_pythonpath(env: dict[str, str], repo_dir: "str | pathlib.Path | None") -> dict[str, str]:
