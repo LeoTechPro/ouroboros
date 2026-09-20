@@ -8,6 +8,7 @@ import json
 import os
 import pathlib
 import shutil
+import stat
 import subprocess
 import tarfile
 import zipfile
@@ -517,6 +518,7 @@ def test_cli_command_installs_exact_closure_and_managed_node_npm_tree(tmp_path, 
     assert node_metadata["schema_version"] == 2
     assert node_metadata["archive_npm_cli"] == npm_cli
     assert manager.ensure_cli_command() == command
+    assert len(fetches) == 1
 
 
 def test_windows_cli_command_installs_exact_closure_and_managed_node_npm_tree(tmp_path, monkeypatch):
@@ -575,7 +577,6 @@ def test_windows_cli_command_installs_exact_closure_and_managed_node_npm_tree(tm
     assert node_metadata["archive_npm_cli"] == npm_cli
     assert manager.ensure_cli_command() == command
     assert fetches == [pin.node_artifacts["win32-x64"].archive_url]
-    assert len(fetches) == 1
 
 
 def test_node_archive_rejects_npm_links(tmp_path, monkeypatch):
@@ -629,6 +630,34 @@ def test_windows_node_archive_extracts_reviewed_npm(tmp_path):
     )
     assert destination.read_bytes() == b"node"
     assert (npm_root / "bin" / "npm-cli.js").read_bytes() == b"npm"
+
+
+def test_windows_node_archive_rejects_npm_symlink(tmp_path):
+    distribution = f"node-v{NODE_VERSION}-win-x64"
+    node_member = f"{distribution}/node.exe"
+    npm_cli = f"{distribution}/node_modules/npm/bin/npm-cli.js"
+    archive = tmp_path / "node.zip"
+    with zipfile.ZipFile(archive, "w") as bundle:
+        bundle.writestr(node_member, b"node")
+        link = zipfile.ZipInfo(npm_cli)
+        link.create_system = 3
+        link.external_attr = (stat.S_IFLNK | 0o777) << 16
+        bundle.writestr(link, "../../../outside.js")
+    artifact = runtime.NodeRuntimeArtifact(
+        archive_url="https://node.example.test/node.zip",
+        sha256=hashlib.sha256(archive.read_bytes()).hexdigest(),
+        size_bytes=archive.stat().st_size,
+        executable=node_member,
+    )
+    destination = tmp_path / "out/node-standalone/node.exe"
+    destination.parent.mkdir(parents=True)
+    npm_root = runtime.ClaudexorRuntimeManager._managed_npm_cli(destination).parent.parent
+
+    with pytest.raises(runtime.ClaudexorRuntimeError) as excinfo:
+        runtime.ClaudexorRuntimeManager._extract_node_archive(
+            archive, artifact, destination, archive_npm_cli=npm_cli, npm_root=npm_root
+        )
+    assert excinfo.value.code == "runtime_node_archive_invalid"
 
 def test_windows_cli_toolchain_accepts_reviewed_node_artifact(tmp_path, monkeypatch):
     _data_plane(monkeypatch, tmp_path)
