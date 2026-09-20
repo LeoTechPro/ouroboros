@@ -10,11 +10,11 @@ import pathlib
 import shutil
 import subprocess
 import tarfile
+import zipfile
 
 import pytest
 
 from ouroboros import claudexor_runtime as runtime
-
 
 BUILD_SHA = "1" * 40
 OLD_BUILD_SHA = "2" * 40
@@ -517,10 +517,68 @@ def test_cli_command_installs_exact_closure_and_managed_node_npm_tree(tmp_path, 
     assert node_metadata["schema_version"] == 2
     assert node_metadata["archive_npm_cli"] == npm_cli
     assert manager.ensure_cli_command() == command
+
+
+def test_windows_cli_command_installs_exact_closure_and_managed_node_npm_tree(tmp_path, monkeypatch):
+    _data_plane(monkeypatch, tmp_path)
+    source_root = tmp_path / "bundle"
+    closure = _archive(
+        source_root / "claudexor-runtime" / "runtime.tar.gz",
+        entrypoint="claudexord.bundle.cjs",
+        cli_entrypoint="claudexor.bundle.cjs",
+    )
+    distribution = f"node-v{NODE_VERSION}-win-x64"
+    node_member = f"{distribution}/node.exe"
+    npm_cli = f"{distribution}/node_modules/npm/bin/npm-cli.js"
+    npm_package = f"{distribution}/node_modules/npm/package.json"
+    node_archive = tmp_path / f"{distribution}.zip"
+    with zipfile.ZipFile(node_archive, "w") as bundle:
+        bundle.writestr(node_member, b"node\n")
+        bundle.writestr(npm_cli, b"npm cli\n")
+        bundle.writestr(npm_package, b"{}\n")
+    pin = _pin(
+        closure,
+        node_artifacts=_node_artifacts(exact_key="win32-x64", exact_archive=node_archive),
+        entrypoint="claudexord.bundle.cjs",
+        cli_entrypoint="claudexor.bundle.cjs",
+    )
+
+    import ouroboros.platform_layer as platform
+
+    monkeypatch.setattr(platform, "bundled_resource_bases", lambda: [source_root])
+    monkeypatch.setattr(platform, "node_distribution_platform", lambda: "win32-x64")
+    monkeypatch.setattr(
+        platform, "embedded_node_candidates",
+        lambda base: [pathlib.Path(base) / "node-standalone" / "node.exe"],
+    )
+    monkeypatch.setattr(platform, "probe_node_version", lambda candidate: (
+        NODE_VERSION if pathlib.Path(candidate).is_file() else ""))
+    fetches = []
+
+    def fetch_fixture(artifact, destination):
+        fetches.append(artifact.archive_url)
+        pathlib.Path(destination).parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(node_archive, destination)
+        return runtime.verify_node_archive(destination, artifact)
+
+    monkeypatch.setattr(runtime, "fetch_node_archive", fetch_fixture)
+    manager = runtime.ClaudexorRuntimeManager(pin)
+    monkeypatch.setattr(manager, "_probe", lambda _command, _pin: NODE_VERSION)
+
+    command = manager.ensure_cli_command()
+    node_root = runtime.managed_node_dir(pin, "win32-x64") / "node-standalone"
+    assert command == [str(node_root / "node.exe"), str(runtime.managed_runtime_dir(pin) / "claudexor.bundle.cjs")]
+    assert (node_root / "node_modules/npm/bin/npm-cli.js").read_bytes() == b"npm cli\n"
+    assert (node_root / "node_modules/npm/package.json").read_bytes() == b"{}\n"
+    node_metadata = json.loads((node_root.parent / "managed-node.json").read_text())
+    assert node_metadata["schema_version"] == 2
+    assert node_metadata["archive_npm_cli"] == npm_cli
+    assert manager.ensure_cli_command() == command
+    assert fetches == [pin.node_artifacts["win32-x64"].archive_url]
     assert len(fetches) == 1
 
 
-def test_cli_toolchain_rejects_npm_links_and_windows_before_fetch(tmp_path, monkeypatch):
+def test_node_archive_rejects_npm_links(tmp_path, monkeypatch):
     distribution = f"node-v{NODE_VERSION}-linux-x64"
     node_member = f"{distribution}/bin/node"
     npm_cli = f"{distribution}/lib/node_modules/npm/bin/npm-cli.js"
@@ -549,19 +607,39 @@ def test_cli_toolchain_rejects_npm_links_and_windows_before_fetch(tmp_path, monk
         )
     assert excinfo.value.code == "runtime_node_archive_invalid"
 
+def test_windows_node_archive_extracts_reviewed_npm(tmp_path):
+    distribution = f"node-v{NODE_VERSION}-win-x64"
+    node_member = f"{distribution}/node.exe"
+    npm_cli = f"{distribution}/node_modules/npm/bin/npm-cli.js"
+    archive = tmp_path / "node.zip"
+    with zipfile.ZipFile(archive, "w") as bundle:
+        bundle.writestr(node_member, b"node")
+        bundle.writestr(npm_cli, b"npm")
+    artifact = runtime.NodeRuntimeArtifact(
+        archive_url="https://node.example.test/node.zip",
+        sha256=hashlib.sha256(archive.read_bytes()).hexdigest(),
+        size_bytes=archive.stat().st_size,
+        executable=node_member,
+    )
+    destination = tmp_path / "out/node-standalone/node.exe"
+    destination.parent.mkdir(parents=True)
+    npm_root = runtime.ClaudexorRuntimeManager._managed_npm_cli(destination).parent.parent
+    runtime.ClaudexorRuntimeManager._extract_node_archive(
+        archive, artifact, destination, archive_npm_cli=npm_cli, npm_root=npm_root
+    )
+    assert destination.read_bytes() == b"node"
+    assert (npm_root / "bin" / "npm-cli.js").read_bytes() == b"npm"
+
+def test_windows_cli_toolchain_accepts_reviewed_node_artifact(tmp_path, monkeypatch):
     _data_plane(monkeypatch, tmp_path)
     closure = _archive(tmp_path / "runtime.tar.gz", cli_entrypoint="claudexor.bundle.cjs")
     pin = _pin(closure, cli_entrypoint="claudexor.bundle.cjs")
     import ouroboros.platform_layer as platform
+
     monkeypatch.setattr(platform, "node_distribution_platform", lambda: "win32-x64")
-    monkeypatch.setattr(runtime, "fetch_node_archive", lambda *_a, **_kw: (
-        pytest.fail("Windows local CLI must refuse before fetching a toolchain")))
-    monkeypatch.setattr(runtime, "fetch_runtime_archive", lambda *_a, **_kw: (
-        pytest.fail("Windows local CLI must refuse before fetching a closure")))
-    with pytest.raises(runtime.ClaudexorRuntimeError) as excinfo:
-        runtime.ClaudexorRuntimeManager(pin).ensure_cli_command()
-    assert excinfo.value.code == "runtime_cli_platform_unsupported"
-    assert not runtime.managed_runtime_root().exists()
+    key, selected = runtime.ClaudexorRuntimeManager(pin)._cli_node_artifact(pin)
+    assert key == "win32-x64"
+    assert selected == pin.node_artifacts["win32-x64"]
 
 
 def test_managed_pin_never_falls_back_to_random_path_binary(tmp_path, monkeypatch):
