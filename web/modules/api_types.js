@@ -448,6 +448,7 @@
  * @property {string=} target_label
  * @property {string=} project_id
  * @property {string=} project_name
+ * @property {string=} completion_answer  // a Project root's model-authored final answer, mirrored into Main
  * @property {number=} chat_id
  * @property {boolean=} project_thread  // server-stamped: chat_id is a reserved Project thread; Main never adopts it even before projectChatIds learns the project
  */

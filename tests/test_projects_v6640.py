@@ -495,8 +495,10 @@ def test_project_activity_stays_out_of_main_static_contract():
     assert "appendTaskSummaryToLiveCard(msg" in history
     assert "PROJECT_ROW_TYPES.has(msg.system_type)" in history
     assert "incrementUnreadIfNeeded" not in history
-    assert "name: projectName || 'Project'" in chat
-    assert "name: projectName || projectId" not in chat
+    # The lifecycle row's action lives in its own module since the completion mirror.
+    project_answer = (root / "web" / "modules" / "project_answer.js").read_text(encoding="utf-8")
+    assert "name: projectName || 'Project'" in project_answer
+    assert "name: projectName || projectId" not in chat + project_answer
 
 
 def test_project_lifecycle_rows_render_design_system_action_static_contract():
@@ -517,10 +519,10 @@ def test_project_lifecycle_rows_render_design_system_action_static_contract():
         "const PROJECT_ROW_TYPES = new Set(['project_started', 'project_completion_summary']);"
         in chat
     )
-    render = chat[
-        chat.index("if (PROJECT_ROW_TYPES.has(systemType) && projectId) {"):
-        chat.index("function updateMessageAnnotation")
-    ]
+    # chat.js only delegates; the shared action composition is used by the
+    # lifecycle-row module (the System action and the mirror's Project chip alike).
+    assert "if (PROJECT_ROW_TYPES.has(systemType)) decorateProjectRow(bubble, { role, projectId, projectName });" in chat
+    render = (root / "web" / "modules" / "project_answer.js").read_text(encoding="utf-8")
     assert "createSystemMessageAction({" in render
     assert "createSystemMessageActions(" in render
     assert "row.className = 'system-message-actions'" in helpers

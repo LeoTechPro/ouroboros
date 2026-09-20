@@ -334,6 +334,24 @@ body.resizing-panels { user-select: none; }
 .chat-quiz-project .chat-live-project-status { margin-inline-start: 0; color: var(--project); font-size: var(--type-meta); }
 /* === design-system:migrated-end === */
 
+/* === design-system:migrated-begin (chat: Project completion mirror) === */
+/* A Project root's final answer in Main is an ordinary Ouroboros message (docs/DESIGN.md
+   "Project completion mirror"): folded when it is long, with the Project chip under it. The
+   clamp is unconditional CSS over the complete text (never a cut, the text stays selectable);
+   `is-folded` adds the fade only when the fold really hides something. */
+.chat-bubble.project-answer {
+    --project-answer-fold: calc(var(--type-section) * var(--line-body) * 7);
+}
+.chat-bubble.project-answer > .message { max-height: var(--project-answer-fold); overflow: hidden; }
+.chat-bubble.project-answer.is-folded > .message {
+    -webkit-mask-image: linear-gradient(180deg, black 60%, transparent 100%);
+    mask-image: linear-gradient(180deg, black 60%, transparent 100%);
+}
+.chat-bubble.project-answer > .message > :first-child { margin-top: 0; }
+.chat-bubble.project-answer > .system-message-actions { align-items: center; padding-block: var(--space-2) var(--space-1); }
+.chat-bubble.project-answer .chat-quiz-project { margin-inline-end: 0; max-width: min(100%, 44ch); }
+/* === design-system:migrated-end === */
+
 
 /* A block that exists only for open attention (a model wait, a pending or
    host-offered Stop) or a bare non-Done ending carries no title placeholder

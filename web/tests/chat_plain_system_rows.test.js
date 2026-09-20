@@ -285,6 +285,117 @@ test('plain project row renders escaped text with Open Project and no markdown m
     }
 });
 
+// Project completion mirror (docs/DESIGN.md): a Project root that ended with
+// Ouroboros's own final answer reaches Main as an ORDINARY Ouroboros message —
+// the answer through the chat markdown path, folded by CSS, with the Project
+// chip under it. The wire row is still role="system"; the typed key decides.
+const MIRROR_ROW = {
+    ...PLAIN_ROW,
+    completion_answer: '**Done: PR #7 merged.**\n\nSecond paragraph.',
+};
+
+test('a completion row carrying the answer renders as an ordinary Ouroboros message with the Project chip', async () => {
+    const { prior, mount } = installDom();
+    let instance;
+    try {
+        const made = makeInstance(mount);
+        instance = made.instance;
+        made.handlers.get('chat')(MIRROR_ROW);
+        assert.equal(findBubble('system'), undefined, 'no yellow System bubble for an answered ending');
+        const bubble = findBubble('assistant');
+        assert.ok(bubble, 'the answer is an assistant bubble');
+        assert.ok(bubble.classList.contains('project-answer'));
+        assert.equal(bubble.dataset.systemType, 'project_completion_summary');
+        assert.match(bubble.innerHTML, /<div class="sender">Ouroboros<\/div>/);
+        // His words, through the markdown path — and none of the host's pointer text.
+        assert.match(bubble.innerHTML, /Done: PR #7 merged\./);
+        assert.doesNotMatch(bubble.innerHTML, /Open the Project for details|Completed/);
+        const message = bubble.querySelector('.message');
+        const actions = bubble.children.find((node) => node.classList.contains('system-message-actions'));
+        assert.equal(bubble.children.indexOf(actions), bubble.children.indexOf(message) + 1);
+        // One control: the Project chip names the Project and opens it; no second button.
+        assert.equal(actions.children.length, 1);
+        const chip = actions.children[0];
+        assert.ok(chip.classList.contains('chat-quiz-project'));
+        // The stub DOM does not aggregate descendant text, so read the chip's own parts.
+        const chipText = chip.children.map((node) => node.textContent).join('');
+        assert.match(chipText, /Launch/);
+        assert.doesNotMatch(chipText, /Open Project/);
+        // The stub DOM has no event loop: run the chip's own click listener and
+        // capture what it hands to the window.
+        let opened = null;
+        const priorDispatch = globalThis.window.dispatchEvent;
+        const priorCustomEvent = globalThis.CustomEvent;
+        globalThis.CustomEvent = class { constructor(type, init) { this.type = type; this.detail = init?.detail; } };
+        globalThis.window.dispatchEvent = (event) => { opened = { type: event.type, detail: event.detail }; };
+        try {
+            [].concat(chip.listeners.get('click') || []).forEach((fn) => fn({}));
+        } finally {
+            globalThis.window.dispatchEvent = priorDispatch;
+            globalThis.CustomEvent = priorCustomEvent;
+        }
+        assert.deepEqual(opened, { type: 'ouro:open-project', detail: { project: { id: 'launch', name: 'Launch' } } });
+    } finally {
+        instance?.destroy();
+        restoreDom(prior);
+    }
+});
+
+test('the mirrored answer replays from history exactly as it arrived live', async () => {
+    // The dominant path: Main hydrates from /api/chat/history, where the row is still
+    // role="system" and carries the typed key.
+    let liveHtml = '';
+    {
+        const { prior, mount } = installDom();
+        let instance;
+        try {
+            const made = makeInstance(mount);
+            instance = made.instance;
+            made.handlers.get('chat')(MIRROR_ROW);
+            liveHtml = findBubble('assistant').innerHTML;
+        } finally {
+            instance?.destroy();
+            restoreDom(prior);
+        }
+    }
+    const historyRow = {
+        text: MIRROR_ROW.content, role: 'system', ts: MIRROR_ROW.ts, is_progress: false,
+        system_type: MIRROR_ROW.system_type, markdown: false,
+        project_id: MIRROR_ROW.project_id, project_name: MIRROR_ROW.project_name,
+        completion_answer: MIRROR_ROW.completion_answer,
+    };
+    const { prior, mount } = installDom(async (url) => {
+        if (String(url).startsWith('/api/chat/history')) {
+            return { ok: true, json: async () => ({ messages: [historyRow] }) };
+        }
+        return { ok: true, json: async () => ({ active_direct_turns: [] }) };
+    });
+    let instance;
+    try {
+        ({ instance } = makeInstance(mount));
+        await settle();
+        await settle();
+        assert.equal(findBubble('system'), undefined, 'history never falls back to the pointer when the key is present');
+        const bubble = findBubble('assistant');
+        assert.ok(bubble, 'history replay rendered the mirrored answer');
+        assert.ok(bubble.classList.contains('project-answer'));
+        assert.equal(bubble.innerHTML, liveHtml, 'live DOM and reload DOM are byte-identical for the mirror');
+    } finally {
+        instance?.destroy();
+        restoreDom(prior);
+    }
+});
+
+test('the fold is CSS over the complete answer: clamp always, fade only when folded, tokens only', () => {
+    const block = styleSource.slice(styleSource.indexOf('(chat: Project completion mirror)'));
+    const rules = block.slice(0, block.indexOf('design-system:migrated-end'));
+    assert.match(rules, /\.chat-bubble\.project-answer > \.message \{ max-height: var\(--project-answer-fold\); overflow: hidden; \}/);
+    assert.match(rules, /\.chat-bubble\.project-answer\.is-folded > \.message \{[^}]*mask-image/);
+    assert.doesNotMatch(rules, /user-select|font-size: \d|#[0-9a-fA-F]{3,6}\b/);
+    // chat.js stays a caller: the decoration lives in its own module.
+    assert.match(chatSource, /decorateProjectRow\(bubble, \{ role, projectId, projectName \}\)/);
+});
+
 test('plain system row renders identically live and after history reload', async () => {
     // Live pass.
     let liveHtml = '';

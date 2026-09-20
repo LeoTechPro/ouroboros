@@ -1323,7 +1323,7 @@ def log_chat(
             if key in meta:
                 record[key] = meta[key]
         if record_type in ("project_started", "project_completion_summary"):
-            for key in ("project_id", "project_name", "target_label", "status"):
+            for key in ("project_id", "project_name", "target_label", "status", "completion_answer"):
                 if key in meta:
                     record[key] = meta[key]
         if "task_terminal_status" in meta:

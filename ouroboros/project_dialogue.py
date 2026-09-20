@@ -1369,7 +1369,7 @@ def enqueue_project_completion_summary(
     ):
         return False
     try:
-        from ouroboros.projects_registry import task_presentation_snapshot
+        from ouroboros.projects_registry import mirrored_answer, task_presentation_snapshot
         from ouroboros.task_results import resolve_task_lineage
         from ouroboros.task_status import SETTLED_STATUSES
         from supervisor.terminal_delivery import enqueue_terminal_delivery
@@ -1402,11 +1402,11 @@ def enqueue_project_completion_summary(
             # Offering "Open the Project" would reproduce the reported defect —
             # a Main row leading into an empty room.
             return False
-        # Only the salvage excerpt survives here: a cut of the model's own
-        # answer repeats bytes the Project already holds, while salvaged bytes
-        # exist nowhere else. This writer's only pointer is the invitation, so
-        # a salvage may never displace it — preserved bytes named with no way
-        # to reach them are worse than the plain invitation.
+        # Only the salvage excerpt survives in the TEXT: the model's own answer is
+        # never cut into it (it rides whole in the typed key below, or not at all),
+        # while salvaged bytes exist nowhere else. The text's only pointer is the
+        # invitation, so a salvage may never displace it — preserved bytes named
+        # with no way to reach them are worse than the plain invitation.
         excerpt = _completion_excerpt(result, chat_id=1, salvage_only=True)
         verdict = _completion_verdict(result, task_done_event)
         lead = f"{verdict} " if verdict else ""
@@ -1423,6 +1423,7 @@ def enqueue_project_completion_summary(
                 "project_id": snapshot["project_id"],
                 "project_name": snapshot["project_name"],
                 "target_label": snapshot["target_label"], "status": status,
+                **mirrored_answer(result, outcome_phase(result, task_done_event)),
             },
         }
         return bool(enqueue_terminal_delivery(drive_root, event))

@@ -25,7 +25,10 @@ CHAPTER_BYTE_BUDGETS: dict[str, int] = {
     # Raised for the chat-authorship paragraph in "Main rows and host-stamped
     # card rows": the previous raise consumed its own headroom, and the new
     # description replaces nothing (System voice is a fact the chapter lacked).
-    "docs/architecture/03-web-ui-pages-and-buttons.md": 100300,
+    # 100300 -> 100900: the Project completion mirror adds a typed key and a
+    # second rendering to "Main rows"; the stale sentence is replaced, and the
+    # new mechanism (gate, ordinary-message path, decorator) has no older text to displace.
+    "docs/architecture/03-web-ui-pages-and-buttons.md": 100900,
     "docs/architecture/04-server-api-endpoints.md": 26833,
     "docs/architecture/05-supervisor-loop.md": 27137,
     "docs/architecture/06-agent-core.md": 286850,
@@ -49,7 +52,9 @@ CHAPTER_BYTE_BUDGETS: dict[str, int] = {
     "docs/development/08-mutation-attribution-rule.md": 2899,
     "docs/development/09-process-custody-rule.md": 10028,
     "docs/development/10-platform-abstraction-rule.md": 3316,
-    "docs/development/11-design-system.md": 27103,
+    # 27103 -> 27600: one bullet for the Project completion mirror (the engineering
+    # twin of the DESIGN paragraph); it describes a new seam, so it replaces nothing.
+    "docs/development/11-design-system.md": 27600,
     "docs/development/12-mcp-client-integration.md": 3313,
     "docs/development/13-gateway-boundary-pattern.md": 2228,
     "docs/development/14-build-and-ci.md": 14958,

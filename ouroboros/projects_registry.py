@@ -841,6 +841,31 @@ def task_presentation_snapshot(drive_root: Any, task_id: str, *, task: Any = Non
             "target_label": label}
 
 
+# A Project root's final answer rides Main's completion row so Main can show it as
+# an ordinary Ouroboros message (DESIGN "Project completion mirror"). Above this
+# size the row stays a pointer: nothing is ever cut host-side (BIBLE P1).
+MIRRORED_ANSWER_MAX_CHARS = 32000
+_TERMINAL_MIRROR_PHASES = frozenset({"done", "warn", "error", "cancelled"})
+
+
+def mirrored_answer(result: Any, phase: str) -> Dict[str, str]:
+    """The typed key Main's completion row carries, or nothing.
+
+    Present only for a MODEL-AUTHORED final answer of a settled task: host
+    salvage and host notices are not Ouroboros's words, and a row sent while the
+    task still reads ``working`` is frozen by the outbox and must stay a pointer.
+    """
+    from ouroboros.task_finalization import TERMINAL_ORIGIN_MODEL_FINAL
+
+    row = result if isinstance(result, dict) else {}
+    answer = row["result"].strip() if isinstance(row.get("result"), str) else ""
+    if (str(row.get("terminal_origin") or "") != TERMINAL_ORIGIN_MODEL_FINAL
+            or str(phase or "") not in _TERMINAL_MIRROR_PHASES
+            or not answer or len(answer) > MIRRORED_ANSWER_MAX_CHARS):
+        return {}
+    return {"completion_answer": answer}
+
+
 def create_project(
     drive_root: Any,
     project_id: str,

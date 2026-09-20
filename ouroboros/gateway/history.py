@@ -828,7 +828,7 @@ def _collect_chat_rows(
                 # before the producer stripped markdown; a no-op on new rows.
                 # The durable chat.jsonl is never rewritten.
                 rec["text"] = strip_markdown(rec["text"])
-                for key in ("project_id", "project_name", "target_label", "status"):
+                for key in ("project_id", "project_name", "target_label", "status", "completion_answer"):
                     if key in entry:
                         rec[key] = str(entry.get(key) or "")
             annotation = _user_annotation(role, rec["client_message_id"], chat_annotations)

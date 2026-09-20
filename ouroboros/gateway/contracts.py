@@ -250,6 +250,7 @@ class ChatOutbound(TypedDict):
     target_label: NotRequired[str]
     project_id: NotRequired[str]
     project_name: NotRequired[str]
+    completion_answer: NotRequired[str]  # a Project root's model-authored final answer, mirrored into Main (DESIGN)
     # Present on some transport re-broadcast paths.
     chat_id: NotRequired[int]
     # Server-stamped when chat_id is a reserved Project thread: Main never
