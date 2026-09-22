@@ -35,23 +35,262 @@ def resolve_minimax_base_url(region: str = "") -> str:
 DEEPSEEK_BASE_URL = "https://api.deepseek.com/v1"
 
 # DeepSeek's Chat Completions ``reasoning_effort`` enum is low/high/max
-# (medium/xhigh are documented aliases of high) and thinking is switched off by
-# ``thinking.type=disabled``, not by an effort value. This is the wire dialect
-# of one provider, projected at the physical-send boundary; the canonical
-# Ouroboros effort scale stays the SSOT everywhere else. Not a model or pricing
-# table and never an admission gate.
-DEEPSEEK_REASONING_EFFORT_ALIASES = {
-    "minimal": "low",
-    "medium": "high",
-    "xhigh": "high",
-    "ultra": "max",
-}
+# (medium/xhigh are documented aliases of high; ultra aliases max) and thinking
+# is switched off by ``thinking.type=disabled``, not by an effort value. This
+# is the wire dialect of one provider, projected at the physical-send boundary;
+# the canonical Ouroboros effort scale stays the SSOT everywhere else. The
+# mapping lives in EFFORT_ROUTE_ALIASES_LMH below (the ONE shared
+# low/high/max-dialect table: DeepSeek's row and the GLM-family z.ai row of
+# EFFORT_ROUTE_DESCRIPTOR both read it); this name is the historical import.
 
 
 def normalize_deepseek_reasoning_effort(value: str) -> str:
     """Project one canonical effort tier onto DeepSeek's Chat wire enum."""
     normalized = str(value or "").strip().lower()
     return DEEPSEEK_REASONING_EFFORT_ALIASES.get(normalized, normalized)
+
+
+# --- Reasoning-effort route descriptor (SSOT for effort carriage) ---------------
+# One structural table answers, per registered provider route: WHERE the effort
+# tier rides on the wire (the carrier), WHICH provider tier values the route
+# accepts, HOW a canonical Ouroboros tier projects onto those values, and WHAT
+# an ABSENT parameter means on that route. Before this table each builder
+# hard-coded its own branch (openai carries, deepseek projects, everything else
+# silently drops), so a tier requested against a no-carrier route vanished with
+# no record — the failure class this descriptor makes structurally impossible.
+#
+# Measurement discipline (deliberately conservative):
+#   * deepseek / GLM-family low-high-max dialects: measured enums.
+#   * openai / anthropic / openrouter / claudexor: measured wire contracts.
+#   * cloudru / minimax / gigachat / generic openai-compatible / local: NOT
+#     measured for effort carriage → carrier "none" with an honest absent_meaning.
+#     "zai", "qwen" (DashScope) and "kimi" (Moonshot) are NOT registered routes
+#     in this baseline (PR #1194 closed unmerged); per the DO-NOT rule their
+#     carriers are declared "none" — no analogy to GLM without a key/measurement.
+#     When a measured route lands, it becomes one table row, not a builder edit.
+#
+# Fields per route:
+#   carrier: "reasoning_effort" | "extra_body.reasoning" | "anthropic.adaptive"
+#            | "reasoningEffort" | "none"
+#   tiers:   the provider-side enum values the route accepts (labels for UI);
+#            empty when carrier is "none".
+#   project: canonical tier -> provider tier. Identity rows are implicit; only
+#            re-mapping rows are stored. Absent canonical tier → identity.
+#   absent_meaning (REQUIRED even for carrier "none"): what the route does when
+#            the parameter is not sent — "max" (provider silently reasons at its
+#            top tier: z.ai's behavior, a real cost trap), "provider_default"
+#            (the provider's own default applies), or "off" (no reasoning
+#            parameter exists; sending one is an error).
+#   forced_tool_suppression: whether the route requires thinking disabled when a
+#            forced tool_choice is used (DeepSeek: thinking accepts only
+#            auto/none tool_choice, so a forced call ships thinking disabled —
+#            reason "provider_forced_tool_choice" on the clamp disclosure).
+#            Do NOT copy this exception to GLM-family routes: measured
+#            tool_choice required/named work WITH thinking on glm-5.3.
+EFFORT_ROUTE_ALIASES_LMH = {
+    # Shared alias projection for the low/high/max wire dialects (DeepSeek and
+    # the measured GLM-family z.ai route — Egor's measurement 2026-09-21):
+    # none/minimal/low→low, medium/high→high, xhigh/ultra→max. ONE mapping;
+    # DeepSeek's normalize helper reads the same table. (``none`` on DeepSeek
+    # is intercepted by the builder as the thinking-disable toggle BEFORE this
+    # projection — see forced_tool_suppression.)
+    "none": "low",
+    "minimal": "low",
+    "medium": "high",
+    "xhigh": "max",
+    "ultra": "max",
+}
+DEEPSEEK_REASONING_EFFORT_ALIASES = EFFORT_ROUTE_ALIASES_LMH
+
+EFFORT_ROUTE_DESCRIPTOR: dict[str, dict] = {
+    "openai": {
+        "carrier": "reasoning_effort",
+        "tiers": ["minimal", "low", "medium", "high"],
+        "project": {},
+        "absent_meaning": "provider_default",
+        "forced_tool_suppression": False,
+    },
+    "deepseek": {
+        "carrier": "reasoning_effort",
+        "tiers": ["low", "high", "max"],
+        "project": EFFORT_ROUTE_ALIASES_LMH,
+        "absent_meaning": "provider_default",
+        "forced_tool_suppression": True,
+    },
+    # GLM through the generic openai-compatible lane (z.ai PAYG and Coding Plan
+    # endpoints both speak the OpenAI-compatible shape). The enum and alias
+    # projection are byte-identical to DeepSeek's dialect (measured on a live
+    # Coding Plan key, PR #1194 close comment), so this row shares ONE table.
+    # Absent tier means MAX billing — the loudest absent_meaning in the set.
+    "zai-glm": {
+        "carrier": "reasoning_effort",
+        "tiers": ["low", "high", "max"],
+        "project": EFFORT_ROUTE_ALIASES_LMH,
+        "absent_meaning": "max",
+        "forced_tool_suppression": False,
+    },
+    "anthropic": {
+        "carrier": "anthropic.adaptive",
+        "tiers": ["low", "medium", "high"],
+        "project": {"minimal": "low"},
+        "absent_meaning": "provider_default",
+        "forced_tool_suppression": False,
+    },
+    "openrouter": {
+        "carrier": "extra_body.reasoning",
+        "tiers": ["minimal", "low", "medium", "high", "xhigh", "max", "ultra"],
+        "project": {},
+        "absent_meaning": "provider_default",
+        "forced_tool_suppression": False,
+    },
+    "claudexor": {
+        "carrier": "reasoningEffort",
+        "tiers": ["minimal", "low", "medium", "high", "xhigh", "max", "ultra"],
+        "project": {},
+        "absent_meaning": "provider_default",
+        "forced_tool_suppression": False,
+    },
+    # Unmeasured routes: honest "none". The tier is dropped (and disclosed as
+    # effort_not_carried); absent_meaning records what the route does without it.
+    "openai-compatible": {
+        "carrier": "none", "tiers": [], "project": {},
+        "absent_meaning": "provider_default", "forced_tool_suppression": False,
+    },
+    "cloudru": {
+        "carrier": "none", "tiers": [], "project": {},
+        "absent_meaning": "provider_default", "forced_tool_suppression": False,
+    },
+    "minimax": {
+        "carrier": "none", "tiers": [], "project": {},
+        "absent_meaning": "provider_default", "forced_tool_suppression": False,
+    },
+    "gigachat": {
+        "carrier": "none", "tiers": [], "project": {},
+        "absent_meaning": "off", "forced_tool_suppression": False,
+    },
+    "local": {
+        "carrier": "none", "tiers": [], "project": {},
+        "absent_meaning": "off", "forced_tool_suppression": False,
+    },
+    "zai": {
+        # Placeholder row for the unmerged PR #1194 route: no key, no
+        # measurement in THIS tree → carrier none by the DO-NOT rule.
+        "carrier": "none", "tiers": [], "project": {},
+        "absent_meaning": "provider_default", "forced_tool_suppression": False,
+    },
+    "qwen": {
+        "carrier": "none", "tiers": [], "project": {},
+        "absent_meaning": "provider_default", "forced_tool_suppression": False,
+    },
+    "kimi": {
+        "carrier": "none", "tiers": [], "project": {},
+        "absent_meaning": "provider_default", "forced_tool_suppression": False,
+    },
+}
+
+
+# Which canonical tiers each UI surface may OFFER for a route: the descriptor's
+# provider tiers with their canonical pre-images, computed — never hand-listed.
+def canonical_tiers_for_route(descriptor: dict) -> list[str]:
+    """Canonical effort choices a route's descriptor supports (empty = none).
+
+    Each provider tier is offered under its IDENTITY canonical name when one
+    exists (low/high/max are identity rows), and otherwise under a canonical
+    pre-image — so the GLM low/high/max dialect offers exactly ``low, high,
+    max``, never ``minimal/medium/xhigh`` aliases of the same wire values."""
+    tiers = list(descriptor.get("tiers") or [])
+    if not tiers:
+        return []
+    project = descriptor.get("project") or {}
+    inverse: dict[str, list[str]] = {}
+    for canonical, provider in project.items():
+        inverse.setdefault(provider, []).append(canonical)
+    out: list[str] = []
+    for tier in tiers:
+        if project.get(tier, tier) == tier:
+            # Identity row (implicit tier→tier): the provider value IS the
+            # canonical spelling — offer it directly.
+            out.append(tier)
+        else:
+            candidates = inverse.get(tier) or []
+            out.append(candidates[0] if candidates else tier)
+    return out
+
+
+# GLM-family detection for the generic openai-compatible lane. The z.ai hosts
+# serve GLM models behind an OpenAI-compatible API whose effort dialect is the
+# measured low/high/max enum; a model id naming glm flags the route. Detection
+# is by MODEL IDENTITY ONLY — never by a generic base_url heuristic: any vLLM
+# server could host anything.
+_GLM_MODEL_TOKEN = "glm"
+
+
+def _is_glm_model(resolved_model: str) -> bool:
+    return _GLM_MODEL_TOKEN in str(resolved_model or "").strip().lower()
+
+
+def effort_descriptor_for_route(provider: str, resolved_model: str = "") -> dict:
+    """Resolve the effort descriptor for one physical route.
+
+    The z.ai GLM dialect rides the generic ``openai-compatible`` provider lane,
+    so a GLM model id on that lane resolves to the measured "zai-glm" row; every
+    other openai-compatible target honestly resolves to carrier "none" (no
+    measurement, no guessed carriage). Unknown providers fail to the "none"
+    row — never to a guessed carrier.
+    """
+    provider_id = str(provider or "").strip()
+    if provider_id == "openai-compatible" and _is_glm_model(resolved_model):
+        return EFFORT_ROUTE_DESCRIPTOR["zai-glm"]
+    return EFFORT_ROUTE_DESCRIPTOR.get(
+        provider_id,
+        {"carrier": "none", "tiers": [], "project": {},
+         "absent_meaning": "provider_default", "forced_tool_suppression": False},
+    )
+
+
+def project_effort_for_route(descriptor: dict, canonical_effort: str) -> str:
+    """Project a canonical tier onto a route's provider enum via its table."""
+    value = str(canonical_effort or "").strip().lower()
+    if not value:
+        return value
+    return str((descriptor.get("project") or {}).get(value, value))
+
+
+def _effort_descriptor_mismatches_observation(
+    descriptor: dict,
+    *,
+    observed_ceiling: str = "",
+    observed_floor: str = "",
+) -> bool:
+    """DECLARED vs OBSERVED loud-fact predicate (spec point 3).
+
+    An observation recorded by capability_evidence (an effort ceiling a
+    provider actually rejected above, or a floor it required below) disagrees
+    with the descriptor when the observation names a canonical tier that the
+    descriptor's declared provider tiers cannot express — e.g. an observed
+    ``ultra`` ceiling on a route whose declared enum tops out at ``max``.
+    Callers surface a true verdict as a loud fact (test + record), never as a
+    silent table override: the descriptor changes only through a measured
+    table edit.
+    """
+    from ouroboros.config import effort_rank
+
+    if descriptor.get("carrier") == "none":
+        return False
+    tiers = sorted(
+        set(descriptor.get("tiers") or []),
+        key=lambda t: effort_rank(t),
+    )
+    if not tiers:
+        return False
+    bottom, top = tiers[0], tiers[-1]
+    ceiling = str(observed_ceiling or "").strip().lower()
+    floor = str(observed_floor or "").strip().lower()
+    if ceiling and effort_rank(ceiling) > effort_rank(top):
+        return True
+    if floor and effort_rank(floor) < effort_rank(bottom):
+        return True
+    return False
 
 
 # Direct-provider prefix → canonical provider name. Un-prefixed models route

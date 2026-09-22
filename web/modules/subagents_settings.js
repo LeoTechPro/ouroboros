@@ -9,7 +9,7 @@ import { harnessIdentityMarkup } from './harness_presentation.js';
 import {
     EFFORT_CHOICES, ROUTE_KIND_AGENT_SESSION, ROUTE_KIND_API_MODEL,
     compoundSessionEffortConflict, configuredApiProviders, changeRouteChoice, routeModelFields,
-    routeModelInputHtml, routeTargetFromModel, routeSupportsAccount, effortSelectHtml,
+    routeModelInputHtml, routeTargetFromModel, routeSupportsAccount, effortSelectHtml, effortDescriptorForModel,
     encodeRouteChoice, indexProfilesByHarness, mintStableId, profileOptionsFor,
     routeChoiceGroups, sameEngineAs, selectHtml, serializeRouteSpec, sessionModelOptions, updateRouteControlOptions,
     PROCESSING_CHOICES, PROCESSING_PREFERENCE_KEY, processingDetailsHtml, processingIntentLabel, accountScopedModelCatalog,
@@ -347,7 +347,7 @@ export function availableSubagentRowMarkup(row, state, index = 0) {
                 ${routeSupportsAccount(row.route)
                     ? selectHtml(`data-subagent-field="account" aria-label="Account for Subagent ${ordinal}"`, [{ label: '', options: profileOptions }], row.route.credential_profile_id || '')
                     : ''}
-                ${effortSelectHtml(`data-subagent-field="effort" aria-label="Reasoning effort for Subagent ${ordinal}"`, row.effort || '', 'route default')}
+                ${effortSelectHtml(`data-subagent-field="effort" aria-label="Reasoning effort for Subagent ${ordinal}"`, row.effort || '', 'route default', effortDescriptorForModel(state.apiModels, split.model || row.route?.target_id || ''))}
                 ${session ? selectHtml(`id="actor-${escapeHtml(rowKey)}-access" data-subagent-field="access" aria-label="Access for Subagent ${ordinal}"`, [{ label: '', options: [
                     { value: 'full', label: 'Full system access (default)' },
                     { value: 'workspace_write', label: 'Working files' },

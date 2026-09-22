@@ -22,12 +22,16 @@ from ouroboros.usage_accounting import UsageScope, usage_scope
 from ouroboros.openrouter_attribution import OPENROUTER_APP_HEADERS
 from ouroboros.llm_capability_policy import (
     _EFFORT_CLAMP_CVAR,
+    _EFFORT_NOT_CARRIED_CVAR,
     _OPTIONAL_DROPPABLE_PARAMS,
     normalize_reasoning_effort,
 )
 from ouroboros.reasoning_artifacts import transcript_has_sealed_reasoning
 from ouroboros.llm_routing import _resolve_or_provider
-from ouroboros.provider_models import normalize_deepseek_reasoning_effort
+from ouroboros.provider_models import (
+    effort_descriptor_for_route,
+    project_effort_for_route,
+)
 from ouroboros.request_wire_recovery import (
     finalize_wire_response,
     note_provider_metadata_drop_fields,
@@ -178,28 +182,48 @@ class _OpenAICompatibleLaneMixin:
                     # stable governance prefix on the same cache bucket.
                     kwargs["prompt_cache_key"] = cache_identity
             requested_effort = normalize_reasoning_effort(reasoning_effort)
-            if direct_openai:
-                # Effort-carrying routes honor the OUROBOROS_EFFORT_* lanes
-                # instead of dropping them like generic compatible lanes.
-                # Keyed on the PROVIDER id, not a target capability field, so
-                # a hand-built target (fixtures, probes) cannot silently drop
-                # the carriage; request-wire recovery adapts on a provider 400.
-                kwargs["reasoning_effort"] = requested_effort
-            elif provider == "deepseek":
-                # Same carriage, projected onto DeepSeek's wire dialect
-                # (low/high/max; thinking is switched off by a toggle, not an
-                # effort value). Thinking mode accepts only tool_choice
-                # auto/none (probed 2026-09-03: required and named 400 on both
-                # v4 models), so a forced tool call is served with thinking
-                # disabled. Any tier change is disclosed on usage as
-                # ``reasoning_effort_clamped``.
-                forced_tool = bool(prepared_tools) and tool_choice not in (None, "", "auto", "none")
-                applied = "none" if forced_tool else normalize_deepseek_reasoning_effort(requested_effort)
-                if applied == "none":
+            # Descriptor-driven carriage (one SSOT in provider_models): the
+            # carrier, tier projection, forced-tool suppression and absent-tier
+            # meaning all come from EFFORT_ROUTE_DESCRIPTOR — no per-provider
+            # builder branch. A no-carrier route DROPS the tier but never
+            # silently: the drop is disclosed as a usage fact (effort_not_carried).
+            descriptor = effort_descriptor_for_route(provider, resolved_model)
+            carrier = descriptor.get("carrier")
+            _EFFORT_CLAMP_CVAR.set(None)  # never inherit a stale note
+            _EFFORT_NOT_CARRIED_CVAR.set(None)
+            if carrier == "none":
+                if requested_effort and requested_effort not in ("", "none"):
+                    _EFFORT_NOT_CARRIED_CVAR.set({
+                        "requested": requested_effort,
+                        "provider": provider,
+                        "model": resolved_model,
+                        "absent_meaning": descriptor.get("absent_meaning") or "provider_default",
+                    })
+            elif carrier == "reasoning_effort":
+                forced_tool = (
+                    bool(descriptor.get("forced_tool_suppression"))
+                    and bool(prepared_tools)
+                    and tool_choice not in (None, "", "auto", "none")
+                )
+                if requested_effort == "none" and descriptor.get("absent_meaning") == "max":
+                    # GLM/z.ai dialect: thinking cannot be disabled (attempting
+                    # it is HTTP 400 code 1210), and an absent tier bills at
+                    # MAX — the lowest real tier is the honest projection of
+                    # "none" here, disclosed through the clamp note.
+                    applied = "low"
+                    kwargs["reasoning_effort"] = applied
+                elif requested_effort == "none" and descriptor.get("forced_tool_suppression"):
+                    applied = "none"
+                    kwargs.setdefault("extra_body", {})["thinking"] = {"type": "disabled"}
+                elif forced_tool:
+                    # Thinking mode accepts only tool_choice auto/none (probed
+                    # 2026-09-03: required and named 400 on both v4 models), so
+                    # a forced tool call is served with thinking disabled.
+                    applied = "none"
                     kwargs.setdefault("extra_body", {})["thinking"] = {"type": "disabled"}
                 else:
+                    applied = project_effort_for_route(descriptor, requested_effort)
                     kwargs["reasoning_effort"] = applied
-                _EFFORT_CLAMP_CVAR.set(None)  # never inherit a stale note
                 if applied != requested_effort:
                     _EFFORT_CLAMP_CVAR.set({
                         "requested": requested_effort, "applied": applied,
@@ -381,6 +405,7 @@ class _OpenAICompatibleLaneMixin:
             usage.pop("response_provider", None)
             usage.pop("reasoning_pin", None)
             usage.pop("reasoning_effort_clamped", None)
+            usage.pop("effort_not_carried", None)
             usage.pop("provider_error", None)
         # An HTTP-200 that carried a provider body-error (OpenRouter passes
         # 429/5xx through the body) reaches here only when a same-model reroute
@@ -541,6 +566,12 @@ class _OpenAICompatibleLaneMixin:
         _clamp_note = self._pop_effort_clamp_disclosure()
         if _clamp_note:
             usage["reasoning_effort_clamped"] = _clamp_note
+        # Same disclosure norm for a dropped tier on a no-carrier route: the
+        # requested tier never reached the wire — that fact must be visible,
+        # not silently absorbed into "provider default behavior".
+        _not_carried = self._pop_effort_not_carried_disclosure()
+        if _not_carried:
+            usage["effort_not_carried"] = _not_carried
         # Same disclosure norm for a ≤4-cap cache-marker reduction (v6.77.0): never silent.
         _cache_note = self._pop_thread_disclosure("_cache_breakpoint_tls")
         if _cache_note:

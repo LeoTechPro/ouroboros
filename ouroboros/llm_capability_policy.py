@@ -31,6 +31,11 @@ log = logging.getLogger("ouroboros.llm")
 # Effort clamp/projection disclosure slot: a ContextVar isolates threads AND
 # concurrent asyncio tasks (same isolation contract as the reasoning pin note).
 _EFFORT_CLAMP_CVAR = contextvars.ContextVar("ouroboros_effort_clamp_note", default=None)
+# A tier the caller requested but the route's descriptor carries no carrier for:
+# the tier is DROPPED from the physical request (never guessed onto a wire that
+# was not measured), and this note discloses the drop on usage as
+# ``effort_not_carried`` — the loud fact that replaces the old silent vanish.
+_EFFORT_NOT_CARRIED_CVAR = contextvars.ContextVar("ouroboros_effort_not_carried_note", default=None)
 
 
 _OPTIONAL_SAMPLING_PARAMS = ("temperature", "top_p", "top_k")
@@ -407,6 +412,16 @@ class _CapabilityPolicyMixin:
         """The pending clamp record for THIS call's context (thread or asyncio task)."""
         pending = _EFFORT_CLAMP_CVAR.get()
         _EFFORT_CLAMP_CVAR.set(None)
+        return pending if isinstance(pending, dict) else None
+
+    def _pop_effort_not_carried_disclosure(self) -> Optional[Dict[str, Any]]:
+        """The pending effort_not_carried record for THIS call's context.
+
+        Mirrors the clamp disclosure: staged by the payload builder when the
+        route descriptor carries no effort carrier, consumed once on the
+        response's usage custody so the drop is a visible usage fact."""
+        pending = _EFFORT_NOT_CARRIED_CVAR.get()
+        _EFFORT_NOT_CARRIED_CVAR.set(None)
         return pending if isinstance(pending, dict) else None
 
     @classmethod

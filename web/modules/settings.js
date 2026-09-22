@@ -411,7 +411,14 @@ export function moreProvidersCredentialConfigured({
 export function providerTestStatusText(result = {}) {
     if (result?.ok === true) return 'Works';
     const reason = String(result?.error || '').trim();
-    return reason ? `Not ready — ${reason}` : 'Not ready';
+    if (!reason) return 'Not ready';
+    // Z.ai plan exhaustion arrives as 429 code 1113 "Insufficient balance" and
+    // is mapped to the billing reason server-side; the actionable text is the
+    // provider message plus a plan hint, never a bare "Rate limited" retry cue.
+    if (reason === 'No credits') {
+        return `Not ready — provider reports insufficient balance. Top up the account or switch the plan, then re-test.`;
+    }
+    return `Not ready — ${reason}`;
 }
 
 export function providerTestNetworkErrorStatus() {
