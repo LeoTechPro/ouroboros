@@ -51,7 +51,9 @@ def test_the_startup_sweep_reconciles_delegated_runs_too(monkeypatch, startup_ow
     """A fresh generation has no surviving queue, direct or post-task owners.
 
     Startup must reconcile with that actual empty set, without inheriting another
-    test's queue. An in-process revival with live owners is covered separately.
+    test's queue. Liveness now arrives as the sweep's one CALLABLE source (INV-B:
+    candidates first, liveness second), so the assertion reads what it produces.
+    An in-process revival with live owners is covered separately.
     """
     import ouroboros.server_maintenance as sm
     import ouroboros.delegate_custody as dc
@@ -63,7 +65,8 @@ def test_the_startup_sweep_reconciles_delegated_runs_too(monkeypatch, startup_ow
                         lambda root, **kw: seen.setdefault("live", kw.get("running_task_ids")) or [])
     monkeypatch.setattr(sm, "_installed_skill_names", lambda: None)
     sm._startup_custody_sweep()
-    assert seen["live"] == set(), "an empty live set is the point: nothing survived the restart"
+    assert seen["live"] is sm._live_task_ids
+    assert seen["live"]() == set(), "an empty live set is the point: nothing survived the restart"
 
 
 def test_startup_revival_keeps_actual_current_owners(tmp_path, monkeypatch, startup_owners):
@@ -94,16 +97,20 @@ def test_startup_revival_keeps_actual_current_owners(tmp_path, monkeypatch, star
                         lambda root, **kw: seen.__setitem__("processes", kw["running_task_ids"]) or [])
     monkeypatch.setattr(sm, "_installed_skill_names", lambda: None)
     sm._startup_custody_sweep()
-    assert seen["processes"] == seen["delegated"] == expected
+    # ONE source, evaluated by each surface after it has read its own candidates.
+    assert seen["processes"] is seen["delegated"] is sm._live_task_ids
+    assert seen["delegated"]() == expected
     assert seen["outcomes"] == []
     assert transport.cancels == []
     assert {row.run_id for row in dc.open_runs(tmp_path)} == {f"run-{task_id}" for task_id in expected}
 
 
 def test_both_custody_surfaces_see_the_same_live_task_set(tmp_path, monkeypatch, startup_owners):
-    """The periodic sweep must hand the delegated reconciler the SAME live task set the
-    process reaper gets. Two copies of "is the owner still running" is exactly how one
-    custody surface ends up reaping while its twin does not."""
+    """The periodic sweep must hand the delegated reconciler the SAME live task source
+    the process reaper gets. Two copies of "is the owner still running" is exactly how
+    one custody surface ends up reaping while its twin does not. The source is now the
+    sweep's one CALLABLE (INV-B: each surface evaluates it after reading its own
+    candidates), and the 600 s block itself rides a daemon thread beside the 20 s one."""
     import time
     import threading
 
@@ -145,9 +152,12 @@ def test_both_custody_surfaces_see_the_same_live_task_set(tmp_path, monkeypatch,
     get_direct_activity_registry().register("native-live", 1)
     try:
         sm._periodic_supervisor_maintenance([0.0], [time.time()])
-        assert seen["processes"] == seen["delegated"] == {"t-live", "native-live"}, seen
-        assert entered.wait(2) and len(threads) == 1
-        assert threads[0].name == "terminal-maintenance" and threads[0].is_alive()
+        assert entered.wait(2)
+        assert [thread.name for thread in threads] == ["terminal-maintenance", "custody-maintenance"]
+        assert threads[0].is_alive(), "the 20 s sweep is still inside its delayed work"
+        threads[1].join(5)
+        assert seen["processes"] is seen["delegated"] is sm._live_task_ids
+        assert seen["delegated"]() == {"t-live", "native-live"}, seen
     finally:
         # The actual maintenance owner finishes before monkeypatch restores its
         # root, lock and dependent functions, including when an assertion fails.
@@ -156,6 +166,7 @@ def test_both_custody_surfaces_see_the_same_live_task_set(tmp_path, monkeypatch,
             thread.join(timeout=5)
         assert all(not thread.is_alive() for thread in threads)
     assert not lock.locked(), "the real maintenance finally released its latch"
+    assert not sm._CUSTODY_SWEEP_LOCK.locked(), "so did the custody block"
 
 
 def test_an_orphaned_delegated_run_is_reconciled_when_its_owner_is_gone(tmp_path, monkeypatch):

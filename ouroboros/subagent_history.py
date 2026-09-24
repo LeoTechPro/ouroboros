@@ -40,6 +40,29 @@ def execution_identity(snapshot: Mapping[str, Any]) -> dict[str, str]:
                if route.get("kind") == "agent_session" else {})}
 
 
+def snapshot_handle(snapshot: Mapping[str, Any]) -> str:
+    """The handle of the engine a frozen snapshot names, from its own facts."""
+    from ouroboros.configured_subagents import engine_handle
+
+    return engine_handle(execution_identity(snapshot))
+
+
+def recorded_handle(row: Mapping[str, Any]) -> str:
+    """Name the engine a history row ran, from the row's OWN recorded facts.
+
+    A typed ``identity`` yields its handle; an older row without one yields its
+    recorded route target. Never mapped through the live roster: the row an id
+    points at today may be a different engine, and that would relabel the past.
+    """
+    from ouroboros.configured_subagents import engine_handle
+
+    identity = row.get("identity")
+    if isinstance(identity, Mapping) and identity.get("target_id"):
+        return engine_handle(identity)
+    route, model = str(row.get("route") or ""), str(row.get("requested_model") or "")
+    return model if route == "api_model" else route + ("=" + model if route and model else "")
+
+
 def record_last_delegation(*, route: str, requested_model: str, applied_model: str,
                            run_id: str, selected_subagent_id: str = "",
                            requested_profile: str = "", applied_profile: str = "",

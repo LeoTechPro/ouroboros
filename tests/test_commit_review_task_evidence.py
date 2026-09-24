@@ -483,7 +483,7 @@ def test_pending_preflight_selection_survives_reconciliation_then_stage_dispatch
     monkeypatch.setattr(advisory, "advisory_review_route", lambda: "agent_session")
     monkeypatch.setattr(advisory, "advisory_slot_enabled", lambda: True)
     monkeypatch.setattr(advisory, "check_worktree_readiness", lambda *a, **kw: [])
-    monkeypatch.setattr(advisory, "_release_metadata_preflight", lambda *a: None)
+    monkeypatch.setattr(advisory, "_release_metadata_preflight", lambda *a, **kw: None)
     monkeypatch.setattr(advisory, "_check_worktree_version_sync_shared", lambda *a: "")
     monkeypatch.setattr("ouroboros.delegate_custody.invocation_record", lambda *a: {"request": {"prompt": "ORIGINAL_PREFLIGHT_PROMPT"}})
     sent = []

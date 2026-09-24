@@ -165,3 +165,63 @@ def test_the_two_toasts_this_sprint_touched_stay_out_of_a_headless_progress_log(
     assert 'progress.jsonl' in atif and 'narration_rows' in atif, (
         "if ATIF stops reading progress.jsonl this guard can be revisited"
     )
+
+
+def test_the_real_terminal_producer_leaves_the_model_answer_as_the_hidden_partition_answer(
+    tmp_path, monkeypatch,
+):
+    """End to end, through the real producer and the real delivery seam, in chat 0.
+
+    The other tests in this file state the extraction rule over hand-written
+    rows. This one runs emit_task_results -> _handle_send_message ->
+    send_with_budget -> chat.jsonl -> atif._final_answer, so a change to WHICH
+    rows the host writes, or to HOW they are authored and typed, is caught here
+    instead of in a Terminal-Bench trajectory. Exactly one untyped outbound row
+    may exist and it must be the model's own answer; every host disclosure has
+    to be a system row, a typed row or no row at all.
+    """
+    from collections import deque
+    from types import SimpleNamespace
+
+    from ouroboros import agent_task_pipeline as pipeline
+    from ouroboros.task_finalization import set_terminal_host_notice
+    from ouroboros.utils import append_jsonl
+    from supervisor import events_chat_delivery as delivery, message_bus
+
+    answer = "The model's own last word."
+    notice = "⚠️ Plan review is still open (DEGRADED).\n\n⚠️ DEFERRED CHILD RESULTS: child1."
+    data = tmp_path / "ouroboros-data"
+    (data / "logs").mkdir(parents=True)
+
+    monkeypatch.setattr(pipeline, "_run_post_task_processing_async", lambda *_a, **_kw: None)
+    usage = {"terminal_origin": "model_final"}
+    set_terminal_host_notice(usage, notice)
+    task = {"id": "bench-root", "type": "task", "chat_id": HIDDEN_CHAT_ID, "text": "solve it"}
+    pending = []
+    pipeline.emit_task_results(
+        SimpleNamespace(drive_root=data, repo_dir=data), None, None,
+        pending, task, answer, usage, {"tool_calls": [], "reasoning_notes": []},
+        start_time=0.0, drive_logs=data / "logs",
+    )
+    event = next(row for row in pending if row["type"] == "send_message")
+    assert event["chat_id"] == HIDDEN_CHAT_ID
+
+    bridge = message_bus.LocalChatBridge({})
+    bridge._broadcast_fn = lambda _frame: None
+    monkeypatch.setattr(message_bus, "DATA_DIR", data)
+    monkeypatch.setattr(message_bus, "get_bridge", lambda: bridge)
+    monkeypatch.setattr(message_bus, "load_state", lambda: {"owner_id": 7})
+    monkeypatch.setattr(message_bus, "_advance_project_visible_revision", lambda _chat: None)
+    monkeypatch.setattr(message_bus, "publish_event", lambda *_a, **_kw: None)
+    monkeypatch.setattr(delivery, "_DELIVERED_MESSAGE_IDS", deque(maxlen=256))
+    delivery._handle_send_message(event, SimpleNamespace(
+        DRIVE_ROOT=data, RUNNING={}, append_jsonl=append_jsonl,
+        send_with_budget=message_bus.send_with_budget,
+    ))
+
+    rows = [json.loads(line) for line
+            in (data / "logs" / "chat.jsonl").read_text(encoding="utf-8").splitlines() if line.strip()]
+    untyped_outbound = [row["text"] for row in rows
+                        if row["direction"] == "out" and not row.get("type")]
+    assert untyped_outbound == [answer]
+    assert _final_answer(tmp_path) == answer

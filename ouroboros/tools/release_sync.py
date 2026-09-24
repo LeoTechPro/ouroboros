@@ -513,6 +513,42 @@ def version_carrier_desyncs(
     return desync
 
 
+def release_metadata_findings(texts: dict[str, str]) -> List[str]:
+    """All independently decidable release findings over one source's readable files.
+
+    Reuse carrier grammar and P9 counters; unavailable files are absent from this
+    mapping and are reported by the reader. Never invent a future release version.
+    """
+    findings: List[str] = []
+    version = texts.get("VERSION", "").strip()
+    if "VERSION" in texts and not is_release_version(version):
+        findings.append("VERSION is empty or malformed; use a supported release version.")
+    readme = texts.get("README.md")
+    if readme is not None:
+        if is_release_version(version) and not re.search(r'\|\s*' + re.escape(version) + r'\s*\|', readme):
+            findings.append(f"VERSION is {version} but README.md changelog has no table row for this version. "
+                            "Add a changelog entry in the Version History table in README.md.")
+        limits = check_history_limit(readme)
+        if limits:
+            findings.append("README.md Version History exceeds BIBLE.md P9 limits.")
+            findings.extend(limits)
+    # A present empty carrier is malformed, not an absent optional older carrier.
+    findings.extend(f"{path} is empty; restore its release metadata."
+                    for path, text in texts.items() if path != "VERSION" and not text.strip())
+    findings.extend(version_carrier_desyncs(
+        version,
+        pyproject_text=texts.get("pyproject.toml", ""),
+        uv_lock_text=texts.get("uv.lock", ""),
+        web_package_text=texts.get("web/package.json", ""),
+        web_package_lock_text=texts.get("web/package-lock.json", ""),
+        readme_text=readme or "", arch_text=texts.get("docs/ARCHITECTURE.md", ""),
+        api_types_text=texts.get("web/modules/api_types.js", ""),
+        download_readme_text=readme or "", site_install_text=texts.get("site/install/index.html", ""),
+        docs_install_text=texts.get("docs/install/index.html", ""), detailed=True,
+    ))
+    return findings
+
+
 def check_worktree_version_sync(repo_dir) -> str:
     """Return a non-fatal warning when release version carriers disagree.
 

@@ -250,6 +250,7 @@ def _send_user_message(ctx: ToolContext, text: str, reason: str = "") -> str:
     append_jsonl(ctx.drive_logs() / "events.jsonl", {
         "ts": utc_now_iso(),
         "type": "proactive_message",
+        "task_id": str(getattr(ctx, "task_id", "") or ""),
         "reason": reason,
         "transport_mode": mode,
         "text_preview": text[:200],

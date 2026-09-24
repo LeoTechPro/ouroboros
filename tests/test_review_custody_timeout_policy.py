@@ -905,7 +905,7 @@ def test_a_collection_while_a_released_slot_runs_keeps_the_settled_roster(tmp_pa
         release["s1"].set()
         release["s2"].set()
         def first_two_settled():
-            return all(any(f"[{slot_id}]: finished;" in line and "state=settled" in line
+            return all(any(f"reviewer m/{slot_id[1:]} answered" in line
                            for line in progress) for slot_id in ("s1", "s2"))
         while not first_two_settled() and time.time() < deadline:
             time.sleep(0.01)

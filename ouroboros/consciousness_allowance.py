@@ -55,12 +55,18 @@ def _candidate_rows(final: list, integrity_degraded: bool) -> Dict[str, Any]:
     return {"rows": rows, "integrity_degraded": bool(integrity_degraded)}
 
 
-def allowance_window(drive_root: Any = None, *, now: Optional[float] = None) -> Dict[str, Any]:
-    """The allowance verdict for the 24 h ending at ``now`` (epoch seconds; default: the clock)."""
+def allowance_window(
+    drive_root: Any = None, *, now: Optional[float] = None, allow_stale: bool = False,
+) -> Dict[str, Any]:
+    """The allowance verdict for the 24 h ending at ``now`` (epoch seconds; default: the clock).
+
+    ``allow_stale`` is the STATUS view's read (it admits nothing): under a contended ledger
+    lock it rides the last validated snapshot. Every admission of a wake reads exactly."""
     now_ts = time.time() if now is None else float(now)
     limit = float(get_consciousness_daily_usd())
     try:
-        selected = _render_cached(_drive_root(drive_root), ("consciousness_allowance_rows",), _candidate_rows)
+        selected = _render_cached(
+            _drive_root(drive_root), ("consciousness_allowance_rows",), _candidate_rows, allow_stale=allow_stale)
     except Exception as exc:  # noqa: BLE001 — every read failure is the one typed outcome
         return {"status": STATUS_UNKNOWN, "error": f"{type(exc).__name__}: {exc}",
                 "limit_usd": limit, "accounted_usd": None, "remaining_usd": None, "resets_at": ""}

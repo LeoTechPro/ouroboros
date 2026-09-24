@@ -32,6 +32,7 @@ os.environ.setdefault("PYTHONDONTWRITEBYTECODE", "1")
 from ouroboros.config import (
     AGENT_SERVER_PORT,
     DATA_DIR,
+    LAUNCHER_STOP_GRACE_SEC,
     PANIC_EXIT_CODE,
     PORT_FILE,
     REPO_DIR,
@@ -95,7 +96,7 @@ from ouroboros.platform_layer import (
     subprocess_new_group_kwargs,
     terminate_job,
     terminate_process_group_id,
-    terminate_process_tree, request_native_attention,
+    request_native_attention,
 )
 from ouroboros.utils import atomic_write_json, utc_now_iso
 
@@ -394,8 +395,8 @@ def start_agent(port: int = AGENT_SERVER_PORT) -> subprocess.Popen:
     env["OUROBOROS_REPO_DIR"] = str(REPO_DIR)
     env["OUROBOROS_APP_VERSION"] = str(APP_VERSION)
     env["OUROBOROS_MANAGED_BY_LAUNCHER"] = "1"
-    # Owner Surface Fact: the launcher is the only actor that knows HOW this
-    # server will be presented. `_headless` is decided in main() before the
+    env["OUROBOROS_MANAGED_REPO_DIR"] = str(REPO_DIR.resolve())
+    # Owner Surface Fact: the launcher alone knows presentation; `_headless` is decided in main() before the
     # lifecycle loop ever calls start_agent(), and every managed restart funnels
     # back through here, so the export is re-stamped fresh each time. Absence of
     # the var (source mode, Docker, Colab, CLI server) truthfully means "web".
@@ -532,11 +533,9 @@ def stop_agent() -> None:
 
     log.info("Stopping agent (pid=%s)...", proc.pid)
     try:
-        if IS_WINDOWS:
-            proc.terminate()
-        else:
-            terminate_process_tree(proc)
-        proc.wait(timeout=10)
+        # Graceful phase signals only the server: it owns its Manager and workers (#1142).
+        proc.terminate()
+        proc.wait(timeout=LAUNCHER_STOP_GRACE_SEC)
     except subprocess.TimeoutExpired:
         if IS_WINDOWS and job is not None:
             terminate_job(job)

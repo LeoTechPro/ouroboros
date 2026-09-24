@@ -4,13 +4,14 @@ from __future__ import annotations
 
 from typing import Any, Callable, Dict, List
 
+from ouroboros.review_projection import AWAITING_PROJECTION, awaiting_panel_reason
 from ouroboros.triad_review import parse_review_findings
 
 
 def contract_valid_actors(result: Any) -> List[Dict[str, Any]]:
     """Actors with a DELIBERATE, CONTRACT-VALID reviewer object: parsed dict,
-    recognizable verdict, parse_status not "malformed" — so a contract-DEMOTED or
-    garbage response never votes (commit triad #1).
+    recognizable verdict, parse_status neither "malformed" nor "awaiting" — so a
+    contract-DEMOTED, garbage or unanswered row never votes (commit triad #1).
 
     Owner ratification 2026-08-30: the acceptance-dialogue reducer now counts
     votes over ``_contributing_actors`` (a slot whose verdict did not reach the
@@ -26,7 +27,7 @@ def contract_valid_actors(result: Any) -> List[Dict[str, Any]]:
     for actor in (getattr(result, "actors", None) or []):
         row = actor if isinstance(actor, dict) else asdict(actor)
         parsed = row.get("parsed")
-        if str(row.get("parse_status") or "") == "malformed":
+        if str(row.get("parse_status") or "") in {"malformed", AWAITING_PROJECTION}:
             continue
         if isinstance(parsed, dict) and str(
             parsed.get("verdict") or parsed.get("status") or ""
@@ -74,6 +75,7 @@ def aggregate_review_actors(
     # slot must NOT poison a clean quorum PASS.
     actor_errors: List[str] = []
     parse_degraded: List[str] = []
+    awaiting: List[str] = []
     fail_count = 0
     pass_count = 0
     classify_tier = bool(
@@ -86,10 +88,6 @@ def aggregate_review_actors(
         or str((request.policy or {}).get("hardness") or "") == advisory_hardness
     )
     for actor in actors:
-        if actor.status in {"error", "not_dispatched"}:
-            actor_errors.append(f"{actor.slot_id}:{actor.error}")
-        elif actor.status != "ok":
-            actor_errors.append(f"{actor.slot_id}:{actor.status}")
         parsed, findings, signal = parse_review_findings(actor.raw_text)
         actor.parsed = parsed
         actor.signal = signal
@@ -104,6 +102,16 @@ def aggregate_review_actors(
             "coverage", "reason",
         ):
             setattr(actor, key, truth[key])
+        # A slot released at the dispatch barrier is a gap: it holds a participation fault's
+        # fail-closed place without being reported as one. The projection decides it, from the
+        # row as a mapping (the typed predicate never matches a dataclass).
+        held = actor.status in {"error", "not_dispatched"} and truth["transport_status"] == AWAITING_PROJECTION
+        if held:
+            awaiting.append(actor.slot_id)
+        elif actor.status in {"error", "not_dispatched"}:
+            actor_errors.append(f"{actor.slot_id}:{actor.error}")
+        elif actor.status != "ok":
+            actor_errors.append(f"{actor.slot_id}:{actor.status}")
         all_findings.extend(
             {**item, "slot_id": actor.slot_id, "model": actor.model}
             for item in findings
@@ -160,7 +168,7 @@ def aggregate_review_actors(
             )
         elif signal == "PASS":
             pass_count += 1
-        elif signal == "DEGRADED":
+        elif signal == "DEGRADED" and not held:
             parse_degraded.append(f"{actor.slot_id}:degraded")
 
     min_successful = max(
@@ -171,16 +179,18 @@ def aggregate_review_actors(
     if fail_count >= 1:
         aggregate = "FAIL"
     elif pass_count >= min_successful and not (
-        fail_closed_on_errors and actor_errors and request.surface != "task_acceptance"
+        fail_closed_on_errors and (actor_errors or awaiting) and request.surface != "task_acceptance"
     ):
         aggregate = "PASS"
     else:
         aggregate = "DEGRADED"
-        if not degraded_reasons:
+        if not degraded_reasons and not awaiting:
             degraded_reasons.append(
                 f"quorum_not_met: pass_count={pass_count} < min_successful={min_successful}"
             )
 
+    if awaiting:
+        degraded_reasons.insert(0, awaiting_panel_reason(awaiting, len(actors), aggregate))
     participating_ids = {
         actor.slot_id
         for actor in actors

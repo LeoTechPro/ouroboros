@@ -485,7 +485,7 @@ _REFRESH_SCAN_CAP_BYTES = 5 * 1024 * 1024  # bounded work per sweep tick
 _REFRESH_DEFERRED_CAP = 500  # terminal-boundary tasks awaiting their result
 
 
-def refresh_recently_settled_terminals(drive_root: Any) -> int:
+def refresh_recently_settled_terminals(drive_root: Any, live_task_ids: Any = None) -> int:
     """Refresh terminal results of tasks whose runs settled since the cursor.
 
     The orphan sweep only revisits tasks named in THIS generation's reconcile
@@ -500,6 +500,12 @@ def refresh_recently_settled_terminals(drive_root: Any) -> int:
     to a rename. A shrunken chain (manual surgery) resets the cursor; the
     one-time historical pass is paced by the per-tick byte cap. Returns the
     number of refreshed tasks.
+
+    ``live_task_ids`` is the sweep's one live-owner source — a set or a zero-arg
+    callable, read AFTER the batch like both custody surfaces read theirs. A task
+    whose owner still bills (the post-task synthesis window outlives the terminal
+    write) is DEFERRED, not healed under a live writer; None means unknown and
+    heals whatever the log named.
     """
     import os as _os
     import pathlib as _pathlib
@@ -574,8 +580,12 @@ def refresh_recently_settled_terminals(drive_root: Any) -> int:
     now_iso = utc_now_iso()
     refreshed = 0
     next_deferred: Dict[str, str] = {}
+    live = live_task_ids() if callable(live_task_ids) else live_task_ids
     for tid in sorted(batch_ids | set(deferred)):
         since = deferred.get(tid) or now_iso
+        if live is not None and tid in live:
+            next_deferred[tid] = since  # its owner is still writing; heal after it ends
+            continue
         try:
             if _task_is_terminal(drive_root, tid):
                 if refresh_terminal_reconciliation(drive_root, tid):

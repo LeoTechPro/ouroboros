@@ -332,29 +332,33 @@ def test_acceptance_ack_sidecar_compacts_stale_and_bounds_rows(monkeypatch, tmp_
         queue, "transition_acceptance_fence",
         lambda **_kwargs: {"ok": True, "status": "active"},
     )
-    token = "f" * 64
+    token, req = "f" * 64, "e" * 32
     events._handle_acceptance_fence(
-        {"token": token, "action": "begin", "root_task_id": "r", "task_id": "r"},
+        {"token": token, "req": req, "action": "begin", "root_task_id": "r", "task_id": "r"},
         SimpleNamespace(DRIVE_ROOT=tmp_path),
     )
 
     rows = list(ack_dir.glob("*.json"))
     assert len(rows) <= 256
-    assert (ack_dir / f"{token}.json").is_file()
+    assert (ack_dir / f"{token}.{req}.json").is_file()
     assert all(path.stat().st_mtime > old for path in rows)
 
 
-def test_split_drive_worker_reads_acceptance_ack_from_budget_root(tmp_path):
+def test_split_drive_worker_reads_acceptance_ack_from_budget_root(tmp_path, monkeypatch):
+    import queue as stdqueue
+
+    from ouroboros import runtime_limits
     from ouroboros.agent import Env, OuroborosAgent
 
+    monkeypatch.setattr(runtime_limits, "get_acceptance_fence_ack_wait_sec", lambda: 0.2)
     canonical = tmp_path / "canonical-data"
     child = canonical / "state" / "headless_tasks" / "root-1" / "data"
     repo = tmp_path / "repo"
     child.mkdir(parents=True)
     repo.mkdir()
-    token = "a" * 32
+    token, req = "a" * 32, "b" * 32
     payload = {"ok": True, "status": "active", "token": token}
-    ack = canonical / "state" / "acceptance_fence_acks" / f"{token}.json"
+    ack = canonical / "state" / "acceptance_fence_acks" / f"{token}.{req}.json"
     ack.parent.mkdir(parents=True)
     ack.write_text(json.dumps(payload), encoding="utf-8")
 
@@ -363,8 +367,10 @@ def test_split_drive_worker_reads_acceptance_ack_from_budget_root(tmp_path):
     agent = object.__new__(OuroborosAgent)
     agent.env = Env(repo_dir=repo, drive_root=child)
     agent._current_task_metadata = {"budget_drive_root": str(canonical)}
+    agent._event_queue = stdqueue.Queue()
 
-    assert agent._await_acceptance_fence_ack(token, timeout_sec=0.1) == payload
+    event = {"type": "acceptance_fence", "action": "inspect", "token": token, "req": req}
+    assert agent._send_fence_event(event) == payload
     assert not ack.exists()
-    child_ack = child / "state" / "acceptance_fence_acks" / f"{token}.json"
+    child_ack = child / "state" / "acceptance_fence_acks" / f"{token}.{req}.json"
     assert not child_ack.exists()

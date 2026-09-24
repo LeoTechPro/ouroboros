@@ -16,8 +16,9 @@ import logging
 import os
 import pathlib
 import uuid
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Callable, Dict, Iterable, List, Optional
 
+from ouroboros.acceptance_preparation import incident_cause_clauses
 from ouroboros.platform_layer import acquire_exclusive_file_lock, release_exclusive_file_lock
 from ouroboros.task_finalization import TERMINAL_ORIGIN_HOST_SALVAGE
 from ouroboros.utils import append_jsonl, iter_jsonl_objects, jsonl_append_lock_path, replace_atomic, strip_markdown, utc_now_iso
@@ -289,7 +290,7 @@ def room_membership(chat_id: int, project_chat_ids: set, source_refs: list,
         # A routing refusal belongs to the issuing chat, even when the target
         # is bound to another Project. Its lineage must not move the notice.
         bound = 0 if row.get("type") in ORIGIN_ADDRESSED_NOTICE_TYPES else bound_room_chat(bindings, row)
-        lifecycle = row.get("type") in {"project_started", "project_completion_summary"}
+        lifecycle = row.get("type") in {"project_started", "project_handoff", "project_completion_summary"}
         if chat_id in project_chat_ids:
             return not lifecycle and (bound == chat_id or entry_chat == chat_id
                                       or entry_matches_source_ref(row, source_refs))
@@ -731,17 +732,18 @@ OUTCOME_PHASE_HEADLINE = {"working": "Working", "done": "Done", "warn": "Done wi
 # code stays typed on the row. web/modules/log_events.js carries the twin;
 # web/tests/fixtures/outcome_phase_parity.json pins both.
 TASK_CAUSE_PHRASES = {
-    # Acceptance-decision reasons. A clean accepted decision renders no clause,
-    # so clean_pass and clean_pass_obligations_closed carry no sentence; an
-    # accepted decision with a sentence here still states its cause.
+    # Acceptance-decision reasons. A clean accepted decision renders no clause (clean_pass and
+    # clean_pass_obligations_closed carry no sentence); an accepted decision with a sentence states its cause.
     "previous_revision_accepted": "The reviewers approved an earlier version of this answer; the current version was not re-reviewed.",
-    "author_stop": "Main stopped with unfinished work; no review approval was granted.",
-    "review_outcome_received": "Main received the review outcome or recorded limitation.",
-    "author_finish": "The answer was delivered on Main's own judgement; the reviewers had not signed it off.",
-    "review_degraded": "No reviewer verdict was established for this answer.",
-    "infra_failure": "A review infrastructure failure prevented a settled verdict.",
-    "dialogue_terminal": "The reviewers and Main could not agree, and both positions were kept.",
-    "improvement_capsule": "The reviewers asked for one more pass and Main was given their notes.",
+    "admission_close_unconfirmed": "Reviewers approved this answer; the supervisor did not confirm that task admission was closed.",
+    "author_stop": "Ouroboros stopped with unfinished work; no review approval was granted.",
+    "review_outcome_received": "Ouroboros received the reviewers' outcome and finished on that.",
+    "author_finish": "Ouroboros delivered this answer on its own judgement; the reviewers had not signed it off.",
+    "review_degraded": "The reviewers did not reach a verdict on this answer.",
+    "infra_failure": "The review could not run because of an infrastructure failure, so there is no verdict.",
+    "acceptance_preparation_failed": "Ouroboros could not assemble the evidence for this answer's review, so this preparation attempt dispatched no new reviewers; the work itself is kept.",
+    "dialogue_terminal": "The reviewers and Ouroboros could not agree, and both positions were kept.",
+    "improvement_capsule": "The reviewers asked for one more pass and Ouroboros was given their notes.",
     "fence_reopen_failed": "The requested extra pass could not be started, so the answer stands as it was.",
     "review_cycles_exhausted": "The task used up its review rounds before the answer was signed off.",
     "open_obligations": "The answer was delivered with reviewer requests still open.",
@@ -765,12 +767,31 @@ TASK_CAUSE_PHRASES = {
     "acceptance_bypassed_context_overflow": "The task outgrew its context before the answer could be reviewed.",
     "acceptance_bypassed_children_unabsorbed": "Some sub-tasks had not been folded in, so the answer was never reviewed.",
     # Execution reason codes, carried verbatim from the card's own old table.
-    "plan_review_advisory": "Plan review never closed; the work continued under advisory enforcement",
+    # The plan review's outcome CLASS at delivery (outcome_axes.execution.plan_review,
+    # review_projection): one sentence per class; plan_review_advisory serves a
+    # legacy row that recorded the open review without a class.
+    "plan_review_unanswered": "Only some of the plan reviewers answered; the work went on with their notes.",
+    "plan_review_none_answered": "None of the plan reviewers answered; the work went on without their notes.",
+    "plan_review_answered_open": "The plan reviewers answered, but the review was never closed; the work went on with their notes.",
+    "plan_review_advisory": "The plan review was never closed; the work went on with what the reviewers said.",
+    "plan_review_awaiting": "Not every plan reviewer had answered when the task ended.",
+    "plan_review_quorum_unreachable": "Too few plan reviewers could answer, so the work was held.",
     "host_child_status_suffix": "A child task had not settled when the answer was delivered",
-    "invalid_delivery_control_after_repair": "The delivery control object was still malformed after repair",
+    "invalid_delivery_control_after_repair": "Ouroboros's final delivery instruction could not be read even after repair, so the answer stands as delivered.",
     "budget_exhausted": "The task ran out of budget before it could finish cleanly",
-    "delivery_control_degraded": "Delivery finished in a degraded control state",
+    # #869: the provider-death rail's terminal words; the amount of retained text is
+    # said by the notice, this clause only names why the task ended.
+    "provider_unavailable": "The model provider stopped answering, so the task could not finish",
+    "delivery_control_degraded": "Ouroboros's final delivery instruction could not be applied, so the answer stands as delivered.",
+    "authoring_handover_incomplete": "The replacement model stopped before resuming tool work.",
     "delegated_custody_unreconciled": "Some delegated work was never reconciled.",
+    # The one non-reason-code key: the task-result FIELD terminal_plan_review_open
+    # (task_finalization.terminal_result_fields), a standing limitation of the
+    # answer rather than the thing that ended the task.
+    "terminal_plan_review_open": "The plan review was still open when this answer was delivered",
+    "child_results_deferred": "Some sub-task results were deferred instead of being folded into this answer",
+    "tool_failure": "A tool this task used failed and nothing recovered it",
+    "task_exception": "The task stopped on an internal error",
 }
 
 
@@ -829,8 +850,8 @@ def append_canonical_task_summary(drive_root: Any, row: Dict[str, Any]) -> bool:
 def canonical_task_summary_receipt(result: Dict[str, Any]) -> Dict[str, Any]:
     """The receipt proving this task's own terminal row reached the canonical chat.
 
-    ``_append_terminal_task_projection`` stamps it on the task result in the same
-    write that appends the row, so another composer can tell that a task already
+    ``terminal_projection`` stamps it after the chat append (deduped by the
+    readiness token on retry), so another composer can tell that a task already
     spoke for itself without scanning chat text (BIBLE P5). Empty when no row was
     appended for that task.
     """
@@ -1047,112 +1068,9 @@ def _append_terminal_task_projection(
     drive_root: Any, task_id: str, task: Dict[str, Any], result: Dict[str, Any],
     task_done_event: Dict[str, Any],
 ) -> bool:
-    """Project one terminal child result into canonical cognition, without an LLM."""
-    from ouroboros.task_results import resolve_task_lineage, write_task_result
-    from ouroboros.task_status import SETTLED_STATUSES
+    from ouroboros.terminal_projection import append_terminal_projection
 
-    tid = str(task_id or "").strip()
-    task = task if isinstance(task, dict) else {}
-    result = result if isinstance(result, dict) else {}
-    event = task_done_event if isinstance(task_done_event, dict) else {}
-    if not tid:
-        return False
-    lineage = resolve_task_lineage(
-        tid,
-        metadata=task.get("metadata") if isinstance(task.get("metadata"), dict) else {},
-        root_task_id=result.get("root_task_id") or task.get("root_task_id"),
-        parent_task_id=result.get("parent_task_id") or task.get("parent_task_id"),
-        delegation_role=result.get("delegation_role") or task.get("delegation_role"),
-        original_task_id=result.get("original_task_id") or task.get("original_task_id"),
-        timeout_retry_from=result.get("timeout_retry_from") or task.get("timeout_retry_from"),
-    )
-    status = str(result.get("status") or event.get("status") or "").strip().lower()
-    if status not in SETTLED_STATUSES:
-        return False
-    is_root = bool(lineage["is_root_task"])
-    summary_id = f"task-terminal:{tid}"
-    summary_kind = "terminal_root_projection" if is_root else "terminal_result_projection"
-    parent_id = str(lineage.get("parent_task_id") or "")
-    root_id = str(lineage.get("root_task_id") or tid)
-    from ouroboros.project_facts import resolve_project_id
-
-    appended = False
-
-    def _append_once(current: Dict[str, Any], _patch: Dict[str, Any]) -> Dict[str, Any]:
-        nonlocal appended
-        existing_marker = current.get("canonical_terminal_projection")
-        if isinstance(existing_marker, dict) and str(existing_marker.get("summary_id") or "") == summary_id:
-            return {"status": str(current.get("status") or status)}
-        checkpoint = current.get("root_phase_checkpoint")
-        post_task_phase = (
-            str(checkpoint.get("post_task_synthesis") or "")
-            if isinstance(checkpoint, dict) else ""
-        )
-        if is_root and post_task_phase in {"pending_once", "running"}:
-            ready = current.get("canonical_terminal_projection_ready")
-            if isinstance(ready, dict) and str(ready.get("summary_id") or "") == summary_id:
-                return {"status": str(current.get("status") or status)}
-            return {
-                "status": str(current.get("status") or status),
-                "canonical_terminal_projection_ready": {
-                    "summary_id": summary_id,
-                    "task_done_ts": str(event.get("ts") or utc_now_iso()),
-                    "chat_id": int(event.get("chat_id") or task.get("chat_id") or 0),
-                },
-            }
-        effective = {**result, **current}
-        project_id = resolve_project_id({**task, **effective})
-        role = str(effective.get("role") or task.get("role") or ("root" if is_root else "child"))
-        reason = str(effective.get("reason_code") or event.get("reason_code") or "")
-        phase = outcome_phase(effective, event)
-        outcome = OUTCOME_PHASE_HEADLINE[phase]
-        row_chat_id = int(event.get("chat_id") or task.get("chat_id") or 0)
-        # The room IS the project and ``result_ref`` IS the pointer, so the row
-        # says in words only what the model cannot read off the typed fields:
-        # ``memory._format_chat_line`` renders the text and drops every other
-        # key, leaving lineage as the one fact that must stay prose.
-        text = (f"{outcome}. Root task {tid}." if is_root
-                else f"{outcome}. {role} (child {tid} of {parent_id or 'unknown'}).")
-        verdict = _completion_verdict(effective, event)
-        if verdict:
-            text += f" {verdict}"
-        excerpt = _completion_excerpt(effective, chat_id=row_chat_id, salvage_only=True)
-        if excerpt:
-            text += f" {excerpt}"
-        result_ref = {"kind": "task_result", "task_id": tid, "reader": "get_task_result"}
-        row = {
-            "ts": str(event.get("ts") or effective.get("ts") or utc_now_iso()),
-            "direction": "system", "type": "task_summary", "summary_kind": summary_kind,
-            "summary_id": summary_id, "task_id": tid,
-            "parent_task_id": parent_id, "root_task_id": root_id,
-            "project_id": project_id,
-            "chat_id": row_chat_id,
-            "delegation_role": str(effective.get("delegation_role") or task.get("delegation_role") or ""),
-            "role": role, "status": str(effective.get("status") or status),
-            "outcome": outcome, "outcome_phase": phase, "outcome_final": True,
-            "outcome_authority": "canonical_task_result_after_finalization",
-            "outcome_axes": effective.get("outcome_axes") or event.get("outcome_axes") or {},
-            "reason_code": reason, "result_ref": result_ref,
-            "text": text,
-        }
-        if isinstance(effective.get("model_execution"), dict):
-            row["model_execution"] = dict(effective["model_execution"])
-        appended = append_canonical_task_summary(drive_root, row)
-        if not appended:
-            return {"status": str(current.get("status") or status)}
-        return {
-            "status": str(current.get("status") or status),
-            "canonical_terminal_projection": {
-                "summary_id": summary_id, "summary_kind": summary_kind,
-                "written_at": row["ts"], "chat_id": row_chat_id,
-            },
-            "canonical_terminal_projection_ready": None,
-        }
-
-    write_task_result(
-        drive_root, tid, status, _field_projector=_append_once,
-    )
-    return appended
+    return append_terminal_projection(drive_root, task_id, task, task_done_event, result=result)
 
 
 def historical_terminal_projection(entry: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -1271,61 +1189,132 @@ def _custody_debt_reason(reason: str, result: Dict[str, Any], event: Dict[str, A
     return execution_reason, (WARN_DELEGATED_CUSTODY_UNRECONCILED if debt else "")
 
 
-def _completion_verdict(result: Dict[str, Any], event: Dict[str, Any]) -> str:
-    """One TERMINATED host clause for BOTH lifecycle rows.
+# The open-review classes that state a standing limitation (never the merely awaited case).
+PLAN_REVIEW_OPEN_CLASSES = frozenset({"plan_review_unanswered", "plan_review_none_answered", "plan_review_answered_open"})
 
-    A host row must not present an unaccepted claim as the whole story: a
-    non-accepted decision speaks through the owner sentence of its own typed
-    reason, otherwise the execution reason speaks. The stored reviewer
-    rationale never reaches the row — it stays in the card, the task result and
-    Logs, which is the complete text this pointer resolves to. The Python twin
-    of ``taskReasonDetail``; callers add no punctuation.
+
+def _plan_review_key(result: Dict[str, Any], event: Dict[str, Any], fallback: str) -> str:
+    """``plan_review_<class>`` when ``execution.plan_review`` names a class with a
+    sentence, else the caller's fallback. The twin of ``planReviewKey``."""
+    for source in (result, event):
+        axes = source.get("outcome_axes") if isinstance(source.get("outcome_axes"), dict) else {}
+        execution = axes.get("execution") if isinstance(axes.get("execution"), dict) else {}
+        key = f"plan_review_{str(execution.get('plan_review') or '')}"
+        if key in TASK_CAUSE_PHRASES:
+            return key
+    return fallback
+
+
+def _terminal_limitations(result: Dict[str, Any], event: Dict[str, Any], reason: str,
+                          *, held: bool = False) -> List[str]:
+    """Standing limitations of the delivered answer, from facts already stored:
+    deferred children, and a plan review still open at delivery. The plan clause
+    is stated when the record carries the ``terminal_plan_review_open`` flag OR
+    names an open-review class on ``execution.plan_review`` (the class rides the
+    live event and the replayed row where the result-only flag does not); the
+    class chooses the wording, and without one ``plan_review_advisory`` speaks
+    when that is the recorded reason (so the join states it once). A HELD task
+    states the hold as its primary cause and never a limitation of work that
+    went on. The twin of ``terminalLimitations``."""
+    deferred, flagged = False, False
+    for source in (result, event):
+        axes = source.get("outcome_axes") if isinstance(source.get("outcome_axes"), dict) else {}
+        objective = axes.get("objective") if isinstance(axes.get("objective"), dict) else {}
+        execution = axes.get("execution") if isinstance(axes.get("execution"), dict) else {}
+        deferred = deferred or str(objective.get("deferred_count") or "0").strip() not in {"0", ""}
+        flagged = flagged or source.get("terminal_plan_review_open") is True or (
+            f"plan_review_{execution.get('plan_review') or ''}" in PLAN_REVIEW_OPEN_CLASSES)
+    flagged = flagged and not held
+    plan_key = reason if reason == "plan_review_advisory" else "terminal_plan_review_open"
+    return [TASK_CAUSE_PHRASES["child_results_deferred"] if deferred else "",
+            TASK_CAUSE_PHRASES[_plan_review_key(result, event, plan_key)] if flagged else ""]
+
+
+def _join_cause_clauses(clauses: List[str]) -> str:
+    """One line, one clause per distinct fact, separated by a middle dot.
+
+    A clause that is not last drops its own full stop so the line reads as one
+    statement rather than a row of stubs. The browser twin is joinCauseClauses.
+    """
+    kept: List[str] = []
+    for clause in clauses:
+        if clause and clause not in kept:
+            kept.append(clause)
+    return " · ".join(c[:-1] if index < len(kept) - 1 and c.endswith(".") else c
+                      for index, c in enumerate(kept))
+
+
+def _completion_verdict(result: Dict[str, Any], event: Dict[str, Any]) -> str:
+    """Every simultaneous cause this record holds, as ONE terminated host clause.
+
+    The primary cause is what ENDED the task. A deferred child, a plan review
+    still open at delivery and an unreconciled custody debt are standing
+    limitations of the SAME answer, so they are stated BESIDE it instead of
+    replacing it or being replaced by it: a card that can show one cause has to
+    choose, and choosing is why the host had to write the second fact as chat
+    prose. Nothing here ranks or folds; equivalent clauses state themselves once.
+    A held task (a blocking plan exit) speaks through its objective's own reason,
+    so it never reads "the work went on". The stored reviewer rationale never
+    reaches the row — it stays in the card, the task result and Logs. The Python
+    twin of ``taskReasonDetail``; callers add no punctuation.
     """
     from ouroboros.outcomes import (
-        ACCEPTANCE_ACCEPTED, REASON_FINAL_MESSAGE, REASON_OWNER_REQUESTED_FINALIZATION,
+        ACCEPTANCE_ACCEPTED, REASON_FINAL_MESSAGE, REASON_OWNER_REQUESTED_FINALIZATION, plan_review_awaiting,
     )
 
     decision: Dict[str, Any] = {}
     veto: Dict[str, Any] = {}
+    objective: Dict[str, Any] = {}
     for source in (event, result):
         axes = source.get("outcome_axes") if isinstance(source.get("outcome_axes"), dict) else {}
-        objective = axes.get("objective") or {}
-        if isinstance(objective, dict) and isinstance(objective.get("receipt_veto"), dict):
+        objective = axes.get("objective") if isinstance(axes.get("objective"), dict) else objective
+        if isinstance(objective.get("receipt_veto"), dict):
             veto = objective["receipt_veto"]
         for holder in (source.get("review_status"), axes.get("review")):
             if isinstance(holder, dict) and isinstance(holder.get("acceptance_decision"), dict):
                 decision = holder["acceptance_decision"]
     status = str(decision.get("status") or "").strip()
     cause = str(decision.get("reason") or "")
-    reason = str(result.get("reason_code") or event.get("reason_code") or "")
-    if (reason != REASON_OWNER_REQUESTED_FINALIZATION and status
-            and (status != ACCEPTANCE_ACCEPTED or cause in TASK_CAUSE_PHRASES)
-            and outcome_phase(result, event) in {"done", "warn"}):
+    raw_reason = str(result.get("reason_code") or event.get("reason_code") or "")
+    origin = result.get("cancel_origin") or event.get("cancel_origin")
+    phase = outcome_phase(result, event)
+    # Resolved once for every branch: the custody debt is a standing limitation
+    # of the same answer, not a property of the branch that happened to fire.
+    reason, custody = _custody_debt_reason(raw_reason, result, event)
+    held = phase == "error" and str(objective.get("source") or "").startswith("plan_review_")
+    if raw_reason == REASON_OWNER_REQUESTED_FINALIZATION:
+        clause = ""  # an owner-requested stop is a success and carries its own marker
+    elif (status and (status != ACCEPTANCE_ACCEPTED or cause in TASK_CAUSE_PHRASES)
+            and phase in {"done", "warn"}):
         clause = TASK_CAUSE_PHRASES.get(cause, cause)
-    elif reason in {REASON_OWNER_REQUESTED_FINALIZATION, REASON_FINAL_MESSAGE}:
-        return ""
+    elif phase == "cancelled" and isinstance(origin, dict) and origin:
+        # The recorded cause and the relation the record PROVES (#1061).
+        from supervisor.cancel_publication import cancel_cause_clauses
+
+        clause = _join_cause_clauses(cancel_cause_clauses(origin, result, event))
+    elif held:
+        # A task HELD by a blocking plan review states the objective's own reason.
+        clause = TASK_CAUSE_PHRASES.get(str(objective.get("reason") or ""), str(objective.get("reason") or ""))
+    elif raw_reason in {REASON_FINAL_MESSAGE, ""}:
+        clause = (TASK_CAUSE_PHRASES["plan_review_awaiting"]
+                  if plan_review_awaiting(event, result) and phase == "done" else "")
     else:
-        # A healed debt is never restored here. The objective warning the
-        # overlay froze keeps the headline and the refresh may not rewrite it,
-        # but naming the code again would state a debt the same record shows as
-        # empty. The debt is a warning BESIDE the rail cause, and a row with
-        # neither states no cause and leaves the headline to its own axis.
-        reason, custody = _custody_debt_reason(reason, result, event)
+        # A healed debt is never restored here: naming the code again would
+        # state a debt the same record shows as empty. The recorded open-review
+        # reason speaks through the wave's class when the record names one.
         detail = veto.get("detail") if veto.get("reason") == reason else ""
+        key = _plan_review_key(result, event, reason) if reason == "plan_review_advisory" else reason
         clause = (" ".join(strip_markdown(str(detail)).split()) if detail
-                  else TASK_CAUSE_PHRASES.get(reason, reason))
-        if clause and custody:
-            clause += f" ({TASK_CAUSE_PHRASES.get(custody, custody)})"
-        elif custody:
-            clause = TASK_CAUSE_PHRASES.get(custody, custody)
-    if not clause:
-        return ""
-    return clause if clause.endswith((".", "!", "?", "…", ")")) else clause + "."
+                  else TASK_CAUSE_PHRASES.get(key, key))
+    line = _join_cause_clauses([clause, *incident_cause_clauses(decision, reason, TASK_CAUSE_PHRASES),
+                                *_terminal_limitations(result, event, reason, held=held),
+                                TASK_CAUSE_PHRASES.get(custody, custody) if custody else ""])
+    return line if not line or line.endswith((".", "!", "?", "…", ")")) else line + "."
 
 
 def _run_lives_in_its_project(
     drive_root: Any, task_id: str, project_id: str, task: Dict[str, Any], result: Dict[str, Any],
-) -> bool:
+) -> Optional[bool]:
     """Did this run's work actually go into that project's room?
 
     Two facts answer yes, and only these two. The run was ADDRESSED there —
@@ -1345,34 +1334,57 @@ def _run_lives_in_its_project(
         chat_id = result.get("chat_id")
         if chat_id is None:
             chat_id = task.get("chat_id")
-        project_chat = (get_reserved_project(drive_root, project_id) or {}).get("chat_id")
+        project_chat = (get_reserved_project(drive_root, project_id, strict=True) or {}).get("chat_id")
         if chat_id is not None and project_chat is not None and int(chat_id) == int(project_chat):
             return True
-        binding = project_binding_for_task(drive_root, task_id) or {}
+        binding = project_binding_for_task(drive_root, task_id, strict=True) or {}
         return str(binding.get("project_id") or "") == str(project_id)
     except Exception:
         log.debug("project-room membership check failed for %s", task_id, exc_info=True)
-        return False
+        return None
 
 
-def enqueue_project_completion_summary(
+# Typed answers of the Main-mirror seam (#1154): INELIGIBLE is a POSITIVE finding
+# (this run owes Main nothing); UNKNOWN leaves the obligation owed for a retry.
+MAIN_MIRROR_OWED, MAIN_MIRROR_INELIGIBLE, MAIN_MIRROR_UNKNOWN = "owed", "ineligible", "unknown"
+
+
+def project_completion_delivery_outcome(
     drive_root: Any, evt: Dict[str, Any], task_id: str, task: Dict[str, Any],
     result: Dict[str, Any], task_done_event: Dict[str, Any],
-) -> bool:
-    """Owe Main's compact row for a managed Project root, not a conversation."""
+    *, _on_owed: Optional[Callable[[], bool]] = None,
+) -> tuple:
+    """Owe Main's answer for Project roots, including conversations moved from Main.
+
+    A direct conversation born inside a Project stays there. Only its durable,
+    ingress-bound source can prove that a direct turn was transferred from Main;
+    current chat addressing and project existence cannot establish that origin.
+
+    Answers ``(durability, live_send_queued)``: one of ``MAIN_MIRROR_OWED`` /
+    ``MAIN_MIRROR_INELIGIBLE`` / ``MAIN_MIRROR_UNKNOWN``, resting on the OWED
+    registration and never on the live queue (a registered row the queue refused
+    is replayed from the outbox; a send the registry could not record is not
+    durable at all), plus the long-standing boolean below, which a duplicate
+    answers False without the answer ceasing to be owed. The bounded outbox and
+    at-least-once external delivery stay exactly as disclosed.
+    """
     tid = str(task_id or "").strip()
     task = task if isinstance(task, dict) else {}
     result = result if isinstance(result, dict) else {}
-    if not tid or any(
-        bool(row.get("_is_direct_chat"))
-        for row in (evt, task, result, task_done_event) if isinstance(row, dict)
-    ):
-        return False
+    if not tid:
+        return MAIN_MIRROR_INELIGIBLE, False
     try:
-        from ouroboros.projects_registry import mirrored_answer, task_presentation_snapshot
+        from ouroboros.projects_registry import mirrored_answer, project_binding_for_task, task_presentation_snapshot
+
+        if any(bool(row.get("_is_direct_chat")) for row in (evt, task, result, task_done_event)
+               if isinstance(row, dict)):
+            binding = project_binding_for_task(drive_root, tid, strict=True) or {}
+            source = binding.get("source_ref")
+            if not owner_message_ref_is_valid(source) or source["chat_id"] != 1:
+                return MAIN_MIRROR_INELIGIBLE, False
         from ouroboros.task_results import resolve_task_lineage
         from ouroboros.task_status import SETTLED_STATUSES
-        from supervisor.terminal_delivery import enqueue_terminal_delivery
+        from supervisor.terminal_delivery import enqueue_terminal_delivery, register_pending_delivery
 
         metadata = task.get("metadata") if isinstance(task.get("metadata"), dict) else {}
         lineage = resolve_task_lineage(
@@ -1385,23 +1397,27 @@ def enqueue_project_completion_summary(
         )
         status = str(result.get("status") or task_done_event.get("status") or "").lower()
         if not lineage["is_root_task"] or status not in SETTLED_STATUSES:
-            return False
+            return MAIN_MIRROR_INELIGIBLE, False
         snapshot = task_presentation_snapshot(
             drive_root, tid, task=task, result=result,
             project_id=str(result.get("project_id") or task.get("project_id") or ""),
+            strict=True,
         )
         if not snapshot["project_id"] or not snapshot["project_routable"]:
             # Owner decision 3A: a run whose project id was DERIVED from a
-            # workspace has no room, so Main stays silent instead of offering an
-            # "Open Project" that lands in an empty duplicate of itself. The same
+            # workspace has no room, so Main stays silent instead of offering a
+            # Project reference that lands in an empty duplicate of itself. The same
             # holds once a project is deleting or tombstoned.
-            return False
-        if not _run_lives_in_its_project(drive_root, tid, snapshot["project_id"], task, result):
+            return MAIN_MIRROR_INELIGIBLE, False
+        membership = _run_lives_in_its_project(drive_root, tid, snapshot["project_id"], task, result)
+        if membership is None:
+            return MAIN_MIRROR_UNKNOWN, False
+        if not membership:
             # The room exists but holds none of this run's work: its id was only
             # registered AFTER admission, or a mid-flight bind failed fail-soft.
             # Offering "Open the Project" would reproduce the reported defect —
             # a Main row leading into an empty room.
-            return False
+            return MAIN_MIRROR_INELIGIBLE, False
         # Only the salvage excerpt survives in the TEXT: the model's own answer is
         # never cut into it (it rides whole in the typed key below, or not at all),
         # while salvaged bytes exist nowhere else. The text's only pointer is the
@@ -1426,10 +1442,37 @@ def enqueue_project_completion_summary(
                 **mirrored_answer(result, outcome_phase(result, task_done_event)),
             },
         }
-        return bool(enqueue_terminal_delivery(drive_root, event))
+        # Owed BEFORE the live send: the enqueue below is idempotent on the same
+        # delivery_id, so a queue refusal after registration recovers from the outbox.
+        owed = register_pending_delivery(pathlib.Path(drive_root), dict(event))
+        if not owed:
+            return MAIN_MIRROR_UNKNOWN, False
+        # The settlement owner retires readiness to a durable result disposition
+        # before the live send. Published history then outlives registry eviction.
+        if _on_owed is not None and not _on_owed():
+            return MAIN_MIRROR_UNKNOWN, False
+        # A live queue exception cannot undo an already durable outbox row.
+        try:
+            queued = bool(enqueue_terminal_delivery(drive_root, event))
+        except Exception:
+            log.warning("Main mirror remains owed after queue failure for %s", tid, exc_info=True)
+            queued = False
+        return MAIN_MIRROR_OWED, queued
     except Exception:
         log.warning("Failed to enqueue Project completion summary for %s", tid, exc_info=True)
-        return False
+        return MAIN_MIRROR_UNKNOWN, False
+
+
+def enqueue_project_completion_summary(
+    drive_root: Any, evt: Dict[str, Any], task_id: str, task: Dict[str, Any],
+    result: Dict[str, Any], task_done_event: Dict[str, Any],
+) -> bool:
+    """Whether THIS call queued a live Main copy — the long-standing answer;
+    durability is the typed pair's other half, for callers that must tell a
+    duplicate from a lost one."""
+    return project_completion_delivery_outcome(
+        drive_root, evt, task_id, task, result, task_done_event,
+    )[1]
 
 
 def announce_project_started(
@@ -1475,26 +1518,13 @@ def announce_project_started(
         return False
 
 
-__all__ = [
-    "AGENT_RECEIPT_ID_PREFIX",
-    "announce_project_started",
-    "append_authored_task_summary",
-    "append_chat_annotation",
-    "append_canonical_task_summary",
-    "append_terminal_task_projection",
-    "build_owner_message_ref",
-    "chat_annotation_receipt",
-    "entry_matches_source_ref",
-    "latest_chat_annotations",
-    "enqueue_project_completion_summary",
-    "completion_status_label",
-    "outcome_phase",
-    "owner_message_ref_is_valid",
-    "project_origin_rows",
-    "project_question_pointer",
-    "project_recent_dialogue",
-    "routing_options_with_labels",
-    "routing_target_label",
-    "resolve_owner_message_source",
+__all__ = ["AGENT_RECEIPT_ID_PREFIX", "announce_project_started",
+    "append_authored_task_summary", "append_chat_annotation", "append_canonical_task_summary",
+    "append_terminal_task_projection", "build_owner_message_ref", "chat_annotation_receipt",
+    "entry_matches_source_ref", "latest_chat_annotations",
+    "enqueue_project_completion_summary", "project_completion_delivery_outcome",
+    "completion_status_label", "outcome_phase", "owner_message_ref_is_valid",
+    "project_origin_rows", "project_question_pointer", "project_recent_dialogue",
+    "routing_options_with_labels", "routing_target_label", "resolve_owner_message_source",
     "source_refs_for_project",
 ]

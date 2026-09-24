@@ -119,7 +119,7 @@ def task_execution_evidence(drive_root: Any, task_id: str) -> Dict[str, Any]:
                 pass
     except OSError:
         evidence_read_failed = True
-    for row in custody._iter_rows(_log_path):
+    for row in custody.custody_rows(drive_root):
         if str(row.get("task_id") or "") != tid:
             continue
         if str(row.get("type") or "") == NANNY_NUDGE_STAMP:
@@ -319,6 +319,8 @@ def acceptance_substrate_facts(ctx: Any, task_id: str) -> Dict[str, Any]:
     refusal = getattr(ctx, "_configured_startup_refusal", None)
     if isinstance(refusal, dict):
         out["startup_refused"] = str(refusal.get("reason") or "")
+        if refusal.get("detail"):
+            out["startup_refused_detail"] = str(refusal.get("detail"))
     return out
 
 
@@ -355,7 +357,7 @@ def acceptance_patch_dispositions(drive_root: Any, task_id: str) -> Dict[str, An
     except OSError:
         return {"evidence_read_failed": True}
     rows: List[Dict[str, Any]] = []
-    for row in custody._iter_rows(log_path):
+    for row in custody.custody_rows(drive_root):
         if str(row.get("type") or "") != "delegate_run_patch_verdict":
             continue
         if str(row.get("task_id") or "") != tid:

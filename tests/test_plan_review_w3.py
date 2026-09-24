@@ -713,25 +713,28 @@ def _actor(slot_id, *, ok=False, failure_code="", error=""):
     return {"slot_id": slot_id, "model": "m", "ok": ok, "failure_code": failure_code, "error": error}
 
 
-def test_progress_line_dedups_typed_reasons_and_names_the_late_result():
-    from ouroboros.tools.plan_review_runtime import plan_wave_progress_line
+def test_slot_reasons_dedup_typed_reasons_and_the_owner_line_names_the_late_result():
+    from ouroboros.tools.plan_review_runtime import plan_slot_reasons, plan_wave_progress_line
 
     counts = {"parseable": 0, "configured": 6, "blocking": 0, "note": 0, "need_evidence": 0}
     same = [_actor(f"s{i}", failure_code="subscription_window_exhausted") for i in range(3)]
     distinct = [_actor("d1", failure_code="credential_pool_exhausted"), _actor("d2", error="transport died"),
                 _actor("d3", error="x" * 400), _actor("d4", failure_code="deadline_exhausted")]
-    line = plan_wave_progress_line("DEGRADED", counts, cycles_paid=1, cap=2,
-                                   wave={"actors": same + distinct, "custody_pending": True})
-    assert line.count("subscription_window_exhausted") == 1  # three identical reasons -> one
-    assert "credential_pool_exhausted; transport died" in line
-    assert "(+1 more in the task result)" in line and "deadline_exhausted" not in line  # first four shown
-    assert "OMISSION NOTE" in line and "\n" not in line  # bounded, one line
-    assert line.endswith("late result pending (reviewer slots still in flight, not yet collected)")
-    # Every other aggregate renders byte-identically to the plain form.
-    plain = plan_wave_progress_line("GREEN", {**counts, "parseable": 6}, cycles_paid=1, cap=2)
-    assert plain == plan_wave_progress_line("GREEN", {**counts, "parseable": 6}, cycles_paid=1, cap=2,
-                                            wave={"actors": same, "custody_pending": False})
-    assert plain == "📐 plan_task: GREEN — 0 blocking / 0 note / 0 need_evidence; cycles paid 1/2"
+    wave = {"actors": same + distinct, "custody_pending": True}
+    reasons = plan_slot_reasons(wave)  # the MODEL-facing helper keeps the typed reasons, deduplicated and bounded
+    assert reasons.count("subscription_window_exhausted") == 1  # three identical reasons -> one
+    assert "credential_pool_exhausted; transport died" in reasons
+    assert "(+1 more in the task result)" in reasons and "deadline_exhausted" not in reasons  # first four shown
+    assert "OMISSION NOTE" in reasons and "\n" not in reasons  # bounded, one line
+    # The OWNER line carries none of them: who answered, and that a result is still owed.
+    line = plan_wave_progress_line("DEGRADED", counts, cycles_paid=1, cap=2, wave=wave)
+    assert line == "📐 Plan review: none of the 7 reviewers answered; a reviewer's answer is still on its way."
+    # A clean wave reads the same with or without its roster.
+    clean = {**counts, "parseable": 3, "configured": 3}
+    plain = plan_wave_progress_line("GREEN", clean, cycles_paid=1, cap=2)
+    assert plain == plan_wave_progress_line("GREEN", clean, cycles_paid=1, cap=2,
+                                            wave={"actors": [_actor(f"s{i}", ok=True) for i in range(3)], "custody_pending": False})
+    assert plain == "📐 Plan review: all 3 reviewers answered — no findings."
 
 
 def test_refused_redispatch_emits_a_separate_no_dispatch_line(harness, monkeypatch):
@@ -755,9 +758,10 @@ def test_refused_redispatch_emits_a_separate_no_dispatch_line(harness, monkeypat
     harness.progress.clear()
     _call(ctx)  # stale empty-epoch wave re-dispatches; every row refuses pre-send at $0
     assert _state(harness)["cycles_paid"] == 1
-    no_dispatch = [line for line in harness.progress if line.startswith("📐 plan_task: no new reviewer cycle dispatched")]
-    assert no_dispatch == ["📐 plan_task: no new reviewer cycle dispatched: session_task_missing"]
-    assert harness.progress[-1].startswith("📐 plan_task: DEGRADED") and "session_task_missing" in harness.progress[-1]
+    no_dispatch = [line for line in harness.progress if line.startswith("📐 Plan review: no reviewer could take the plan")]
+    assert no_dispatch == ["📐 Plan review: no reviewer could take the plan — 3 not sent."]
+    assert harness.progress[-1] == "📐 Plan review: none of the 3 reviewers answered, 3 not sent."
+    assert not any("session_task_missing" in line for line in harness.progress)  # the typed reason stays in Reviews/Logs
 
 
 def test_gate_projection_carries_custody_pending_before_the_aggregate():

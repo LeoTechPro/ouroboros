@@ -10,17 +10,28 @@ from ouroboros.config import runtime_setting
 import hashlib
 import logging
 from contextlib import nullcontext
+from dataclasses import dataclass, field
 import json
 import pathlib
 import queue
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from ouroboros.llm import LLMClient
 from ouroboros.loop_llm_call import _emit_live_log
 from ouroboros.utils import sanitize_tool_result_for_log
 
 
 log = logging.getLogger("ouroboros.loop")
+
+# Closed set of typed source-acknowledgement refusals (never model prose).
+ACK_OWNER_INPUT_UNREAD = "owner_input_unread"
+ACK_SOURCE_NOT_OBSERVED = "source_not_observed"
+ACK_OWNER_SOURCE_CHANGED = "owner_source_changed"
+ACK_QUEUE_GENERATION_CHANGED = "queue_generation_changed"
+# Not a refusal: a queue fact could not be read, so only known facts were compared.
+ACK_QUEUE_STATE_UNKNOWN = "queue_state_unknown"
+# The four facts a source selector renders and an acknowledgement compares.
+OBSERVATION_FACTS = ("owner_source_sha256", "owner_generation", "fence_token", "queue_generation")
 
 
 def _loop():
@@ -72,6 +83,15 @@ def _append_or_merge_user_message(
 ) -> None:
     """Append a user message, merging only when its tail is known unsent."""
     _append_or_merge_user_content(messages, text, slot=slot)
+
+
+def transcript_growth_signature(messages: List[Dict[str, Any]]) -> Tuple[int, int]:
+    """(row count, tail content length): moves on every append AND every merge.
+
+    A tuple, not a sum — the append-or-merge seam grows the tail in place, so a
+    row count alone cannot tell whether the host has just spoken to Main.
+    """
+    return (len(messages), len(str(messages[-1].get("content") or "")) if messages else 0)
 
 
 def _evict_stale_image_blocks(messages: List[Dict[str, Any]], *, incoming: int = 0) -> None:
@@ -221,15 +241,28 @@ def _record_owner_directive(
 
 
 def _initialize_owner_directives(ctx: Any, messages: List[Dict[str, Any]]) -> None:
-    """Capture the canonical initial user turn before system notices are added."""
+    """Capture the run's first user turn before system notices are added.
+
+    The row is always recorded, but its label states only what the host knows:
+    ``initial_user`` when the owner door stamped this run (``run_origin``'s
+    ``owner_ingress``), ``initial_text`` otherwise — a Presence event, a wake, a
+    schedule, a follow-up, a child's work order or an unmarked context. The bytes of
+    an owner row do not change, so ``owner_source_sha256`` stays what it was; the
+    label is read by the models that judge the corpus (acceptance, safety, the
+    post-task synthesis), never branched on by the host.
+    """
     existing = getattr(ctx, "_owner_directives", None)
     if isinstance(existing, list) and existing:
         return
     for message in messages:
         if isinstance(message, dict) and str(message.get("role") or "") == "user":
+            from ouroboros.dialogue_provenance import run_origin
+
+            metadata = getattr(ctx, "task_metadata", None)
+            stamped = run_origin({"metadata": metadata if isinstance(metadata, dict) else {}})["owner_ingress"]
             _loop()._record_owner_directive(
                 ctx,
-                source="initial_user",
+                source="initial_user" if stamped else "initial_text",
                 content=message.get("content"),
             )
             return
@@ -244,18 +277,83 @@ def owner_source_sha256(ctx: Any) -> str:
     ).encode("utf-8")).hexdigest()
 
 
+def queue_inspection_unknown(ctx: Any, exc: BaseException) -> Dict[str, Any]:
+    """The one typed stamp for a queue inspection that could not be read.
+
+    Unknown queue state is not evidence that a new message arrived; the stamp is
+    disclosed on the execution trace and returned for the caller's own record.
+    """
+    mark = {"status": "unknown", "reason": "queue_inspection_failed", "error_type": type(exc).__name__}
+    trace = getattr(ctx, "_execution_trace", None)
+    if isinstance(trace, dict):
+        trace.setdefault("review_decision", {})["admission_inspection"] = mark
+    return mark
+
+
 def _acceptance_observation_state(ctx: Any) -> Dict[str, Any]:
-    """Current ingress facts; the queue still owns the final compare-and-seal."""
+    """Current ingress facts; the queue still owns the final compare-and-seal.
+
+    The local facts are always computed. An inspect failure is caught HERE:
+    ``queue_generation`` stays ``None`` and the state carries the non-rendered
+    ``admission_inspection`` mark (the ``tool_count`` convention — it never
+    changes the rendered selector row's bytes).
+    """
     agent = getattr(ctx, "owner_message_admission_agent", None)
     token = getattr(ctx, "_task_acceptance_fence_token", None)
     inspect = getattr(ctx, "inspect_acceptance_fence", None)
-    state = inspect(token=str(token)) if token is not None and callable(inspect) else {}
-    return {
+    state: Any = {}
+    unknown = None
+    if token is not None and callable(inspect):
+        try:
+            state = inspect(token=str(token))
+        except Exception as exc:
+            unknown = queue_inspection_unknown(ctx, exc)
+    facts = {
         "owner_source_sha256": owner_source_sha256(ctx),
         "owner_generation": int(getattr(agent, "_owner_message_generation", 0) or 0) if agent else None,
         "fence_token": token,
-        "queue_generation": int(state.get("owner_message_generation") or 0) if state else None,
+        "queue_generation": int(state.get("owner_message_generation") or 0) if isinstance(state, dict) and state else None,
     }
+    if unknown is not None:
+        facts["admission_inspection"] = unknown
+    return facts
+
+
+def owner_authority_kinds(entries: List[Dict[str, Any]]) -> List[str]:
+    """Typed kinds of drained mailbox entries that carry owner authority.
+
+    Context-only task mail (a host system frame, a descendant's escalation, an
+    independent task) wakes the mind but is not the owner's input — the same
+    provenance boundary the ordinary drain uses for the owner corpus.
+    """
+    from ouroboros.owner_mailbox import CONTEXT_ONLY_TASK_PROVENANCES, KIND_OWNER_TEXT, KIND_TASK_MESSAGE
+
+    kinds: List[str] = []
+    for entry in entries:
+        kind = str(entry.get("kind") or KIND_OWNER_TEXT)
+        if kind == KIND_TASK_MESSAGE:
+            provenance = str(entry.get("provenance") or "ancestor_task")
+            if provenance in CONTEXT_ONLY_TASK_PROVENANCES:
+                continue
+            kind = f"{kind}:{provenance}"
+        kinds.append(kind)
+    return kinds
+
+
+def _pending_owner_input_kinds(ctx: Any) -> List[str]:
+    """Unread owner-authority input a source acknowledgement must not hide: a
+    peek over a COPY of the seen-set (the round top performs the real drain)."""
+    from ouroboros.owner_mailbox import drain_owner_entries
+
+    incoming = getattr(ctx, "_acceptance_observation_incoming", None)
+    kinds = ["direct_incoming"] if incoming is not None and not incoming.empty() else []
+    drive_root, task_id = getattr(ctx, "drive_root", None), str(getattr(ctx, "task_id", "") or "")
+    if drive_root is None or not task_id:
+        return kinds
+    return kinds + owner_authority_kinds(drain_owner_entries(
+        pathlib.Path(drive_root), task_id, set(getattr(ctx, "_loop_mailbox_seen_ids", None) or ()),
+        getattr(ctx, "task_attempt", None) or 1,
+    ))
 
 
 def capture_acceptance_observation(
@@ -264,52 +362,116 @@ def capture_acceptance_observation(
     """Call after ingress drain, immediately before Main sees the current turn.
 
     No source is acknowledged here. A later Main decision must name these exact
-    retained bytes; arrivals during the model call remain unread ingress.
+    retained bytes; arrivals during the model call remain unread ingress and
+    yield ``{}``. An unknown queue state yields the full local observation: a
+    good observation is never clobbered by a failed re-capture.
     """
     from ouroboros.loop_transport import _owner_signal_pending
 
     lock = getattr(ctx, "owner_message_admission_lock", None)
     with lock if lock is not None else nullcontext():
-        observation = {}
-        try:
-            if not _owner_signal_pending(
-                incoming_messages, getattr(ctx, "drive_root", None), str(getattr(ctx, "task_id", "") or ""),
-                getattr(ctx, "_loop_mailbox_seen_ids", None), getattr(ctx, "task_attempt", None) or 1,
-                owner_authority_only=True,
-            ):
-                observation = _acceptance_observation_state(ctx)
-                observation["tool_count"] = len(llm_trace.get("tool_calls") or [])
-        except Exception:
-            log.debug("Acceptance source observation unavailable", exc_info=True)
+        observation: Dict[str, Any] = {}
+        if not _owner_signal_pending(
+            incoming_messages, getattr(ctx, "drive_root", None), str(getattr(ctx, "task_id", "") or ""),
+            getattr(ctx, "_loop_mailbox_seen_ids", None), getattr(ctx, "task_attempt", None) or 1,
+            owner_authority_only=True,
+        ):
+            observation = _acceptance_observation_state(ctx)
+            observation["tool_count"] = len(llm_trace.get("tool_calls") or [])
         ctx._acceptance_observation = observation
         ctx._acceptance_observation_incoming = incoming_messages
         return dict(observation)
 
 
-def acknowledge_acceptance_observation(ctx: Any, source_sha256: str) -> bool:
-    """Advance only consumed ingress, never criteria or the review verdict."""
-    observed = getattr(ctx, "_acceptance_observation", None)
-    if not isinstance(observed, dict) or observed.get("owner_source_sha256") != source_sha256:
-        return False
-    try:
-        from ouroboros.loop_transport import _owner_signal_pending
+@dataclass(frozen=True)
+class AcceptanceAck:
+    """Typed outcome of one owner-source acknowledgement; truthy iff ``ok``.
 
-        if _owner_signal_pending(
-            getattr(ctx, "_acceptance_observation_incoming", None), getattr(ctx, "drive_root", None),
-            str(getattr(ctx, "task_id", "") or ""), getattr(ctx, "_loop_mailbox_seen_ids", None),
-            getattr(ctx, "task_attempt", None) or 1,
-            owner_authority_only=True,
-        ):
-            return False
-        current = _acceptance_observation_state(ctx)
+    ``cause`` is one of the closed ``ACK_*`` refusals (empty when ok); ``unknown``
+    is ``ACK_QUEUE_STATE_UNKNOWN`` when a queue fact could not be read (never a
+    refusal); ``facts`` carries the observed and current facts and, for a
+    refusal, what differed.
+    """
+
+    ok: bool
+    cause: str = ""
+    unknown: str = ""
+    facts: Dict[str, Any] = field(default_factory=dict)
+
+    def __bool__(self) -> bool:
+        return self.ok
+
+
+def _observation_facts(observation: Any) -> Dict[str, Any]:
+    observation = observation if isinstance(observation, dict) else {}
+    return {key: observation.get(key) for key in OBSERVATION_FACTS}
+
+
+def _record_acceptance_source_ack(ctx: Any, ack: AcceptanceAck, *, observed: Any, current: Any) -> AcceptanceAck:
+    """One durable worker-side row per acknowledgement, independent of supervisor lag."""
+    from ouroboros import task_pacing
+    from ouroboros.utils import append_jsonl, utc_now_iso
+
+    marks = [row.get("admission_inspection") for row in (observed, current)
+             if isinstance(row, dict) and isinstance(row.get("admission_inspection"), dict)]
+    meta = getattr(ctx, "_current_llm_call_meta", None)
+    row = {
+        "ts": utc_now_iso(), "type": "acceptance_source_ack",
+        "task_id": str(getattr(ctx, "task_id", "") or ""),
+        "round": meta.get("round") if isinstance(meta, dict) else None,
+        "ok": ack.ok, "cause": ack.cause, "unknown": ack.unknown,
+        "error_type": str(marks[0].get("error_type") or "") if marks else "",
+        "observed": _observation_facts(observed), "current": _observation_facts(current),
+        "pending_kinds": list(ack.facts.get("pending_kinds") or []),
+    }
+    try:
+        append_jsonl(task_pacing.acceptance_timing_events_path(ctx), row)
     except Exception:
-        return False
-    if any(current[key] != observed.get(key) for key in current):
-        return False
-    ctx._acceptance_ack_source_sha256 = source_sha256
-    ctx._task_acceptance_owner_generation = current["owner_generation"]
-    ctx._task_acceptance_fence_generation = current["queue_generation"]
-    return True
+        log.warning("acceptance_source_ack row could not be written for %s", row["task_id"], exc_info=True)
+    ctx._acceptance_source_ack = ack
+    return ack
+
+
+def acknowledge_acceptance_observation(ctx: Any, source_sha256: str) -> AcceptanceAck:
+    """Advance only consumed ingress, never criteria or the review verdict.
+
+    A pre-check over KNOWN facts: an unknown queue state is disclosed, never read
+    as a change, and the fence generation advances only from a known value — the
+    queue's compare-and-seal at ``end`` stays the single fail-closed authority.
+    """
+    observed = getattr(ctx, "_acceptance_observation", None)
+    observed = observed if isinstance(observed, dict) else {}
+    facts: Dict[str, Any] = {"named": source_sha256, "observed": _observation_facts(observed)}
+
+    def refuse(cause: str, **detail: Any) -> AcceptanceAck:
+        return AcceptanceAck(False, cause, "", {**facts, **detail})
+
+    if observed.get("owner_source_sha256") != source_sha256:
+        ack = refuse(ACK_SOURCE_NOT_OBSERVED, latest_observed_sha256=str(observed.get("owner_source_sha256") or ""))
+        return _record_acceptance_source_ack(ctx, ack, observed=observed, current=None)
+    pending = _pending_owner_input_kinds(ctx)
+    if pending:
+        return _record_acceptance_source_ack(
+            ctx, refuse(ACK_OWNER_INPUT_UNREAD, pending_kinds=pending), observed=observed, current=None)
+    current = _acceptance_observation_state(ctx)
+    facts["current"] = _observation_facts(current)
+    unknown = ACK_QUEUE_STATE_UNKNOWN if any(
+        isinstance(row.get("admission_inspection"), dict) for row in (observed, current)) else ""
+
+    def known_differ(key: str) -> bool:
+        return current[key] is not None and observed.get(key) is not None and current[key] != observed.get(key)
+
+    if current["owner_source_sha256"] != observed["owner_source_sha256"] or known_differ("owner_generation"):
+        ack = refuse(ACK_OWNER_SOURCE_CHANGED)
+    elif current["fence_token"] != observed.get("fence_token") or known_differ("queue_generation"):
+        ack = refuse(ACK_QUEUE_GENERATION_CHANGED)
+    else:
+        ctx._acceptance_ack_source_sha256 = source_sha256
+        ctx._task_acceptance_owner_generation = current["owner_generation"]
+        if current["queue_generation"] is not None:
+            ctx._task_acceptance_fence_generation = current["queue_generation"]
+        ack = AcceptanceAck(True, "", unknown, facts)
+    return _record_acceptance_source_ack(ctx, ack, observed=observed, current=current)
 
 
 def acceptance_observation_prompt(ctx: Any, observation: Dict[str, Any]) -> str:
@@ -322,10 +484,11 @@ def acceptance_observation_prompt(ctx: Any, observation: Dict[str, Any]) -> str:
         else "When nominating the complete task result for review, use this source selector. "
     )
     # ``tool_count`` stays on the stored observation (delivery bounds material
-    # tool indices with it) but changes every round; rendering it would rewrite
-    # this message's bytes and break prompt caches that reuse only a byte-prefix
-    # of the previous request (issue #906).
-    facts = {key: value for key, value in observation.items() if key != "tool_count"}
+    # tool indices with it) but changes every round, and the unknown-queue mark
+    # is a host fact; rendering either would rewrite this message's bytes and
+    # break prompt caches that reuse only a byte-prefix of the previous request
+    # (issue #906).
+    facts = {key: value for key, value in observation.items() if key in OBSERVATION_FACTS}
     return (
         "[ACCEPTANCE_SUBJECT_OBSERVATION]\n"
         + json.dumps(facts, ensure_ascii=False, sort_keys=True)

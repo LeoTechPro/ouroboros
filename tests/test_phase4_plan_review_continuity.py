@@ -952,10 +952,10 @@ def test_degraded_progress_line_discloses_untrusted_counts(_harness) -> None:
     _harness.progress.clear()
     _call(_harness.make_ctx())
 
-    assert (  # the failed slots' typed reasons ride the line, deduplicated: three identical reasons name it ONCE
-        "📐 plan_task: DEGRADED (0/3 parseable reviewers; counts are untrusted) — 0 blocking / 0 note / "
-        "0 need_evidence; cycles paid 1/2; slot reasons: no findings JSON array found (prose-only or unparseable response)"
-    ) in _harness.progress
+    # Three unparseable answers: the owner line states who answered and nothing else; the
+    # typed reason ("no findings JSON array found …") stays in the Reviews group and the task detail.
+    assert "📐 Plan review: none of the 3 reviewers answered." in _harness.progress
+    assert not any("parseable" in line or "no findings JSON array" in line for line in _harness.progress)
 
 
 def test_clean_progress_line_stays_byte_identical(_harness) -> None:
@@ -965,9 +965,7 @@ def test_clean_progress_line_stays_byte_identical(_harness) -> None:
     _harness.progress.clear()
     _call(_harness.make_ctx())
 
-    assert (
-        "📐 plan_task: GREEN — 0 blocking / 0 note / 0 need_evidence; cycles paid 1/2"
-    ) in _harness.progress
+    assert "📐 Plan review: all 3 reviewers answered — no findings." in _harness.progress
 
 
 def test_session_output_schema_admits_null_in_its_own_optional_fields() -> None:

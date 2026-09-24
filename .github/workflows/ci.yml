@@ -17,6 +17,10 @@ name: CI
 
 # Two separate push triggers: branches have path filters, tags do not.
 # This ensures tag pushes always fire (even if only VERSION/README changed).
+# The browser lane is the ONE exception that must see every `ouroboros` push,
+# including a Makefile/spec/requirements-only one: it lives in its own
+# `ui-browser-push.yml`, which calls the SAME reusable `ui-browser.yml` job
+# this workflow calls for pull requests, manual runs and tags.
 on:
   push:
     branches: [main, ouroboros, ouroboros-stable]
@@ -51,7 +55,7 @@ on:
     tags:
       - 'v*'
   # Fork-safe PR validation: no provider secrets and no pull_request_target.
-  # Only fork-safe jobs match pull_request refs, including narrow Publish UI proof.
+  # Only fork-safe jobs match pull_request refs, including full host UI proof.
   pull_request:
     branches: [ouroboros]
   # Plain dispatch retains the provider and skill-review jobs and can spend
@@ -108,26 +112,33 @@ jobs:
         with:
           fetch-depth: 0
       - uses: ./.github/actions/setup-python-env
+        id: setup_python
       - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+        if: ${{ !cancelled() }}
+        id: setup_pnpm
         with:
           version: 11.9.0
           run_install: false
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        if: ${{ !cancelled() }}
+        id: setup_node
         with:
           node-version: '22'
-          cache: 'pnpm'
-          cache-dependency-path: site/pnpm-lock.yaml
+      # Independent checks keep running after a red sibling; setup outcomes suppress cascaded noise.
       - name: Verify generated Pages output
+        if: ${{ !cancelled() && steps.setup_pnpm.outcome == 'success' && steps.setup_node.outcome == 'success' }}
         run: |
           pnpm --dir site install --frozen-lockfile
           pnpm --dir site build
           test -z "$(git status --porcelain --untracked-files=all -- docs/)"
           git diff --exit-code -- docs/
       - name: Lint (deterministic F-rule gate — catches the NameError-under-except class)
+        if: ${{ !cancelled() && steps.setup_python.outcome == 'success' }}
         run: python -m ruff check . --select F
       # The hermetic commit gate runs this exact suite (ouroboros/preflight_node.py);
       # keeping the step here keeps gate and CI mirrored in both directions.
       - name: Run browser-module tests (node --test — mirrored by the hermetic commit gate)
+        if: ${{ !cancelled() && steps.setup_node.outcome == 'success' }}
         shell: bash
         run: cd web && node --test tests/*.test.js
       # ESLint `no-undef` is the second, independent layer of the browser no-undef
@@ -135,14 +146,17 @@ jobs:
       # acorn walker in the suite above; this layer is CI-only, lockfile-frozen
       # (`npm ci` on web/package-lock.json) and exact-pinned in web/package.json.
       - name: Lint browser modules (ESLint no-undef — CI-only second layer of the acorn gate)
+        if: ${{ !cancelled() && steps.setup_node.outcome == 'success' }}
         shell: bash
         run: cd web && npm ci --no-audit --no-fund && npm run lint:undef
       # NOTE: a command-line `-m` REPLACES the pyproject `addopts` markexpr, so the default
       # `not integration and not browser ...` exclusions must be repeated here, then ANDed with
       # the serial split. --timeout guards against a hung test blocking the whole job.
       - name: Run tests (parallel — excludes the costly marker lanes AND the serial real-process suites)
+        if: ${{ !cancelled() && steps.setup_python.outcome == 'success' }}
         run: python -m pytest tests/ -m "not serial and not integration and not browser and not ui_browser and not ui_browser_docker and not portable_detail and not skill_smoke and not size_ratchet" -n auto --dist loadscope --max-worker-restart=0 --timeout=300 --timeout-method=thread -q --tb=short
       - name: Run tests (serial — real subprocess/port/global-state suites that flake under -n)
+        if: ${{ !cancelled() && steps.setup_python.outcome == 'success' }}
         run: python -m pytest tests/ -m "serial and not integration and not browser and not ui_browser and not ui_browser_docker and not portable_detail and not skill_smoke and not size_ratchet" -q --tb=short
       # OFFICIAL-CI-ONLY enforcement of the repository size gates: manifest
       # exactness against this tree plus the pairwise base-vs-tip shrink-only
@@ -155,10 +169,12 @@ jobs:
       # degrades to the tip's tree-verified parent manifest — never a skip;
       # a resolvable base without the manifest fails closed.
       - name: Run tests (size-ratchet lane — blocking here, warning-only locally)
+        if: ${{ !cancelled() && steps.setup_python.outcome == 'success' }}
         env:
           OURO_SIZE_RATCHET_BASE_REF: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
         run: python -m pytest tests/ -m size_ratchet -q --tb=short
       - name: Guard extracted transport imports stay out of core
+        if: ${{ !cancelled() && steps.setup_python.outcome == 'success' }}
         run: python -m pytest tests/test_no_core_a2a_telegram_imports.py -q
 
   # ──────────────────────────────────────────────────────────────────
@@ -222,12 +238,15 @@ jobs:
         with:
           fetch-depth: 0
       - uses: ./.github/actions/setup-python-env
+        id: setup_python
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        if: ${{ !cancelled() }}
+        id: setup_node
         with:
           node-version: '22'
       - name: Set up Windows POSIX test utilities
-        if: runner.os == 'Windows'
-        id: posix-tools
+        if: ${{ !cancelled() && runner.os == 'Windows' }}
+        id: posix_tools
         uses: msys2/setup-msys2@66cd2cce69caa17b53920067426061ca1de3a884 # v2
         with:
           msystem: MSYS
@@ -235,12 +254,15 @@ jobs:
           update: true
           install: rsync
       - name: Select Windows POSIX test utilities
-        if: runner.os == 'Windows'
+        id: select_posix_tools
+        if: ${{ !cancelled() && runner.os == 'Windows' && steps.posix_tools.outcome == 'success' }}
         shell: pwsh
-        run: '"${{ steps.posix-tools.outputs.msys2-location }}\usr\bin" >> $env:GITHUB_PATH'
+        run: '"${{ steps.posix_tools.outputs.msys2-location }}\usr\bin" >> $env:GITHUB_PATH'
+      # Independent checks keep running after a red sibling; setup outcomes suppress cascaded noise.
       # The hermetic commit gate runs this exact suite (ouroboros/preflight_node.py);
       # `shell: bash` keeps the glob working on the Windows runner too.
       - name: Run browser-module tests (node --test — mirrored by the hermetic commit gate)
+        if: ${{ !cancelled() && steps.setup_node.outcome == 'success' && (runner.os != 'Windows' || (steps.posix_tools.outcome == 'success' && steps.select_posix_tools.outcome == 'success')) }}
         shell: bash
         run: cd web && node --test tests/*.test.js
       # ESLint `no-undef` is the second, independent layer of the browser no-undef
@@ -248,13 +270,16 @@ jobs:
       # acorn walker in the suite above; this layer is CI-only, lockfile-frozen
       # (`npm ci` on web/package-lock.json) and exact-pinned in web/package.json.
       - name: Lint browser modules (ESLint no-undef — CI-only second layer of the acorn gate)
+        if: ${{ !cancelled() && steps.setup_node.outcome == 'success' && (runner.os != 'Windows' || (steps.posix_tools.outcome == 'success' && steps.select_posix_tools.outcome == 'success')) }}
         shell: bash
         run: cd web && npm ci --no-audit --no-fund && npm run lint:undef
       # A command-line `-m` REPLACES the pyproject addopts markexpr, so repeat the default
       # marker-lane exclusions and AND them with the serial split. --timeout guards hangs.
       - name: Run tests (parallel — excludes the costly marker lanes AND the serial real-process suites)
+        if: ${{ !cancelled() && steps.setup_python.outcome == 'success' && (runner.os != 'Windows' || (steps.posix_tools.outcome == 'success' && steps.select_posix_tools.outcome == 'success')) }}
         run: python -m pytest tests/ -m "not serial and not integration and not browser and not ui_browser and not ui_browser_docker and not portable_detail and not skill_smoke and not size_ratchet" -n auto --dist loadscope --max-worker-restart=0 --timeout=300 --timeout-method=thread -q --tb=short
       - name: Run tests (serial — real subprocess/port/global-state suites that flake under -n)
+        if: ${{ !cancelled() && steps.setup_python.outcome == 'success' && (runner.os != 'Windows' || (steps.posix_tools.outcome == 'success' && steps.select_posix_tools.outcome == 'success')) }}
         run: python -m pytest tests/ -m "serial and not integration and not browser and not ui_browser and not ui_browser_docker and not portable_detail and not skill_smoke and not size_ratchet" -q --tb=short
       # Same size-ratchet enforcement contract as quick-test (see its comment).
       # PRs carry their base SHA; stable pushes carry event.before; dispatch runs leave
@@ -262,10 +287,12 @@ jobs:
       # the tip's parent manifest (never a skip: a skip would let a recreated
       # branch grandfather debt in one green run).
       - name: Run tests (size-ratchet lane — blocking here, warning-only locally)
+        if: ${{ !cancelled() && steps.setup_python.outcome == 'success' && (runner.os != 'Windows' || (steps.posix_tools.outcome == 'success' && steps.select_posix_tools.outcome == 'success')) }}
         env:
           OURO_SIZE_RATCHET_BASE_REF: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
         run: python -m pytest tests/ -m size_ratchet -q --tb=short
       - name: Guard extracted transport imports stay out of core
+        if: ${{ !cancelled() && steps.setup_python.outcome == 'success' && (runner.os != 'Windows' || (steps.posix_tools.outcome == 'success' && steps.select_posix_tools.outcome == 'success')) }}
         run: python -m pytest tests/test_no_core_a2a_telegram_imports.py -q
 
   # Fork-safe PR proof for the one native secret-scanner dependency. This job
@@ -436,7 +463,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/setup-python-env
+        id: setup_python
       - name: Guard non-empty browser marker lanes
+        if: ${{ !cancelled() && steps.setup_python.outcome == 'success' }}
         run: |
           set -euo pipefail
           python -m pytest tests/ --collect-only -m browser -q | tee /tmp/browser-collect.txt
@@ -448,6 +477,7 @@ jobs:
           ! grep -q "no tests collected" /tmp/ui-docker-collect.txt
           ! grep -q "no tests collected" /tmp/portable-collect.txt
       - name: Guard non-empty serial marker lane
+        if: ${{ !cancelled() && steps.setup_python.outcome == 'success' }}
         run: |
           set -euo pipefail
           # The full-suite CI runs a PARALLEL pass (-m "not serial ...") + a SERIAL pass
@@ -461,6 +491,7 @@ jobs:
           python -m pytest tests/ --collect-only -m serial -q | tee /tmp/serial-collect.txt
           grep -q "tests/test_workspace_executor.py" /tmp/serial-collect.txt
       - name: Guard non-empty skill_smoke marker lane
+        if: ${{ !cancelled() && steps.setup_python.outcome == 'success' }}
         run: |
           set -euo pipefail
           # Same positive-anchor pattern as the serial guard above: under -q an
@@ -469,6 +500,7 @@ jobs:
           python -m pytest tests/ --collect-only -m skill_smoke -q | tee /tmp/skill-smoke-collect.txt
           grep -q "tests/test_skill_smoke_official.py" /tmp/skill-smoke-collect.txt
       - name: Guard non-empty size_ratchet marker lane
+        if: ${{ !cancelled() && steps.setup_python.outcome == 'success' }}
         run: |
           set -euo pipefail
           # Same positive-anchor pattern as the skill_smoke guard above. This
@@ -479,36 +511,17 @@ jobs:
           grep -q "tests/test_smoke.py" /tmp/size-ratchet-collect.txt
           grep -q "tests/test_repo_health_smoke.py" /tmp/size-ratchet-collect.txt
 
+  # Pushes are deliberately NOT matched here: this workflow keeps the base path
+  # filter, so a Makefile/spec-only push would silently skip the browser lane.
+  # `.github/workflows/ui-browser-push.yml` owns that trigger and shares this job.
   ui-smoke:
     if: |
       github.event_name == 'pull_request'
       || github.event_name == 'workflow_dispatch'
       || startsWith(github.ref, 'refs/tags/v')
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: ./.github/actions/setup-python-env
-      - name: Install UI smoke Chromium
-        run: python -m playwright install --with-deps chromium
-      - name: Install full UI smoke WebKit
-        if: github.event_name != 'pull_request'
-        run: python -m playwright install --with-deps webkit
-      - name: Run Publish admission browser proof
-        if: github.event_name == 'pull_request'
-        env:
-          OUROBOROS_RUN_UI_SMOKE: "1"
-          OUROBOROS_EXPECT_BROWSER_ENGINES: chromium
-        run: python -m pytest tests/test_skill_publish_browser.py -o addopts="" -m ui_browser -q --tb=short
-      - name: Run host UI smoke
-        if: github.event_name != 'pull_request'
-        env:
-          OUROBOROS_RUN_UI_SMOKE: "1"
-        run: python -m pytest tests/ -m ui_browser -q --tb=short
-      - name: Run browser tools Chromium/WebKit smoke
-        if: github.event_name != 'pull_request'
-        env:
-          OUROBOROS_EXPECT_BROWSER_ENGINES: chromium,webkit
-        run: python -m pytest tests/test_browser_tools_smoke.py -m browser -q --tb=short
+    uses: ./.github/workflows/ui-browser.yml
+    permissions:
+      contents: read
 
   docker-ui-smoke:
     if: |
@@ -518,16 +531,22 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Build Docker image
+        id: docker_build
         run: docker build -t ouroboros-web:test .
       - uses: ./.github/actions/setup-python-env
+        id: setup_python
       - name: Install UI smoke browser binaries
+        id: install_browsers
+        if: ${{ !cancelled() && steps.docker_build.outcome == 'success' && steps.setup_python.outcome == 'success' }}
         run: python -m playwright install --with-deps chromium webkit
       - name: Run Docker UI smoke
+        if: ${{ !cancelled() && steps.docker_build.outcome == 'success' && steps.setup_python.outcome == 'success' && steps.install_browsers.outcome == 'success' }}
         env:
           OUROBOROS_RUN_DOCKER_UI_SMOKE: "1"
           OUROBOROS_DOCKER_UI_IMAGE: ouroboros-web:test
         run: python -m pytest tests/test_ui_smoke_playwright.py -m ui_browser_docker -q --tb=short
       - name: Run Docker browser tools Chromium/WebKit smoke
+        if: ${{ !cancelled() && steps.docker_build.outcome == 'success' && steps.setup_python.outcome == 'success' && steps.install_browsers.outcome == 'success' }}
         run: |
           docker run --rm --entrypoint sh \
             -e OUROBOROS_EXPECT_BROWSER_ENGINES=chromium,webkit \
@@ -574,9 +593,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/setup-python-env
+        id: setup_python
       # -o addopts="" replaces the pyproject default markexpr wholesale: the
       # lane's own `integration` marker is exactly what that default excludes.
       - name: Run the keyless system E2E scenario lane (real isolated servers)
+        if: ${{ !cancelled() && steps.setup_python.outcome == 'success' }}
         env:
           PYTHONUNBUFFERED: "1"
           OUROBOROS_E2E_DEEP: mock
@@ -589,6 +610,7 @@ jobs:
       # operator hosts before 7.0; on the same isolated roots it is keyless too
       # (owner decision, batch №13 item 16, 2026-09-02).
       - name: Run the cancellation E-suite mock lane
+        if: ${{ !cancelled() && steps.setup_python.outcome == 'success' }}
         env:
           PYTHONUNBUFFERED: "1"
           OUROBOROS_E2E_CANCEL: mock
@@ -775,6 +797,7 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: e2e-live-run
+          overwrite: true
           path: |
             ${{ runner.temp }}/e2e_live/run_manifest.json
             ${{ runner.temp }}/e2e_live/result_index.jsonl
@@ -822,10 +845,13 @@ jobs:
           if [ -n "$CHANGED" ]; then echo 'changed=true' >> "$GITHUB_OUTPUT";
           else echo 'changed=false' >> "$GITHUB_OUTPUT"; fi
       - uses: ./.github/actions/setup-python-env
+        id: setup_python
       - name: Expose runner Android SDK path for caching
+        id: android_env
         shell: bash
         run: echo "ANDROID_HOME=$ANDROID_HOME" >> "$GITHUB_ENV"
       - name: Cache Android build dependencies
+        id: android_cache
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: |
@@ -833,6 +859,7 @@ jobs:
             ${{ env.ANDROID_HOME }}/build-tools/36.0.0
           key: android-sdk-${{ runner.os }}-api36-build36.0.0
       - name: Prepare Android compiler
+        id: prepare_android
         shell: bash
         run: |
           set -euo pipefail
@@ -842,11 +869,13 @@ jobs:
           "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" \
             'platforms;android-36' 'build-tools;36.0.0'
       - name: Run Android source and release contract tests
+        if: ${{ !cancelled() && steps.android_changes.outcome == 'success' && steps.setup_python.outcome == 'success' }}
         env:
           OUROBOROS_DATA_DIR: ${{ runner.temp }}/android-test-data
           OUROBOROS_SETTINGS_PATH: ${{ runner.temp }}/android-test-data/settings.json
         run: python -m pytest android/tests tests/test_android_release.py -q --tb=short
       - name: Compile and verify explicitly test-signed Android host
+        if: ${{ !cancelled() && steps.android_changes.outcome == 'success' && steps.setup_python.outcome == 'success' && steps.android_env.outcome == 'success' && steps.android_cache.outcome == 'success' && steps.prepare_android.outcome == 'success' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -1019,6 +1048,7 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: android-native-ui-api-${{ matrix.api-level }}
+          overwrite: true
           path: |
             ${{ runner.temp }}/android-smoke/screenshots/
             ${{ runner.temp }}/android-smoke/emulator.log
@@ -1043,6 +1073,15 @@ jobs:
         with:
           fetch-depth: 0
           fetch-tags: true
+      # Match desktop packaging: checkout may leave a commit at the tag ref.
+      - name: Ensure annotated tag object is fetched
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG_REF="refs/tags/$GITHUB_REF_NAME"
+          git update-ref -d "$TAG_REF" || true
+          git fetch origin "$TAG_REF:$TAG_REF"
+          test "$(git cat-file -t "$TAG_REF")" = "tag"
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: '3.10'
@@ -1131,6 +1170,7 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: ouroboros-android
+          overwrite: true
           path: |
             ${{ steps.android_assets.outputs.archive }}
             ${{ steps.android_assets.outputs.apk }}
@@ -1142,12 +1182,14 @@ jobs:
           retention-days: 30
 
   release-preflight:
-    if: startsWith(github.ref, 'refs/tags/v')
+    # Keep the job alive after failed needs so tag identity and diagnostic build state remain observable.
+    if: ${{ always() && !cancelled() && startsWith(github.ref, 'refs/tags/v') }}
     # system-e2e-mock joined the release bar with the v7 campaign (batch №13 item 4).
     needs: [full-test, integration-test, system-e2e-mock]
     runs-on: ubuntu-latest
     outputs:
       is_prerelease: ${{ steps.release_meta.outputs.is_prerelease }}
+      tag_valid: ${{ steps.release_meta.outputs.tag_valid }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -1167,17 +1209,38 @@ jobs:
           version = pathlib.Path("VERSION").read_text(encoding="utf-8").strip()
           tag = os.environ["GITHUB_REF_NAME"].strip()
           expected_tag = f"v{version}"
+          output = pathlib.Path(os.environ["GITHUB_OUTPUT"])
           if tag != expected_tag:
+              with output.open("a", encoding="utf-8") as fh:
+                  fh.write("tag_valid=false\nis_prerelease=false\n")
               raise SystemExit(f"Release tag mismatch: {tag} != {expected_tag}")
           if not is_release_version(version):
+              with output.open("a", encoding="utf-8") as fh:
+                  fh.write("tag_valid=false\nis_prerelease=false\n")
               raise SystemExit(f"VERSION is not a supported release version: {version!r}")
           is_prerelease = bool(re.search(r'(?:rc|alpha|beta|a|b)\.?\d+$', version, re.IGNORECASE))
-          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as fh:
+          with output.open("a", encoding="utf-8") as fh:
               fh.write(f"is_prerelease={'true' if is_prerelease else 'false'}\n")
+              fh.write("tag_valid=true\n")
           PY
+      - name: Require test prerequisites for publication
+        if: ${{ !cancelled() }}
+        env:
+          FULL_TEST_RESULT: ${{ needs.full-test.result }}
+          INTEGRATION_RESULT: ${{ needs.integration-test.result }}
+          SYSTEM_E2E_RESULT: ${{ needs.system-e2e-mock.result }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$FULL_TEST_RESULT" != success || "$INTEGRATION_RESULT" != success || "$SYSTEM_E2E_RESULT" != success ]]; then
+            echo "Required release prerequisites did not all succeed: full-test=$FULL_TEST_RESULT integration-test=$INTEGRATION_RESULT system-e2e-mock=$SYSTEM_E2E_RESULT" >&2
+            exit 1
+          fi
 
+
+  # A valid tag may rehearse desktop artifacts after a red test bar; release still requires preflight success.
   build:
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: ${{ always() && !cancelled() && startsWith(github.ref, 'refs/tags/v') && needs.release-preflight.outputs.tag_valid == 'true' }}
     needs: [full-test, release-preflight]
     permissions:
       contents: read
@@ -1261,7 +1324,12 @@ jobs:
       # gate runs.
       - name: Ensure annotated tag object is fetched
         shell: bash
-        run: git fetch origin --tags --force
+        run: |
+          set -euo pipefail
+          TAG_REF="refs/tags/$GITHUB_REF_NAME"
+          git update-ref -d "$TAG_REF" || true
+          git fetch origin "$TAG_REF:$TAG_REF"
+          test "$(git cat-file -t "$TAG_REF")" = "tag"
 
       - uses: ./.github/actions/setup-python-env
         with:
@@ -1850,6 +1918,7 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: ouroboros-${{ matrix.os }}
+          overwrite: true
           path: |
             ${{ steps.release_asset.outputs.path }}
             dist/release-smoke-${{ matrix.proof_id }}.json
@@ -2065,7 +2134,8 @@ jobs:
             echo "Remote tag $GITHUB_REF_NAME is missing or is not annotated." >&2
             exit 1
           fi
-          git fetch origin "$TAG_REF:$TAG_REF" --force
+          git update-ref -d "$TAG_REF" || true
+          git fetch origin "$TAG_REF:$TAG_REF"
           test "$(git cat-file -t "$TAG_REF")" = "tag"
           LOCAL_PEELED="$(git rev-parse "$PEELED_REF")"
           if [ "$LOCAL_PEELED" != "$GITHUB_SHA" ] || [ "$PEELED_SHA" != "$GITHUB_SHA" ]; then
@@ -2111,7 +2181,8 @@ jobs:
             echo "Remote tag $GITHUB_REF_NAME is missing or is not annotated." >&2
             exit 1
           fi
-          git fetch origin "$TAG_REF:$TAG_REF" --force
+          git update-ref -d "$TAG_REF" || true
+          git fetch origin "$TAG_REF:$TAG_REF"
           test "$(git cat-file -t "$TAG_REF")" = "tag"
           LOCAL_PEELED="$(git rev-parse "$PEELED_REF")"
           if [ "$LOCAL_PEELED" != "$GITHUB_SHA" ] || [ "$PEELED_SHA" != "$GITHUB_SHA" ]; then

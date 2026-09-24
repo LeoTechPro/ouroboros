@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from collections import Counter
 from dataclasses import dataclass
 from typing import Any, Mapping, Optional, Sequence
 
@@ -34,7 +35,7 @@ SOURCE_INVALID = "invalid"
 
 _ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
 _TOP_KEYS = frozenset({"enabled", "items"})
-_ROW_KEYS = frozenset({"subagent_id", "name", "recommended_use", "route", "effort", "processing_preference", "access"})
+_ROW_KEYS = frozenset({"subagent_id", "name", "recommended_use", "route", "effort", "processing_preference", "access", "enabled"})
 _ROUTE_ALIASES = {
     ROUTE_KIND_API_MODEL: ROUTE_KIND_API_MODEL,
     ROUTE_KIND_AGENT_SESSION: ROUTE_KIND_AGENT_SESSION,
@@ -61,18 +62,26 @@ ALTERNATIVE_RECOMMENDATION = (
 
 @dataclass(frozen=True)
 class ConfiguredSubagent:
+    # Hidden stored join key (reviewer-slot references, snapshots, custody and
+    # history follow the ROW through it). What minds and owners are shown is
+    # `subagent_handle`, a projection of the route: a role-shaped id rotted the
+    # same way the retired `name` did once the owner re-pointed the row.
     subagent_id: str
     # Retired semantic field (owner decision 1=A, 2026-08-30): a second
     # human-facing label beside recommended_use rotted against route edits
     # (the shipped "Fast scout" incident). The parser accepts legacy values
-    # and drops them; identity everywhere is the neutral subagent_id plus
-    # DERIVED route facts, and recommended_use is the ONE semantic field.
+    # and drops them; recommended_use is the ONE semantic field.
     name: str = ""
     recommended_use: str = ""
     route: RouteSpec = None  # type: ignore[assignment]
     effort: str = ""
     processing_preference: str = ""
     access: str = "full"
+    # Owner's per-row switch, distinct from the list-level `enabled` and from
+    # live availability: a disabled row keeps its complete configuration and
+    # stays editable, but no NEW use (delegation or reviewer reference) may
+    # select it. Absent in older saved bytes, which means enabled.
+    enabled: bool = True
 
 
 @dataclass(frozen=True)
@@ -180,6 +189,9 @@ def parse_configured_subagents(raw: Any) -> ConfiguredSubagents:
             raise ValueError(f"{SUBAGENTS_SETTING}: {where}.name must be a string")
         if not isinstance(row.get("recommended_use"), str):
             raise ValueError(f"{SUBAGENTS_SETTING}: {where}.recommended_use must be a string")
+        row_enabled = row.get("enabled", True)
+        if not isinstance(row_enabled, bool):
+            raise ValueError(f"{SUBAGENTS_SETTING}: {where}.enabled must be a boolean")
         # Legacy `name` values are accepted and DROPPED (retired field): the
         # next serialize omits the key, which is the whole migration.
         route = parse_route_spec(
@@ -210,6 +222,7 @@ def parse_configured_subagents(raw: Any) -> ConfiguredSubagents:
                 effort=effort,
                 processing_preference=normalize_processing_preference(row.get("processing_preference")),
                 access=access,
+                enabled=row_enabled,
             )
         )
     return ConfiguredSubagents(enabled=payload["enabled"], items=tuple(items))
@@ -234,6 +247,12 @@ def configured_subagents_dict(config: ConfiguredSubagents) -> dict[str, Any]:
         # A saved lower choice must not become the full default on its next read.
         if row.route.is_session:
             payload["access"] = row.access
+        # Omitted while true: an existing roster's canonical bytes — and every
+        # fingerprint, receipt and snapshot bound to them — are unchanged by
+        # this field. Only an owner-disabled row writes it, and changing its
+        # fingerprint is the honest consequence of a changed configuration.
+        if not row.enabled:
+            payload["enabled"] = False
         items.append(payload)
     return {"enabled": config.enabled, "items": items}
 
@@ -254,6 +273,137 @@ def normalize_configured_subagents(raw: Any) -> tuple[ConfiguredSubagents, str]:
 
 def configured_subagents_fingerprint(config: ConfiguredSubagents) -> str:
     return hashlib.sha256(serialize_configured_subagents(config).encode("utf-8")).hexdigest()
+
+
+def engine_identity(row: ConfiguredSubagent, settings: Mapping[str, Any]) -> dict[str, str]:
+    """EFFECTIVE execution-affecting facts of ONE saved row under ``settings``.
+
+    Exactly what ``subagent_runtime.select_subagent_snapshot`` freezes and
+    ``subagent_history.execution_identity`` reads back: processing is resolved
+    (the row's own value, else the inherited one) and a session's access is
+    explicit, so a live row, its snapshot and its history row share one identity.
+    """
+    from ouroboros.model_slots import resolve_processing_preference
+
+    return {
+        "kind": row.route.kind,
+        "target_id": row.route.target_id,
+        "credential_profile_id": row.route.credential_profile_id,
+        "effort": row.effort,
+        "processing_preference": resolve_processing_preference(
+            override=row.processing_preference or None, settings=dict(settings)),
+        **({"access": row.access} if row.route.is_session else {}),
+    }
+
+
+def engine_handle(identity: Mapping[str, Any]) -> str:
+    """The ONE name of an engine on every surface: its route target plus its facets.
+
+    A pure function of one identity (a live row, a frozen snapshot or a history
+    record), so a neighbour row can never rename it and the past is never
+    relabelled from the live roster. Facets, in fixed order: effort, session
+    access, account pin as ``@<profile>``, processing — each omitted at its
+    baseline (``full`` access, ``standard`` processing). Compared, never parsed.
+    """
+    access = str(identity.get("access") or "") if identity.get("kind") == ROUTE_KIND_AGENT_SESSION else ""
+    pin = str(identity.get("credential_profile_id") or "")
+    processing = str(identity.get("processing_preference") or "")
+    facets = (
+        str(identity.get("effort") or ""),
+        "" if access == "full" else access,
+        f"@{pin}" if pin else "",
+        "" if processing == "standard" else processing,
+    )
+    return "/".join(part for part in (str(identity.get("target_id") or ""), *facets) if part)
+
+
+def subagent_handle(row: ConfiguredSubagent, settings: Mapping[str, Any]) -> str:
+    return engine_handle(engine_identity(row, settings))
+
+
+def roster_handles(config: ConfiguredSubagents, settings: Mapping[str, Any]) -> dict[str, str]:
+    """Stored id -> the handle the LIVE roster shows and the tools accept.
+
+    Save-time uniqueness keeps handles distinct; rows that still share one
+    (twins saved before that rule) are told apart by their stored key as
+    ``<handle>~<subagent_id>`` — never by list order, which is not durable.
+    """
+    base = {row.subagent_id: subagent_handle(row, settings) for row in config.items}
+    counts = Counter(base.values())
+    return {
+        row_id: f"{handle}~{row_id}" if counts[handle] > 1 else handle
+        for row_id, handle in base.items()
+    }
+
+
+def resolve_roster_selector(
+    config: ConfiguredSubagents, selector: str, settings: Mapping[str, Any],
+) -> tuple[Optional[ConfiguredSubagent], str, str]:
+    """``(row, "", "")`` for a handle, else a stored id; ``(None, code, detail)`` otherwise.
+
+    Stored ids stay accepted forever, silently (cached prompts, old habits). A
+    selector that is one row's handle AND a different row's stored id is refused
+    naming both — never a silent pick. The row switch is NOT consulted here: a
+    switched-off row still resolves, so its caller can refuse it as itself
+    rather than as unknown; only the choice set an unknown selector is offered
+    lists enabled rows.
+    """
+    handles = roster_handles(config, settings)
+    named = next((row for row in config.items if handles[row.subagent_id] == selector), None)
+    stored = next((row for row in config.items if row.subagent_id == selector), None)
+    if named is not None and stored is not None and named is not stored:
+        return None, "subagent_selector_conflict", (
+            f"{selector!r} is ambiguous: it is the handle of the row stored as "
+            f"{named.subagent_id!r} and the stored id of the row whose handle is "
+            f"{handles[stored.subagent_id]!r}; pass one of those two values instead.")
+    row = named or stored
+    if row is None:
+        offered = ", ".join(repr(handles[item.subagent_id]) for item in config.items if item.enabled)
+        return None, "unknown_subagent_id", (
+            f"No configured subagent is named {selector!r}. Available: {offered or 'none enabled'}.")
+    return row, "", ""
+
+
+def validate_unique_engines(config: ConfiguredSubagents, settings: Mapping[str, Any]) -> None:
+    """SAVE-path rule: two rows of one kind may not share a handle (reads stay tolerant).
+
+    The handle IS the engine with baselines folded, so an unset row and an
+    explicit row with the same effective value are one engine, and no two saved
+    rows can carry the same name.
+    """
+    seen: dict[tuple[str, str], int] = {}
+    for index, row in enumerate(config.items):
+        key = (row.route.kind, subagent_handle(row, settings))
+        if key in seen:
+            raise ValueError(
+                f"{SUBAGENTS_SETTING}: items[{index}] runs the same engine as items[{seen[key]}] "
+                f"({key[1]}); change its model, effort, access, account or processing, or remove it"
+            )
+        seen[key] = index
+
+
+def roster_save_error(raw: Any, stored_settings: Mapping[str, Any], body: Mapping[str, Any]) -> str:
+    """The one SAVE-path judge of engine uniqueness; ``""`` means acceptable.
+
+    Judged only when THIS save changes the roster: every Settings save re-posts
+    the roster, so twins stored before the rule must never block an unrelated
+    save. A posted roster whose canonical form equals the stored one is accepted
+    as it was; any roster edit is judged whole, under the facts this save leaves.
+    """
+    if raw in (None, ""):
+        return ""
+    try:
+        config = parse_configured_subagents(raw)
+        try:
+            stored = serialize_configured_subagents(
+                parse_configured_subagents(stored_settings.get(SUBAGENTS_SETTING)))
+        except ValueError:
+            stored = ""  # nothing valid is stored: this save authors the roster
+        if serialize_configured_subagents(config) != stored:
+            validate_unique_engines(config, {**stored_settings, **body})
+    except ValueError as exc:
+        return str(exc)
+    return ""
 
 
 def _materialized_source(
@@ -538,6 +688,7 @@ def _append_candidate_rows(
                 route=candidate.route,
                 effort=candidate.effort,
                 access=candidate.access,
+                enabled=candidate.enabled,
             )
         )
         seen.add(identity)
@@ -585,10 +736,17 @@ __all__ = [
     "SUBAGENTS_SETTING",
     "configured_subagents_dict",
     "configured_subagents_fingerprint",
+    "engine_handle",
+    "engine_identity",
     "make_configured_subagents",
     "normalize_configured_subagents",
     "parse_configured_subagents",
     "resolve_configured_subagents",
+    "resolve_roster_selector",
     "resolve_settings_subagent_candidate",
+    "roster_handles",
+    "roster_save_error",
     "serialize_configured_subagents",
+    "subagent_handle",
+    "validate_unique_engines",
 ]

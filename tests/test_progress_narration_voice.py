@@ -58,8 +58,59 @@ def test_the_tool_context_abi_stays_a_host_voice():
     note keeps the default without the ABI having to know the fact exists."""
     agent, events = _agent()
     ctx = SimpleNamespace(emit_progress_fn=partial(OuroborosAgent._emit_progress, agent))
-    ctx.emit_progress_fn("📐 plan_task: wave 1 dispatched")
+    ctx.emit_progress_fn("📐 Plan review: wave 1 dispatched")
     assert events.get_nowait()["progress_meta"]["narration"] is False
+
+
+@pytest.mark.parametrize("chat_id", [0, 5])
+def test_task_bound_progress_keeps_identity_after_worker_moves_on(chat_id):
+    """Production callback wiring survives idle, reused worker and hidden chat."""
+    agent, events = _agent()
+    agent._emit_progress = partial(OuroborosAgent._emit_progress, agent)
+    agent._bind_task_progress = partial(OuroborosAgent._bind_task_progress, agent)
+    agent._current_chat_id, agent._current_task_metadata = chat_id, {}
+    emit_task = OuroborosAgent._bind_task_progress_for_task(agent, {"id": "task-a", "_attempt": 2})
+    for current in (None, "task-b"):
+        agent._current_task_id, agent._current_chat_id = current, 1
+        emit_task("late review result")
+        event = events.get_nowait()
+        assert (event["task_id"], event["chat_id"]) == ("task-a", chat_id)
+    # Surviving normal path: the new task's callback addresses the new task.
+    emit_b = OuroborosAgent._bind_task_progress_for_task(agent, {"id": "task-b"})
+    emit_b("current narration", narration=True)
+    event = events.get_nowait()
+    assert (event["task_id"], event["chat_id"], event["progress_meta"]["narration"]) == ("task-b", 1, True)
+    emit_ownerless = OuroborosAgent._bind_task_progress(agent, "task-no-room", None)
+    emit_ownerless("ownerless late note")
+    assert events.empty()
+
+
+def test_task_bound_progress_keeps_lineage_meta_after_worker_moves_to_child():
+    agent, events = _agent()
+    agent._emit_progress = partial(OuroborosAgent._emit_progress, agent)
+    agent._bind_task_progress = partial(OuroborosAgent._bind_task_progress, agent)
+    agent._current_chat_id = 5
+    agent._current_task_metadata = {
+        "delegation_role": "subagent", "parent_task_id": "parent-a",
+        "root_task_id": "root-a", "subagent_role": "reviewer", "initiator": "consciousness",
+    }
+    task = {"id": "task-a", "_attempt": 2, "effective_executor": "blocked", "executor_route": ""}
+    OuroborosAgent._record_executor_facts(agent, task, {"executor_blocked_route": "codex"})
+    bound = OuroborosAgent._bind_task_progress_for_task(agent, task)
+    agent._current_task_id, agent._current_chat_id = "child-b", 1
+    agent._current_task_metadata.update(parent_task_id="parent-b", root_task_id="root-b",
+                                        subagent_role="writer", executor_route="claude")
+    agent.tools._ctx.task_attempt = 3
+    observation = {"task_id": "task-a", "task_attempt": "2", "run_id": "run-a",
+                   "attempt_id": "a01", "harness_id": "codex", "phase": "finished", "revision": 1}
+    bound("late child review", executor_observation=observation)
+    event = events.get_nowait()
+    assert (event["task_id"], event["chat_id"]) == ("task-a", 5)
+    meta = event["progress_meta"]
+    assert (meta["subagent_task_id"], meta["parent_task_id"], meta["root_task_id"]) == (
+        "task-a", "parent-a", "root-a")
+    assert (meta["executor_route"], meta["initiator"]) == ("codex", "consciousness")
+    assert meta["executor_observation"] == observation
 
 
 @pytest.mark.parametrize("content, msg, expected", [
@@ -141,3 +192,39 @@ def test_a_stored_row_without_the_key_replays_as_a_legacy_frame(tmp_path):
     row, = json.loads(response.body)["messages"]
     assert row["text"] == "Working on it."
     assert "narration" not in row
+
+
+def test_a_tool_may_speak_in_the_models_voice_only_with_the_narration_fact():
+    """Through the real task binder, a tool that relays the model's own words passes the
+    typed ``narration`` fact and the frame is the assistant's; the same text without the
+    keyword stays a host note. The plan-review author paths use exactly this seam."""
+    from ouroboros.tools.plan_review import _narrate_author_rationale
+
+    agent, events = _agent()
+    agent._emit_progress = partial(OuroborosAgent._emit_progress, agent)
+    agent._bind_task_progress = partial(OuroborosAgent._bind_task_progress, agent)
+    agent._current_task_metadata = {}
+    ctx = SimpleNamespace(emit_progress_fn=OuroborosAgent._bind_task_progress_for_task(agent, {"id": "task-a"}))
+    words = "The reviewers' note assumes a second chart; the brief fixes one, so I go on."
+    _narrate_author_rationale(ctx, {"disposition": "accepted", "rationale": words})
+    ctx.emit_progress_fn(words)
+    spoken, host = events.get_nowait(), events.get_nowait()
+    assert (spoken["role"], spoken["system_type"], spoken["progress_meta"]["narration"]) == (
+        "assistant", "model_narration", True)
+    assert spoken["text"] == f"💬 {words}" and spoken["task_id"] == "task-a"
+    assert (host["role"], host["system_type"], host["progress_meta"]["narration"]) == (
+        "system", "host_progress", False)
+    _narrate_author_rationale(ctx, {"disposition": "accepted", "rationale": "  "})
+    assert events.empty()  # nothing to say is not a row
+
+
+def test_an_unbound_tool_context_swallows_the_narration_fact(tmp_path):
+    """A ToolContext nobody bound to an agent (the dataclass default) accepts the same
+    keyword facts the real binder does, so an author finish can never raise on it."""
+    from ouroboros.tools.plan_review import _narrate_author_rationale
+    from ouroboros.tools.tool_context import ToolContext
+
+    ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path)
+    assert ctx.emit_progress_fn("x", narration=True) is None
+    assert ctx.emit_progress_fn("x") is None
+    _narrate_author_rationale(ctx, {"disposition": "accepted", "rationale": "I go on."})  # no exception

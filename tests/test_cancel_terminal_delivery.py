@@ -596,3 +596,48 @@ def test_unsent_receipts_and_new_stop_episodes_do_not_inherit_delivery(tmp_path,
     delivery._handle_send_message(new_event, ctx)
     assert stored()["cancel_receipt"]["delivered_chat_id"] == 1
     assert _completion_excerpt(stored(), chat_id=1) == f"{SALVAGE_EXCERPT_LABEL}."
+
+def test_receipt_names_the_stop_cause_before_and_after_the_settle(tmp_path):
+    """The technical stop facts in the DETAILS panel name the cause the owner
+    actually made. While the intent is live the receipt reads it there; once
+    custody has settled, the intent row is gone and the same scalars live on the
+    stored ``cancel_origin``, so a receipt built then is not suddenly causeless."""
+    from supervisor import terminal_delivery as td
+
+    write_task_result(tmp_path, "task-live-cause", STATUS_RUNNING, chat_id=1)
+    intent = ci.request_cancel(tmp_path, "task-live-cause", reason="server_shutdown",
+                               source="snapshot_restore")
+    td._persist_cancel_receipt(
+        tmp_path, "task-live-cause",
+        settled_status="cancelled", outcome="cancelled",
+        delivery_id="d-live", preserved_path="", preview_omitted=0,
+    )
+    live = load_task_result(tmp_path, "task-live-cause")["cancel_receipt"]
+    assert live["stop_reason"] == "server_shutdown"
+    assert live["stop_requested_at"] == intent["requested_at"]
+
+    # A task whose custody already settled: no intent row is left to read.
+    origin = {"reason": "server_shutdown", "source": "snapshot_restore",
+              "requested_at": "2026-09-19T23:41:07+00:00"}
+    write_task_result(tmp_path, "task-settled-cause", "cancelled", chat_id=1,
+                      result="stopped", cancel_origin=origin)
+    assert ci.active_intent(tmp_path, "task-settled-cause") is None
+
+    td._persist_cancel_receipt(
+        tmp_path, "task-settled-cause",
+        settled_status="cancelled", outcome="cancelled",
+        delivery_id="d-settled", preserved_path="", preview_omitted=0,
+    )
+    settled = load_task_result(tmp_path, "task-settled-cause")["cancel_receipt"]
+    assert settled["stop_reason"] == "server_shutdown"
+    assert settled["stop_requested_at"] == origin["requested_at"]
+
+    # Quiet direction: a task that was never cancelled gets no stop cause at all.
+    write_task_result(tmp_path, "task-no-cause", STATUS_COMPLETED, chat_id=1, result="done")
+    td._persist_cancel_receipt(
+        tmp_path, "task-no-cause",
+        settled_status="completed", outcome="completed",
+        delivery_id="d-none", preserved_path="", preview_omitted=0,
+    )
+    plain = load_task_result(tmp_path, "task-no-cause")["cancel_receipt"]
+    assert "stop_reason" not in plain and "stop_requested_at" not in plain

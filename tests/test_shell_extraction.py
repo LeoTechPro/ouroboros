@@ -110,8 +110,13 @@ def test_shell_catalog_schema_bytes_and_handler_owners_are_stable():
     # run_script accepts any installed file interpreter; its temporary file
     # lives in an ignored workspace directory or the existing task drive.
     # Workflow scope: explicit saved-setting references and lazy-output guidance.
+    # run_command states its real contract: only a bare builtin as cmd[0] is
+    # refused, a background child stalls the call and is never tracked after it
+    # (tests/test_run_command_schema_truth.py). Rolled once more: the sentence no
+    # longer says the child is never STOPPED, which is false where the timeout kill
+    # still reaches the exited shell's process group (Linux).
     assert hashlib.sha256(schema_bytes).hexdigest() == (
-        "87606208e795ede931339a7ba106fd0cf795fae314e1bc02cafaba6af8c62660"
+        "7d7a07b763cec4e8fc95bdfb733c2b8362bb8c0f0648b33825b56e52dccda4ce"
     )
     original = json.loads(schema_bytes)
     for schema in original:
@@ -126,7 +131,7 @@ def test_shell_catalog_schema_bytes_and_handler_owners_are_stable():
     )
     assert hashlib.sha256(json.dumps(original, sort_keys=True, ensure_ascii=False,
                                     separators=(",", ":")).encode()).hexdigest() == (
-        "a85e03bfc1a9834116b3ada4ce86638a56a1fec267e289e23a5a8f31e8a12f60"
+        "c6504272bceed19cc138a9cc8ee98a04db2f6ac3b41d70fdacbc4fa4022542bc"
     )
     assert {
         entry.name: (entry.handler.__module__, entry.handler.__name__)

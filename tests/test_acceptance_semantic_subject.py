@@ -156,7 +156,9 @@ def test_unread_or_newer_owner_input_cannot_be_acknowledged(case, arrival):
     ok, error = apply_delivery_subject_decision(tools, ctx, trace, {
         "owner_source_sha256": observed["owner_source_sha256"], "effective_criteria": "Changed",
     })
-    assert not ok and "stale or unread" in error
+    # The refusal names its typed cause: unread input is not the same fact as a changed source.
+    cause = "owner_input_unread" if arrival in {"incoming_queue", "mailbox"} else "owner_source_changed"
+    assert not ok and error.startswith(cause), error
     assert candidate.owner_source_sha256 == before
     assert candidate.effective_criteria != "Changed"
 

@@ -29,6 +29,13 @@ log = logging.getLogger(__name__)
 # nested container must keep the OUTER token so an outer reap sees the whole tree; uuids compose.
 CONTAINMENT_ENV_PREFIX = "OURO_PROC_CONTAINER_"
 
+# This is launcher authority, not ordinary task configuration. The launcher
+# starts its managed server through its own direct Popen seam; contained
+# children must never inherit the marker and turn an arbitrary checkout into a
+# destructive-bootstrap target.
+_LAUNCHER_AUTHORITY_ENV = "OUROBOROS_MANAGED_BY_LAUNCHER"
+_LAUNCHER_REPO_AUTHORITY_ENV = "OUROBOROS_MANAGED_REPO_DIR"
+
 
 # Tri-state membership: UNREADABLE is deliberately NOT a "no" — reading a nondumpable member as a
 # non-member is how a live descendant would leave containment without exiting.
@@ -290,7 +297,10 @@ class ProcessContainer:
         flags = int(kwargs.pop("creationflags", 0)) | int(group_kwargs.pop("creationflags", 0))
         kwargs.update(group_kwargs)
         env = kwargs.get("env")
-        kwargs["env"] = {**(os.environ if env is None else env), **self.containment_env()}
+        env = dict(os.environ if env is None else env)
+        env.pop(_LAUNCHER_AUTHORITY_ENV, None)
+        env.pop(_LAUNCHER_REPO_AUTHORITY_ENV, None)
+        kwargs["env"] = {**env, **self.containment_env()}
         if _pl.IS_WINDOWS:
             flags |= getattr(subprocess, "CREATE_SUSPENDED", 0x4)
             self._suspended = True
@@ -426,4 +436,3 @@ class ProcessContainer:
         if _pl.IS_WINDOWS and self._job is not None:
             _pl.close_job(self._job)
             self._job = None
-

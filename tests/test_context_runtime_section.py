@@ -223,6 +223,46 @@ def test_runtime_section_exposes_host_routing_manifest_and_manual_contract(tmp_p
     assert payload["routing_contract"]["on_uncertain_or_invalid_target"] == "needs_manual_target"
 
 
+def test_runtime_section_offers_the_rooms_own_continuation_hint(tmp_path, monkeypatch):
+    """A project room's routing manifest has to REACH the decision turn.
+
+    While only the pointer row travelled, a room saw exactly ONE continuation
+    candidate; when a child had stamped that pointer the room could not name its
+    own interrupted root at all and promoted again, minting a duplicate root.
+    """
+    env = _make_health_env(tmp_path)
+    monkeypatch.setattr("ouroboros.config.get_runtime_mode", lambda: "advanced")
+    room = {
+        "final_results": [{"task_id": "racer-old", "status": "completed"}],
+        "active_roots": [{"task_id": "racer-live", "status": "running",
+                          "cancel_state": "pending"}],
+        "omissions": {"final_results": 3, "children": 2, "active_roots": 0},
+    }
+    task = {
+        "id": "decision-room",
+        "type": "task",
+        "metadata": {
+            "current_chat": {
+                "chat_id": 7,
+                "running_tasks": [],
+                "addressable_root_tasks": [{"task_id": "racer-live", "status": "running"}],
+            },
+            "project_routing_manifest": room,
+            "project_last_task_result": {"task_id": "racer-old", "status": "completed"},
+        },
+    }
+
+    payload = json.loads(build_runtime_section(env, task).split("\n\n", 1)[1])
+    assert payload["project_routing_manifest"] == room
+    assert payload["project_last_task_result"]["task_id"] == "racer-old"
+
+    # The quiet direction: a lane with nothing to offer states no empty hint.
+    task["metadata"]["project_routing_manifest"] = {}
+    quiet = json.loads(build_runtime_section(env, task).split("\n\n", 1)[1])
+    assert "project_routing_manifest" not in quiet
+    assert quiet["project_last_task_result"]["task_id"] == "racer-old"
+
+
 def test_improvement_backlog_digest_is_actor_scoped(tmp_path):
     from ouroboros.context import build_llm_messages
     from ouroboros.memory import Memory
@@ -452,7 +492,8 @@ def test_delegation_fact_carries_historical_rows_and_profile_evidence(tmp_path, 
     assert last["applied_model"] == "claude-opus-5"
     assert last["requested_profile"] == "requested-delegate-profile"
     assert last["applied_profile"] == "applied-delegate-profile"
-    assert last["selected_subagent_id"] == "builder"
+    # Named from the record's own facts (no typed identity here: its route target).
+    assert last["selected_subagent_id"] == "claudexor=opus-5"
     assert last["observed"] == "last observed at 2026-08-18T02:00:00+00:00"
     assert "historical" not in rows["triad_1"]["observed"]
     # The prompt-visible note teaches the semantics ONCE: rows are history, live

@@ -58,6 +58,7 @@ _SIGNAL_EXIT = ExitFact(returncode=-6, descriptor_written=False)
 
 # --- classifier (pure) ---------------------------------------------------------
 
+
 @pytest.mark.parametrize("text, expected", [
     (_OOM_REACHED, StartupFailureClass.HEAP_EXHAUSTED),
     (_OOM_INEFFECTIVE, StartupFailureClass.HEAP_EXHAUSTED),
@@ -789,20 +790,24 @@ def _run_real_sweep(monkeypatch, manager, order: list) -> list:
 
     The reconcile step is a recorder: the real one ensures a gateway only when
     it has orphan work, so with none it is exactly a no-op here — which is why
-    the retry must be the sweep's own. The retry thread is joined before
-    returning, so callers assert on a settled state.
+    the retry must be the sweep's own. The block itself now runs on the
+    ``custody-maintenance`` daemon thread (INV-B), so the returned list starts
+    with it; both threads are joined before returning, so callers assert on a
+    settled state.
     """
     from ouroboros import claudexor_daemon as daemon_mod
     from ouroboros import process_custody as pc
     from ouroboros import server_maintenance as sm
     from supervisor import queue
 
+    monkeypatch.setattr(sm, "_CUSTODY_SWEEP_LOCK", __import__("threading").Lock())  # own latch: a pass may outlive a test
     threads = _track_sweep_threads(monkeypatch)
     monkeypatch.setattr(sm, "_LAST_CANCEL_INTENT_SWEEP", [time.time()])  # 20 s cadence idle
     monkeypatch.setattr(sm, "_installed_skill_names", lambda: None)
     monkeypatch.setattr(pc, "reap_orphaned_processes", lambda root, **kw: order.append("reap") or [])
-    monkeypatch.setattr(sm, "_reconcile_delegated_runs", lambda live: order.append("reconcile"))
-    monkeypatch.setattr(sm, "_cursor_refresh_settled_terminals", lambda: None)
+    monkeypatch.setattr(sm, "_reconcile_delegated_runs",
+                        lambda live, **kwargs: order.append("reconcile"))
+    monkeypatch.setattr(sm, "_cursor_refresh_settled_terminals", lambda *a, **kwargs: None)
     monkeypatch.setattr(queue, "RUNNING", {})
     monkeypatch.setattr(daemon_mod, "get_owned_daemon", lambda: manager)
     sm._periodic_supervisor_maintenance([0.0], [time.time()])
@@ -823,7 +828,7 @@ def test_the_sweep_itself_makes_the_one_retry_after_releasing_the_latch(monkeypa
     with caplog.at_level(logging.WARNING):
         threads = _run_real_sweep(monkeypatch, stand.manager, order)
     assert order == ["reap", "reconcile"], "the swallowed refusal never skips the reconcile"
-    assert [thread.name for thread in threads] == ["owned-daemon-latch-retry"]
+    assert [thread.name for thread in threads] == ["custody-maintenance", "owned-daemon-latch-retry"]
     assert len(stand.spawned) == 2 and len(stand.ensures) == 2, "exactly one retry, made by the sweep"
     assert stand.manager._last_start_failure is not None, "the failed retry re-latched"
     assert any("retry after latch release refused (daemon_spawn_failed)" in rec.getMessage()
@@ -842,7 +847,8 @@ def test_a_healthy_sweep_never_ensures_or_spawns(monkeypatch, tmp_path):
     stand = _Stand(monkeypatch, tmp_path, returncode=-6, banner=_OOM_REACHED)
     order: list = []
     threads = _run_real_sweep(monkeypatch, stand.manager, order)
-    assert order == ["reap", "reconcile"] and threads == [], "nothing released: no retry thread"
+    assert order == ["reap", "reconcile"], "a healthy sweep still does its custody work"
+    assert [thread.name for thread in threads] == ["custody-maintenance"], "no retry thread"
     assert stand.spawned == [] and stand.ensures == [] and not _rows(stand.data_dir)
     assert stand.manager._last_start_failure is None
 
@@ -861,8 +867,9 @@ def test_periodic_sweep_retries_only_after_it_released_a_latch(monkeypatch, rele
     monkeypatch.setattr(sm, "_installed_skill_names", lambda: None)
     monkeypatch.setattr(pc, "reap_orphaned_processes", lambda root, **kw: order.append("reap") or [])
     monkeypatch.setattr(sm, "_retry_latched_daemon_start", lambda: order.append("retry"))
-    monkeypatch.setattr(sm, "_reconcile_delegated_runs", lambda live: order.append("reconcile"))
-    monkeypatch.setattr(sm, "_cursor_refresh_settled_terminals", lambda: None)
+    monkeypatch.setattr(sm, "_reconcile_delegated_runs",
+                        lambda live, **kwargs: order.append("reconcile"))
+    monkeypatch.setattr(sm, "_cursor_refresh_settled_terminals", lambda *a, **kwargs: None)
     monkeypatch.setattr(queue, "RUNNING", {})
     stub = SimpleNamespace(
         clear_start_failure_latch=lambda *, cleared_by: order.append(f"clear:{cleared_by}") or released)
@@ -871,7 +878,8 @@ def test_periodic_sweep_retries_only_after_it_released_a_latch(monkeypatch, rele
     for thread in threads:
         thread.join(5)
     assert order[0] == "clear:supervisor_sweep" and order.index("reap") < order.index("reconcile")
-    assert ("retry" in order) is released and len(threads) == (1 if released else 0)
+    # The block's own daemon thread always exists; the retry rides a second one.
+    assert ("retry" in order) is released and len(threads) == (2 if released else 1)
 
 
 def test_a_raising_reap_cannot_pin_the_latch(monkeypatch):
@@ -891,7 +899,8 @@ def test_a_raising_reap_cannot_pin_the_latch(monkeypatch):
 
     monkeypatch.setattr(pc, "reap_orphaned_processes", raising_reap)
     monkeypatch.setattr(sm, "_retry_latched_daemon_start", lambda: order.append("retry"))
-    monkeypatch.setattr(sm, "_reconcile_delegated_runs", lambda live: order.append("reconcile"))
+    monkeypatch.setattr(sm, "_reconcile_delegated_runs",
+                        lambda live, **kwargs: order.append("reconcile"))
     stub = SimpleNamespace(
         clear_start_failure_latch=lambda *, cleared_by: order.append(f"clear:{cleared_by}") or True)
     monkeypatch.setattr(daemon_mod, "get_owned_daemon", lambda: stub)
@@ -923,16 +932,16 @@ def test_the_sweep_retry_runs_on_its_own_thread_and_never_blocks_the_tick(monkey
     monkeypatch.setattr(sm, "_LAST_CANCEL_INTENT_SWEEP", [time.time()])
     monkeypatch.setattr(sm, "_installed_skill_names", lambda: None)
     monkeypatch.setattr(pc, "reap_orphaned_processes", lambda root, **kw: [])
-    monkeypatch.setattr(sm, "_reconcile_delegated_runs", lambda live: None)
-    monkeypatch.setattr(sm, "_cursor_refresh_settled_terminals", lambda: None)
+    monkeypatch.setattr(sm, "_reconcile_delegated_runs", lambda live, **kwargs: None)
+    monkeypatch.setattr(sm, "_cursor_refresh_settled_terminals", lambda *a, **kwargs: None)
     monkeypatch.setattr(queue, "RUNNING", {})
     monkeypatch.setattr(daemon_mod, "get_owned_daemon",
                         lambda: SimpleNamespace(clear_start_failure_latch=lambda *, cleared_by: True))
     try:
         sm._periodic_supervisor_maintenance([0.0], [time.time()])  # returns while the ensure is held
         assert entered.wait(5), "the retry thread reached the ensure"
-        assert [thread.name for thread in threads] == ["owned-daemon-latch-retry"]
-        assert threads[0].daemon and threads[0].is_alive(), "exactly one retry thread, still in the ensure"
+        assert [thread.name for thread in threads] == ["custody-maintenance", "owned-daemon-latch-retry"]
+        assert threads[1].daemon and threads[1].is_alive(), "exactly one retry thread, still in the ensure"
     finally:
         release.set()
         for thread in threads:

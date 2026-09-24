@@ -969,9 +969,9 @@ def direct_shell_rows(raw_cmd: Any) -> List[tuple]:
     return rows
 
 
-def direct_utility_target_rows(raw_cmd: Any) -> List[tuple]:
-    """Certain utility writes plus real output redirects; input reads are independent."""
-    return [(argv, [*_writer_target_tokens_single(argv, direct_only=True, parse_redirects=False), *writes], (), False)
+def direct_utility_target_rows(raw_cmd: Any, *, certain_only: bool = False) -> List[tuple]:
+    """Certain utility writes and real output redirects (reads stay independent); ``certain_only`` drops word-guessed targets."""
+    return [(argv, [*_writer_target_tokens_single(argv, direct_only=True, parse_redirects=False, certain_only=certain_only), *writes], (), False)
             for argv, _reads, writes, _shell in direct_shell_rows(raw_cmd)]
 
 
@@ -1195,7 +1195,7 @@ def directory_destination_pairs(argv: List[str]) -> List[tuple[str, str, str]]:
 
 def _writer_target_tokens_single(
     argv: List[str], *, include_inline: bool = True,
-    direct_only: bool = False, parse_redirects: bool = True,
+    direct_only: bool = False, parse_redirects: bool = True, certain_only: bool = False,
 ) -> List[str]:
     if not argv:
         return []
@@ -1224,7 +1224,9 @@ def _writer_target_tokens_single(
             return redirect_targets
         if cmd == "rsync":
             return [argv[-1], *redirect_targets] if len(argv) == 3 and all(not a.startswith("-") for a in argv[1:]) and ":" not in argv[-1] else redirect_targets
-        if cmd not in {"touch", "rm", "mkdir", "tee", "sort", "uniq", "gzip"}:
+        # Below here a WRITE is guessed from the command word alone; a top-level
+        # principal is not fenced by that guess (owner 5A), subordinate children are.
+        if certain_only or cmd not in {"touch", "rm", "mkdir", "tee", "sort", "uniq", "gzip"}:
             return redirect_targets
         if cmd in {"touch", "mkdir", "uniq", "gzip"} and any(arg.startswith("-") and arg != "--" for arg in argv[1:]):
             return redirect_targets  # Option operands need their own concrete role; do not guess.
@@ -1232,11 +1234,9 @@ def _writer_target_tokens_single(
     # output operand (`uniq - OUT` writes OUT) from every consumer (sol-max r2).
     operands = [arg for arg in argv[1:] if arg and (arg == "-" or not arg.startswith("-"))]
     targets: List[str] = []
-    if cmd == "cp":
-        targets.extend(operands[-1:] if len(operands) >= 2 else [])
-    elif cmd == "ln":
-        # The LINK NAME is the write target; the SOURCE is only pointed at, and
-        # symlink-following reads are containment-checked at resolve time anyway.
+    if cmd in {"cp", "ln"}:
+        # The last operand is written (for ln the LINK NAME; the SOURCE is only
+        # pointed at, and symlink-following reads are containment-checked at resolve time).
         targets.extend(operands[-1:] if len(operands) >= 2 else [])
     elif cmd in {"chmod", "chown"}:
         targets.extend(operands[1:] if len(operands) >= 2 else [])

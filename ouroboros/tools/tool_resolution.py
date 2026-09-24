@@ -82,6 +82,7 @@ def system_repo_dir_for(ctx: Any) -> pathlib.Path:
 
 _PATH_NORMALIZED_TOOLS = frozenset({"read_file", "write_file", "edit_text", "list_files", "search_code", "query_code"})
 _TOP_LEVEL_PATH_WRITE_TOOLS = frozenset({"write_file", "edit_text"})
+_ROOT_SELECTED_READ_TOOLS = frozenset({"read_file", "list_files", "search_code"})
 
 
 _ROOT_ARG_REPO_WRITE_TOOLS = frozenset({"write_file", "edit_text", "apply_patch", "edit_batch"})
@@ -131,6 +132,36 @@ def _payload_write_paths(name: str, args: Dict[str, Any]) -> List[str]:
     return [p for p in paths if str(p or "").strip()]
 
 
+def _root_containing_absolute_path(ctx: Any, name: str, text: str) -> str:
+    """Owner 7A: the root that physically contains an absolute path given WITHOUT
+    a root — among the roots THIS profile may use for the tool's operation plus
+    the actor's lineage task roots — or "" when none holds it. The deepest
+    containing base wins (``runtime_data`` holds the task roots, the owner home
+    holds Deliverables); the path itself is never rewritten, so the `01aea0663`
+    mirror stays closed. The file-tool twin of ``tool_access._select_process_target``."""
+    if not _registry().is_absolute_path_text(text):
+        return ""
+    from ouroboros.tool_access import (
+        active_tool_profile, decide_tool_access, lineage_read_base,
+        path_is_relative_to, profile_readable_root_paths,
+    )
+
+    operation = _TARGET_BINDING_OPERATIONS[name]
+    try:
+        target = pathlib.Path(text).expanduser().resolve(strict=False)
+    except (OSError, RuntimeError, ValueError):
+        return ""
+    holders = [(label, base) for label, base in profile_readable_root_paths(ctx, operation=operation)
+               if path_is_relative_to(target, base)]
+    profile = active_tool_profile(ctx)
+    for label in ("task_drive", "artifact_store"):
+        if decide_tool_access(profile=profile, root=label, operation=operation).allow:
+            base = lineage_read_base(ctx, label, target)
+            if base is not None:
+                holders.append((label, base))
+    return max(holders, key=lambda item: len(str(item[1])), default=("", None))[0]
+
+
 def _normalize_dispatch_path_args_result(
     ctx: Any,
     name: str,
@@ -153,10 +184,18 @@ def _normalize_dispatch_path_args_result(
     The destination root still passes every downstream gate (profile access
     decision, protected-path guards, subagent filters) — only the label is
     corrected, never the authority. ``query_code`` is excluded: its
-    root=user_files external-target contract handles absolute paths natively."""
+    root=user_files external-target contract handles absolute paths natively.
+    Owner 7A: an absolute path with NO ``root`` runs under the permitted root
+    that physically contains it (``_root_containing_absolute_path``), the path
+    itself untouched; a NAMED root is never re-rooted."""
     if name not in _PATH_NORMALIZED_TOOLS:
         return _DispatchPathNormalization()
-    root_arg = str(args.get("root") or "active_workspace")
+    root_arg = str(args.get("root") or "")
+    if not root_arg and name in _ROOT_SELECTED_READ_TOOLS:
+        selected = _root_containing_absolute_path(ctx, name, str(args.get("path") or ""))
+        if selected and selected != "active_workspace":
+            args["root"] = root_arg = selected
+    root_arg = root_arg or "active_workspace"
     if root_arg in ("active_workspace", "system_repo"):
         try:
             norm_root = active_repo_dir_for(ctx) if root_arg == "active_workspace" else system_repo_dir_for(ctx)

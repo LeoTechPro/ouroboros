@@ -496,12 +496,18 @@ TOOL_CODE_SPECS: Mapping[str, ToolCodeSpec] = MappingProxyType(
 
 @dataclass(frozen=True)
 class ToolResult:
-    """Internal result; ``text`` remains the complete model-facing projection."""
+    """Internal result; ``text`` includes notes, ``producer_text`` never does.
+
+    Producer text is captured only when the host adds annotations, before any
+    composition. It is not bounded metadata and is never reconstructed from text.
+    """
 
     status: ToolStatus
     code: str
     text: str
     meta: Mapping[str, Any] = field(default_factory=dict)
+    producer_text: str | None = None
+    host_annotations: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if not isinstance(self.code, str) or not _CODE_RE.fullmatch(self.code):
@@ -513,6 +519,12 @@ class ToolResult:
             raise ValueError(f"status {self.status!r} does not match {self.code} ({spec.status!r})")
         if not isinstance(self.text, str):
             raise TypeError("tool result text must be a string")
+        if self.producer_text is not None and not isinstance(self.producer_text, str):
+            raise TypeError("tool producer text must be a string or None")
+        if not isinstance(self.host_annotations, tuple) or any(
+            not isinstance(note, str) for note in self.host_annotations
+        ):
+            raise TypeError("host annotations must be a tuple of strings")
         raw_meta = dict(self.meta or {})
         if any(not isinstance(key, str) for key in raw_meta):
             raise ValueError("tool result meta keys must be strings")
@@ -566,6 +578,8 @@ def _replace_tool_result(
         code=selected_code,
         text=result.text if text is None else text,
         meta=meta,
+        producer_text=result.producer_text,
+        host_annotations=result.host_annotations,
     )
 
 
@@ -731,10 +745,11 @@ _EXACT_IDENTIFIER_CODES = MappingProxyType(
         "ROUTE_UNCONFIRMED": "TOOL_REPORTED_FAILURE",
         "ROUTING_UNCONFIRMED": "TOOL_REPORTED_FAILURE",
         "NEEDS_MANUAL_TARGET": "TOOL_REPORTED_FAILURE",
-        # ensure_project_scope joined the same rail: a refused or unconfirmed
-        # bind scoped nothing durably.
-        "SCOPE_REJECTED": "TOOL_REPORTED_FAILURE",
-        "SCOPE_UNCONFIRMED": "TOOL_REPORTED_FAILURE",
+        # ensure_project_scope joined the same rail (a refused/unconfirmed bind scoped
+        # nothing durably); cross-focus refusals split availability from policy.
+        "SCOPE_REJECTED": "TOOL_REPORTED_FAILURE", "SCOPE_UNCONFIRMED": "TOOL_REPORTED_FAILURE",
+        "FOCUS_PROJECTION_UNAVAILABLE": "LEGACY_UNAVAILABLE", "FOCUS_TASK_NOT_LIVE": "LEGACY_UNAVAILABLE",
+        "FOCUS_STALE": "LEGACY_BLOCKED", "TOOL_FORBIDDEN": "LEGACY_BLOCKED", "FOCUS_SOURCE_UNRESOLVED": "LEGACY_UNAVAILABLE", "FOCUS_SOURCE_UNRETAINED": "LEGACY_UNAVAILABLE",
         "TOOL_ERROR": "TOOL_ERROR",
         "TOOL_INTERNAL_ERROR": "TOOL_INTERNAL_ERROR",
         "EXECUTOR_UNAVAILABLE": "LEGACY_UNAVAILABLE",
@@ -966,6 +981,14 @@ def _compose_execute_result_result(
         else LegacyTextResultAdapter.from_text(tool_name, base)
     )
     text = _compose_execute_result(base_result.text, route_note, safety_msg)
+    notes = tuple(note for note in (route_note, safety_msg) if note)
+    source = {
+        "producer_text": (
+            base_result.producer_text if base_result.producer_text is not None
+            else base_result.text if notes else None
+        ),
+        "host_annotations": base_result.host_annotations + notes,
+    }
     meta = dict(base_result.meta)
     if route_note:
         meta["route_note"] = True
@@ -982,6 +1005,7 @@ def _compose_execute_result_result(
             code=base_result.code,
             text=text,
             meta=meta,
+            **source,
         )
     if base_result.code == "OK":
         return ToolResult(
@@ -989,6 +1013,7 @@ def _compose_execute_result_result(
             code="SAFETY_WARNING",
             text=text,
             meta=meta,
+            **source,
         )
     meta["safety_warning"] = True
     return ToolResult(
@@ -996,4 +1021,5 @@ def _compose_execute_result_result(
         code=base_result.code,
         text=text,
         meta=meta,
+        **source,
     )

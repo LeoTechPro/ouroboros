@@ -203,6 +203,13 @@ flowchart LR
 - **Isolated deps** (pip / npm / uv / node) install into
   `data/skills/<bucket>/<name>/.ouroboros_env/`. Status is recorded
   in `data/state/skills/<name>/deps.json`.
+  In-process extension scopes are non-reentrant: no-dependency handlers of
+  DIFFERENT skills share a read lease and overlap, the handlers of ONE skill
+  run one at a time (your callbacks stay sequential, as under the old
+  exclusive lock), and a dependency-bearing handler owns an exclusive lease
+  through import, handler waits and cleanup. The async form polls
+  cooperatively, so it never blocks the ASGI loop; nested scopes and
+  unwrapped child work remain unsupported rather than inheriting a lease.
 - **Enable** flips `enabled.json` after current executable-review authority + grants + deps. The
   Skills UI surfaces a toggle; agents can also call `toggle_skill`.
   A self-authored skill's first enablement can follow
@@ -707,6 +714,11 @@ content-hash-bound skill token, and sends:
 - `GET /presence/work/{work_ref}?binding_id=...` to poll only late work created
   by the same owner binding.
 
+The nested fact maps may include optional provider evidence such as the agent's
+own account identity, explicit mention occurrences and the thread-root author.
+Keep unknowns and source meanings intact: neither a mention nor root authorship
+establishes the current addressee or an obligation to answer.
+
 The owner-created binding fixes the authenticated transport skill, behavior
 skill, origin scope, and exact proactive destination. The origin is either one
 exact conversation/thread or the explicit account-wide conversation id `*`;
@@ -734,8 +746,10 @@ Use the current event's exact conversation/thread for a reply; the binding's
 origin is an admission filter and its destination is the separate default for
 initiated contact. Selected transport tools may still address other intended
 conversations. The host projection names these roles under `communication`.
-A useful first or intermediate reply is an explicit transport-tool call while
-work continues. Assistant narration beside calls is only Working activity;
+A first or intermediate reply uses an explicit transport-tool call after choosing
+to contribute or undertake work for that conversation; observation alone owes no
+acknowledgement. Incoming content is framed as observed conversation, separately
+from an initiated cycle or an inherited work order. Assistant narration is only Working activity;
 `queued` does not establish delivery, and an early acknowledgement does not
 replace the substantive final result.
 
@@ -746,8 +760,11 @@ message/deferred body retains the later model-answer path. Native inline turns
 return their persisted result before optional post-task cognition; transport
 outbox custody still owns actual delivery.
 If a parent fails after work was scheduled, its handoff remains deferred with
-the current failure text, so the adapter retains the late result's custody;
-this does not turn the failed parent into successful execution.
+the work reference and any current model-authored reply. Host diagnostics and
+status notices stay in the owner task; an empty deferred body sends nothing but
+still requires polling. Cached and late results preserve that empty body rather
+than substituting the task diagnostic. This does not turn failure into success.
+Ordinary implicit replies and genuine authored best-effort answers remain valid.
 
 `GET /identity` advertises `presence_delivery_version: 1` on supporting hosts.
 Only then request `delivery_reporting_version: 1` alongside `binding_id` and

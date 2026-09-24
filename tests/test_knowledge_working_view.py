@@ -3,6 +3,8 @@
 import json
 from copy import deepcopy
 
+import pytest
+
 from ouroboros import consolidator as c, knowledge as k
 from ouroboros.context_fit import estimate_context_prompt_tokens
 from ouroboros.tools.registry import ToolContext
@@ -64,12 +66,19 @@ def test_tool_result_projection_never_credits_undelivered_body_or_header(tmp_pat
     assert not reads.reads
 
 
-def test_light_reads_large_note_in_multiple_windows_then_publishes_its_revision(tmp_path, fit):
+@pytest.mark.parametrize("room_correction", [False, True])
+def test_light_reads_large_note_in_multiple_windows_then_publishes_its_revision(tmp_path, fit, room_correction):
     fit.window = 50000
     ctx, original, reads = _setup(tmp_path, "Original account of events. " * 7000 + "DECISIVE LAST EVENT.")
     chunk = 40000
     total = len(original.text)
     assert estimate_context_prompt_tokens([{"role": "user", "content": original.text}], reads.tools) + 16384 > fit.window
+    episode = "ORIGINAL EPISODE: reconsider the complete account."
+    revised = "A coherent revised account preserving the decisive last event."
+    nomination = [{"topic": "large", "scope": "global", "content": revised}]
+    answer = "I read the full account and retained what changed."
+    if room_correction:
+        answer += "\nKNOWLEDGE_ENTRIES_JSON: " + json.dumps(nomination)
 
     class Reader:
         def __init__(self):
@@ -78,18 +87,21 @@ def test_light_reads_large_note_in_multiple_windows_then_publishes_its_revision(
         def chat(self, **kwargs):
             self.calls.append(deepcopy(kwargs))
             assert estimate_context_prompt_tokens(kwargs["messages"], kwargs["tools"]) + kwargs["max_tokens"] <= fit.window
-            assert kwargs["messages"][0]["content"] == "ORIGINAL EPISODE: reconsider the complete account."
+            assert episode in kwargs["messages"][0]["content"]
+            if room_correction and not kwargs["messages"][0]["content"].startswith("Compare this draft memory"):
+                # No draft read credit: the correction must earn its own, across views.
+                return {"content": "Draft.\nKNOWLEDGE_ENTRIES_JSON: " + json.dumps(nomination)}, {"cost": 0.01}
             if self.stage == "read":
                 if self.next_start >= total:
                     assert "DECISIVE LAST EVENT." in kwargs["messages"][-1]["content"]
-                    return {"content": "I read the full account and retained what changed."}, {"cost": 0.01}
+                    return {"content": answer}, {"cost": 0.01}
                 start, end = self.next_start, min(total, self.next_start + chunk)
                 self.next_start, self.stage = end, "inspect"
                 call = _call("knowledge_read", {"topic": "large", "scope": "global", "start_char": start, "end_char": end}, f"read-{start}")
             elif self.stage == "inspect":
                 if self.next_start >= total:
                     assert "DECISIVE LAST EVENT." in kwargs["messages"][-1]["content"]
-                    return {"content": "I read the full account and retained what changed."}, {"cost": 0.01}
+                    return {"content": answer}, {"cost": 0.01}
                 call, self.stage = _call("compact_context", {"inspect": True}, f"inspect-{self.next_start}"), "compact"
             else:
                 observed = json.loads(kwargs["messages"][-1]["content"])
@@ -101,12 +113,19 @@ def test_light_reads_large_note_in_multiple_windows_then_publishes_its_revision(
             return {"content": "", "tool_calls": [call]}, {"cost": 0.01}
 
     llm = Reader()
-    content, usage = c._call_consolidation_llm(llm, "ORIGINAL EPISODE: reconsider the complete account.",
-                                              "multiwindow", knowledge=reads)
+    if room_correction:
+        from ouroboros import room_consolidation as rc
+        room = rc.RoomSource("1", "Main", [{"text": episode}], episode)
+        content, usage = rc.summarize_block(c._light_call(llm, ctx, {}), [room],
+            first_ts="2026-09-01T10:00:00Z", last_ts="2026-09-01T10:01:00Z",
+            knowledge_instruction=c.KNOWLEDGE_MAINTENANCE_PROMPT)
+        bound = usage["_knowledge_entries"]
+    else:
+        content, usage = c._call_consolidation_llm(llm, episode, "multiwindow", knowledge=reads)
+        bound = reads.bind_entries(nomination)
     assert content, usage
     assert len(llm.revisions) > 2
-    assert reads.reads[("global", "large")] == original.revision
-    bound = reads.bind_entries([{"topic": "large", "scope": "global", "content": "A coherent revised account preserving the decisive last event."}])
+    assert bound[0]["expected_revision"] == original.revision
     assert c._write_knowledge_entries(original.address.shelf, bound, context=ctx)[0]["ok"]
     assert k.read_knowledge_note(original.address).text.endswith("decisive last event.")
     assert list((tmp_path / "task_results" / "artifacts" / "memory-view" / "source_handles").rglob("*.json"))

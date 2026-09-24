@@ -79,10 +79,14 @@ def init(drive_root: pathlib.Path) -> None:
     QUEUE_SNAPSHOT_PATH = drive_root / "state" / "queue_snapshot.json"
     FINALIZATION_GRACE_SEC = get_finalization_grace_sec()
     BUDGET_ROOT_FENCES.clear()
-    # A previous process's direct-chat turns must not outlive it in the roster.
-    from supervisor.direct_roots import clear_direct_roots
+    # A previous process's direct-chat turns must not outlive it in the roster,
+    # and this clear is the last moment their ids exist: the roster is taken over
+    # here and handed to snapshot restore below, which fences them like any other
+    # row the stop caught.
+    from supervisor.direct_roots import take_direct_roots
 
-    clear_direct_roots(drive_root)
+    PRIOR_DIRECT_ROOTS.clear()
+    PRIOR_DIRECT_ROOTS.update(take_direct_roots(drive_root))
 
 
 def refresh_timeouts_from_settings(settings: dict) -> None:
@@ -95,6 +99,11 @@ def refresh_timeouts_from_settings(settings: dict) -> None:
     global FINALIZATION_GRACE_SEC
     FINALIZATION_GRACE_SEC = get_finalization_grace_sec(settings)
 
+
+# The previous process's direct-chat roots, taken from `state/direct_roots.json`
+# by init above and consumed once by snapshot restore. A process-local handover
+# of the SAME fragment, never a second store.
+PRIOR_DIRECT_ROOTS: Dict[str, Any] = {}
 
 # Set by workers.init_queue_refs().
 PENDING: List[Dict[str, Any]] = []
@@ -200,8 +209,12 @@ def enqueue_task(
                 t["_admission_blocked"] = "duplicate_task_id"
                 return t
             try:
+                from ouroboros.routing_wait import is_own_admission_stub
                 from ouroboros.task_results import load_task_result
-                if load_task_result(DRIVE_ROOT, task_id, strict=True):
+                stored = load_task_result(DRIVE_ROOT, task_id, strict=True)
+                # The emitted promote stub (#1160) belongs to THIS admission token:
+                # its own enqueue reads around it, any other row still owns the id.
+                if stored and not is_own_admission_stub(stored, admission_token):
                     if ADMISSION_RESERVATIONS.get(task_id) == admission_token:
                         ADMISSION_RESERVATIONS.pop(task_id, None)
                     t["_admission_blocked"] = "duplicate_task_id"
@@ -513,7 +526,8 @@ def get_evolution_status_snapshot(*, budget_projection: Optional[Dict[str, Any]]
     owner_chat_id = int(st.get("owner_chat_id") or 0)
     consecutive_failures = int(st.get("evolution_consecutive_failures") or 0)
     try:
-        remaining: Optional[float] = round(float(budget_remaining(st, strict=True, projection=budget_projection)), 2)
+        # A status snapshot is a display read: without a supplied projection it rides the last validated snapshot.
+        remaining: Optional[float] = round(float(budget_remaining(st, strict=True, projection=budget_projection, allow_stale=True)), 2)
         accounting_available = True
     except Exception:
         remaining = None
@@ -611,11 +625,23 @@ from supervisor.queue_schedules import (  # noqa: E402, F401 -- intentional publ
     _scheduled_tasks_path,
     _task_from_schedule,
     _write_scheduled_tasks,
+    SCHEDULE_ACTIONS,
+    ScheduleLockTimeout,
+    ScheduleRefused,
+    ScheduleStoreUnreadable,
     check_scheduled_tasks,
     list_scheduled_tasks,
-    remove_scheduled_task,
+    load_schedule_store,
     resync_skill_schedules,
+    schedule_activity_projection,
+    schedule_tool_projection,
+    schedule_lifecycle_status,
+    schedule_transaction,
     sync_skill_schedules,
+)
+from supervisor.schedule_lifecycle import (  # noqa: E402, F401 -- intentional public re-exports
+    mutate_scheduled_task,
+    remove_scheduled_task,
     upsert_scheduled_task,
 )
 from supervisor.queue_snapshot import (  # noqa: E402, F401 -- intentional public re-exports

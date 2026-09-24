@@ -139,7 +139,11 @@ def test_every_host_acceptance_writer_emits_a_canonical_status_and_typed_reason(
     """Table-driven guard over the WHOLE writer inventory (v6.78.0): every
     `_set_acceptance_decision` call site in loop.py must pass a canonical status
     constant and a reason from the closed set. Source-level so a new writer added
-    without a reason fails here instead of silently shipping an untyped decision."""
+    without a reason fails here instead of silently shipping an untyped decision.
+    A writer whose typed pair comes from the fact that decides it merges it by
+    name (`**forced_rail_panel_verdict(...)`: the forced rail records what the
+    panel it collected says); the scan follows that name into its own source and
+    holds every status and reason it can return to the same closed sets."""
     import pathlib
     import re
 
@@ -159,7 +163,8 @@ def test_every_host_acceptance_writer_emits_a_canonical_status_and_typed_reason(
     ]
     # Include the separate infrastructure-outcome handback; it requests an
     # author response without manufacturing a critic capsule or reviewer PASS.
-    assert len(starts) == 22, f"writer inventory changed: {len(starts)} call sites"
+    # ... and the final seal's `admission_close_unconfirmed` note (owner 2A) in the delivery leaf.
+    assert len(starts) == 23, f"writer inventory changed: {len(starts)} call sites"
     allowed_status = {
         "ACCEPTANCE_ACCEPTED", "ACCEPTANCE_REVISION_REQUESTED",
         "ACCEPTANCE_FINALIZED_UNACCEPTED",
@@ -177,12 +182,16 @@ def test_every_host_acceptance_writer_emits_a_canonical_status_and_typed_reason(
             name: value for name, value in vars(module).items()
             if name.startswith(("REASON_", "ACCEPTANCE_REASON_")) and isinstance(value, str)
         })
-    seen_expression_reasons = 0
+    # The closed set of merge helpers a writer may take its typed pair from.
+    merged_writers = {"forced_rail_panel_verdict"}
+    seen_expression_reasons = seen_merged_writers = 0
     for start in starts:
         block = "\n".join(src[start:start + 30])
         status = re.findall(r'"status": ([A-Z_]+)', block)
         assert status and status[0] in allowed_status, f"line {start + 1}: {block[:120]}"
-        assert '"reason"' in block, f"line {start + 1} has no typed reason"
+        merged = merged_writers & set(re.findall(r"\*\*([a-z_]+)\(", block))
+        seen_merged_writers += bool(merged)
+        assert '"reason"' in block or merged, f"line {start + 1} has no typed reason"
         for reason in re.findall(r'"reason": "([a-z_]+)"', block):
             assert reason in ACCEPTANCE_DECISION_REASONS, reason
         for name in re.findall(r'\b(REASON_[A-Z_]+|ACCEPTANCE_REASON_[A-Z_]+)\b', block):
@@ -194,6 +203,18 @@ def test_every_host_acceptance_writer_emits_a_canonical_status_and_typed_reason(
     # explicit author-stop REASON_REVIEW_CYCLES_EXHAUSTED branches and the
     # A-material `REASON_IDENTICAL_ACCEPTANCE_REFUSED` writer.
     assert seen_expression_reasons >= 3, seen_expression_reasons
+    # Follow the merged writer into its own source: the pair it returns is as
+    # closed as a literal one, and its only non-literal reason is the rail's own
+    # `ACCEPTANCE_BYPASS_REASON_BY_RAIL` token (already inside the closed set).
+    assert seen_merged_writers == len(merged_writers)
+    for helper in sorted(merged_writers):
+        body = "\n".join(src).split(f"def {helper}(")[1].split("\ndef ")[0]
+        assert re.findall(r'"reason": "([a-z_]+)"', body), helper
+        for reason in re.findall(r'"reason": "([a-z_]+)"', body):
+            assert reason in ACCEPTANCE_DECISION_REASONS, reason
+        assert re.findall(r'"reason": [a-z_]+', body) == ['"reason": rail_reason'], helper
+        for name in re.findall(r'"status": ([A-Z_]+)', body):
+            assert name in allowed_status, name
 
 def test_task_acceptance_review_tool_result_lifts_agent_decision_into_trace():
     from ouroboros.loop_tool_execution import process_tool_results

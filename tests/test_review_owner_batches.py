@@ -65,14 +65,19 @@ def test_active_owner_batch_reuses_one_history_snapshot(tmp_path, monkeypatch):
         tmp_path, invocation_id="inv-started", operation_id="wrong-operation",
         surface="multi_model_review", request={"prompt": "duplicate"},
     )
+    from ouroboros import delegate_custody_memo
+
     scans = []
-    original = delegate_custody._iter_rows
+    original = delegate_custody_memo._refresh
 
-    def counted(path, *args, **kwargs):
-        scans.append(path)
-        yield from original(path, *args, **kwargs)
+    def counted(drive_root, *args, **kwargs):
+        # One custody refresh per reconcile: the batch shares that snapshot
+        # across replay, pending and invocation projections (a `replay()` that
+        # dropped `rows=` would refresh a second time and show here).
+        scans.append(drive_root)
+        return original(drive_root, *args, **kwargs)
 
-    monkeypatch.setattr(delegate_custody, "_iter_rows", counted)
+    monkeypatch.setattr(delegate_custody_memo, "_refresh", counted)
     result = review_owner_custody.reconcile_review_custody_after_confirmed_process_deaths(
         tmp_path, {101, 202},
     )

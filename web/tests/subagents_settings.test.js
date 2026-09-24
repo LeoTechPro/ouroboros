@@ -937,19 +937,25 @@ function accessEditorDom() {
         addEventListener(type, handler) { this.listeners[type] = handler; },
         setAttribute(name, value) { this.attributes[name] = value; },
         emit(type, value) { this.listeners[type]({ target: { value } }); },
+        toggle(checked) { this.listeners.change({ target: { checked } }); },
     });
     let rows = [];
+    // The toolbar controls the real binder wires beside the rows.
+    const toolbar = { add: field('add'), listEnabled: field('listEnabled') };
     const container = {
         scrollTop: 0,
+        toolbar,
         set innerHTML(html) {
             rows = [...html.matchAll(/<article[^>]*data-subagent-row="([^"]+)"[^>]*>([\s\S]*?)<\/article>/g)].map((match) => {
                 const fields = new Map([...match[2].matchAll(/data-subagent-field="([^"]+)"/g)]
                     .map((entry) => [entry[1], field(entry[1])]));
                 const duplicate = field('duplicate');
+                const meta = { dataset: {}, toggleAttribute() {}, textContent: '' };
                 return {
-                    dataset: { subagentRow: match[1] }, toggleAttribute() {},
+                    dataset: { subagentRow: match[1] }, toggleAttribute() {}, meta,
                     querySelector(selector) {
                         if (selector === '[data-subagent-duplicate]') return duplicate;
+                        if (selector === '[data-subagent-meta]') return meta;
                         return fields.get(selector.match(/data-subagent-field="([^"]+)"/)?.[1]) || null;
                     },
                     querySelectorAll: (selector) => selector === '[data-subagent-field]' ? [...fields.values()] : [],
@@ -957,12 +963,17 @@ function accessEditorDom() {
             });
         },
         querySelector(selector) {
+            if (selector === '[data-subagent-add]') return toolbar.add;
+            if (selector === '[data-subagents-enabled]') return toolbar.listEnabled;
             const key = selector.match(/data-subagent-row="([^"]+)"/)?.[1];
             return rows.find((row) => row.dataset.subagentRow === key) || null;
         },
         querySelectorAll: (selector) => selector === '[data-subagent-row]' ? rows : [],
     };
-    return { doc: { getElementById: () => container }, row: (index = 0) => rows[index] };
+    return {
+        doc: { getElementById: () => container }, toolbar,
+        row: (index = 0) => rows[index],
+    };
 }
 
 test('access edit saves and clones the lower choice, resets for API and restores full', () => {
@@ -988,6 +999,84 @@ test('access edit saves and clones the lower choice, resets for API and restores
     control('access').emit('change', 'full');
     assert.equal(editor.collect().OUROBOROS_SUBAGENTS.items[0].access, 'full');
     editor.destroy();
+});
+
+test('Duplicate is born a judged draft that names its twin until one engine field changes', () => {
+    const dom = accessEditorDom();
+    const editor = createAvailableSubagentsEditor({ doc: dom.doc, win: null });
+    editor.load(setting([sessionRow({ subagent_id: 'fast-scout', effort: 'high' })]));
+    assert.deepEqual(editor.validate(), []);
+    const control = (name, index) => dom.row(index).querySelector(`[data-subagent-field="${name}"]`);
+
+    dom.row().querySelector('[data-subagent-duplicate]').emit('click');
+    // The hidden key is neutral: an inherited `<source>_copy` label would rot with the route.
+    assert.match(editor.setting.items[1].subagent_id, /^subagent_[a-z0-9]+$/);
+    // The card names its twin BEFORE any Save click; the source row stays clean.
+    assert.match(dom.row(1).meta.textContent, /^Subagent 2 runs the same engine as Subagent 1 — change its model/);
+    assert.doesNotMatch(dom.row(0).meta.textContent, /same engine/);
+    assert.deepEqual(editor.validate().filter((text) => /same engine/.test(text)).length, 1);
+
+    // The description is not part of the engine; one engine field is.
+    control('recommended_use', 1).emit('input', 'Other words, same engine.');
+    assert.match(editor.validate()[0], /same engine as Subagent 1/);
+    control('effort', 1).emit('change', 'low');
+    assert.deepEqual(editor.validate(), []);
+    assert.doesNotMatch(dom.row(1).meta.textContent, /same engine/);
+    editor.destroy();
+});
+
+test('twins saved earlier are hinted, never Save-blocking, until the roster is edited', () => {
+    const dom = accessEditorDom();
+    const editor = createAvailableSubagentsEditor({ doc: dom.doc, win: null });
+    editor.load(setting([apiRow({ subagent_id: 'one' }), apiRow({ subagent_id: 'two' }), sessionRow()]));
+    // Untouched: an unrelated Settings save must go through, so nothing blocks...
+    assert.deepEqual(editor.validate(), []);
+    editor.noteSaveAttempt();
+    assert.deepEqual(editor.validate(), []);
+    // ...but the later twin says what it is, in a neutral tone.
+    assert.match(dom.row(1).meta.textContent, /^Runs the same engine as Subagent 1 — change one of them/);
+    assert.equal(dom.row(1).meta.dataset.tone, undefined);
+    assert.doesNotMatch(dom.row(0).meta.textContent, /same engine/);
+    // Any roster edit - here another row's words - makes the save judge the whole roster.
+    dom.row(2).querySelector('[data-subagent-field="recommended_use"]').emit('input', 'New words.');
+    assert.deepEqual(editor.validate(), ['Subagent 2 runs the same engine as Subagent 1 — change its model, effort, access, account or processing, or remove it.']);
+    editor.noteSaveAttempt();
+    assert.equal(dom.row(1).meta.dataset.tone, 'error');
+    editor.destroy();
+});
+
+test('the row switch is not an engine facet: switching a twin off keeps the twin, so that edit is judged', () => {
+    const dom = accessEditorDom();
+    const editor = createAvailableSubagentsEditor({ doc: dom.doc, win: null });
+    editor.load(setting([apiRow({ subagent_id: 'one' }), apiRow({ subagent_id: 'two' })]));
+    assert.deepEqual(editor.validate(), [], 'twins saved earlier never block an untouched roster');
+    dom.row(1).querySelector('[data-subagent-field="enabled"]').toggle(false);
+    assert.match(editor.validate()[0], /^Subagent 2 runs the same engine as Subagent 1/);
+    // A switched-off row with its own engine is an ordinary seat, and an off twin is hinted like any twin.
+    dom.row(1).querySelector('[data-subagent-field="effort"]').emit('change', 'low');
+    assert.deepEqual(editor.validate(), []);
+    const parked = { setting: setting([apiRow({ subagent_id: 'one' }), apiRow({ subagent_id: 'two', enabled: false })]) };
+    assert.match(rowMeta(parked.setting.items[1], { ...QUIET_STATE, ...parked }, []).text, /^Runs the same engine as Subagent 1/);
+    editor.destroy();
+});
+
+test('engine uniqueness is a SAVE rule: a roster saved with twins still loads, and empty drafts are not twins', () => {
+    const twins = setting([apiRow({ subagent_id: 'one' }), apiRow({ subagent_id: 'two', recommended_use: 'x' })]);
+    const parsed = parseAvailableSubagentsSetting(twins);
+    assert.equal(parsed.error, '', 'an existing install never turns invalid on read');
+    assert.deepEqual(validateAvailableSubagentsSetting(parsed.setting), []);
+    assert.deepEqual(validateAvailableSubagentsSetting(parsed.setting, { uniqueEngines: true }),
+        ['Subagent 2 runs the same engine as Subagent 1 — change its model, effort, access, account or processing, or remove it.']);
+    // The engine is judged under the processing it inherits: an unset row IS a fast row under a global fast.
+    const inherits = setting([apiRow({ subagent_id: 'one' }), apiRow({ subagent_id: 'two', processing_preference: 'fast' })]);
+    assert.deepEqual(validateAvailableSubagentsSetting(inherits, { uniqueEngines: true }), []);
+    assert.match(validateAvailableSubagentsSetting(inherits, { uniqueEngines: true, processingPreference: 'fast' })[0], /same engine as Subagent 1/);
+    // Two freshly added rows have no engine yet: each asks for a route, neither is called a twin.
+    const blank = { recommended_use: '', route: { kind: ROUTE_KIND_API_MODEL, target_id: '' } };
+    const drafts = validateAvailableSubagentsSetting(
+        setting([{ ...blank, subagent_id: 'a' }, { ...blank, subagent_id: 'b' }]), { uniqueEngines: true });
+    assert.equal(drafts.length, 2);
+    assert.ok(drafts.every((text) => /needs a model or agent-session route/.test(text)));
 });
 
 // ---------------------------------------------------------------------------
@@ -1056,4 +1145,89 @@ test('the editor derives its provider list from the settings document it is give
         availableSubagentsRenderSignature(state),
         availableSubagentsRenderSignature({ ...state, providers: configuredApiProviders({ OPENAI_API_KEY: 'k' }) }),
     );
+});
+
+// ---------------------------------------------------------------------------
+// The per-row owner switch (docs/DESIGN.md "List editors"): a native checkbox
+// leading the card head, saved through the section's common Save like every
+// other field. Owner-disabled is its own axis — distinct from the list-level
+// Enabled and from live availability — and never dims or locks the card.
+// ---------------------------------------------------------------------------
+
+test('the card head leads with a native enable checkbox that never dims the row', () => {
+    const html = availableSubagentRowMarkup(sessionRow(), QUIET_STATE, 1);
+    const head = html.slice(html.indexOf('available-subagent-head'), html.indexOf('available-subagent-purpose'));
+    // BEFORE the title, using the shared primitive, with its own hit target.
+    assert.ok(head.indexOf('data-subagent-field="enabled"') < head.indexOf('available-subagent-heading'));
+    assert.match(head, /<label class="available-subagent-enable"[^>]*title="[^"]+"><input class="ui-checkbox" type="checkbox"/);
+    assert.match(head, /data-subagent-field="enabled" aria-label="Subagent 2 enabled for new work" checked>/);
+    // A switched-off row keeps every control editable: only the box clears.
+    const off = availableSubagentRowMarkup(sessionRow({ enabled: false }), QUIET_STATE, 1);
+    assert.match(off, /data-subagent-field="enabled" aria-label="Subagent 2 enabled for new work"><\/label>/);
+    assert.doesNotMatch(off, /data-subagent-field="(model|effort|access|recommended_use)"[^>]*\sdisabled/);
+    // The status chip still reports intent × availability only; the switch is
+    // not smuggled into the live-availability sentence.
+    assert.equal(rowStatus(sessionRow({ enabled: false }), QUIET_STATE).text,
+        rowStatus(sessionRow(), QUIET_STATE).text);
+});
+
+test('the row switch is a draft the common Save writes, never an instant save', () => {
+    const dom = accessEditorDom();
+    const changes = [];
+    const editor = createAvailableSubagentsEditor({ doc: dom.doc, win: null, onChange: (value) => changes.push(value) });
+    editor.load(setting([apiRow(), sessionRow()]));
+    const control = (name, index = 0) => dom.row(index).querySelector(`[data-subagent-field="${name}"]`);
+    assert.equal(editor.dirty, false);
+
+    control('enabled').toggle(false);
+    assert.equal(editor.dirty, true);
+    // Held in the draft only: `collect()` is the one writer, and the payload
+    // carries `false` explicitly while the untouched sibling stays omitted.
+    const payload = editor.collect().OUROBOROS_SUBAGENTS;
+    assert.equal(payload.items[0].enabled, false);
+    assert.equal('enabled' in payload.items[1], false);
+    assert.equal(changes.at(-1).items[0].enabled, false);
+
+    // A pending unrelated edit survives the same draft; both ride ONE save.
+    control('recommended_use', 1).emit('input', 'Pending prose the owner is still writing.');
+    assert.deepEqual(editor.collect().OUROBOROS_SUBAGENTS.items.map((row) => row.enabled),
+        [false, undefined]);
+    assert.equal(editor.collect().OUROBOROS_SUBAGENTS.items[1].recommended_use,
+        'Pending prose the owner is still writing.');
+
+    // off -> save -> reload -> on: the saved bytes round-trip, and switching the
+    // row back on returns the roster to its original canonical form.
+    const saved = editor.collect().OUROBOROS_SUBAGENTS;
+    editor.load(saved);
+    assert.equal(editor.dirty, false);
+    assert.equal(editor.setting.items[0].enabled, false);
+    dom.row(0).querySelector('[data-subagent-field="enabled"]').toggle(true);
+    assert.equal('enabled' in editor.collect().OUROBOROS_SUBAGENTS.items[0], false);
+    editor.destroy();
+});
+
+test('duplicate carries the row switch and the two enabled axes stay independent', () => {
+    const dom = accessEditorDom();
+    const editor = createAvailableSubagentsEditor({ doc: dom.doc, win: null });
+    editor.load(setting([apiRow({ enabled: false })]));
+    assert.equal(editor.setting.enabled, true, 'a disabled ROW does not disable the list');
+
+    dom.row(0).querySelector('[data-subagent-duplicate]').emit('click');
+    assert.equal(editor.setting.items.length, 2);
+    assert.equal(editor.setting.items[1].enabled, false, 'the copy preserves the owner choice');
+    assert.notEqual(editor.setting.items[0].subagent_id, editor.setting.items[1].subagent_id);
+    // A freshly ADDED row is enabled: the invitation is never born switched off.
+    dom.toolbar.add.emit('click', '');
+    assert.equal(editor.setting.items.length, 3);
+    assert.equal('enabled' in editor.setting.items[2], false);
+
+    // The list-level switch writes only itself, leaving every row switch alone.
+    dom.toolbar.listEnabled.toggle(false);
+    const payload = editor.collect().OUROBOROS_SUBAGENTS;
+    assert.equal(payload.enabled, false);
+    assert.deepEqual(payload.items.map((row) => row.enabled), [false, false, undefined]);
+    dom.toolbar.listEnabled.toggle(true);
+    assert.equal(editor.collect().OUROBOROS_SUBAGENTS.enabled, true);
+    assert.equal(editor.collect().OUROBOROS_SUBAGENTS.items[0].enabled, false);
+    editor.destroy();
 });

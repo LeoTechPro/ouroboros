@@ -1436,3 +1436,44 @@ def test_review_substrate_runs_never_occupy_the_actors_delegation_slot(tmp_path)
     ))
     custody._CUSTODY.clear()
     assert unsettled_start_ids(tmp_path, "actor1")["open_run_ids"] == ["run-mine"]
+
+
+def test_the_legacy_lane_seam_never_selects_an_owner_disabled_migrated_row():
+    """The bounded legacy seam is a compatibility projection, not a second
+    authority: a row the owner switched off is excluded there too, so the seam
+    reports an ambiguous selection instead of quietly starting a paused actor."""
+    from ouroboros.subagent_runtime import SubagentSelectionError, select_subagent_snapshot
+
+    legacy = {"OUROBOROS_MODEL_HEAVY": "owner/custom-heavy"}
+    snapshot, used_legacy = select_subagent_snapshot(
+        legacy, legacy_model_lane="heavy", legacy_model_lane_supplied=True,
+    )
+    assert used_legacy is True and snapshot["selected_subagent_id"] == "legacy-heavy"
+
+    saved = json.loads(_settings(_api_row("legacy-heavy", model="owner/custom-heavy"))[
+        "OUROBOROS_SUBAGENTS"])
+    saved["items"][0]["enabled"] = False
+    migrated = {
+        "OUROBOROS_SUBAGENT_HARNESS": "off",
+        "OUROBOROS_SUBAGENTS": json.dumps(saved),
+    }
+    with pytest.raises(SubagentSelectionError) as refused:
+        select_subagent_snapshot(
+            migrated, legacy_model_lane="heavy", legacy_model_lane_supplied=True,
+        )
+    assert refused.value.code == "subagent_selection_required"
+
+
+def test_an_owner_disabled_local_api_row_no_longer_asks_for_a_local_runtime():
+    """Autostart follows real dispatchable intent: a switched-off local row
+    must not keep a local model server running for work it can never do."""
+    from ouroboros.server_runtime import needs_local_model_autostart
+
+    local_row = _api_row("local-scout", model="owner-model (local)")
+    assert needs_local_model_autostart(_settings(local_row))
+
+    off = dict(local_row, enabled=False)
+    assert not needs_local_model_autostart(_settings(off))
+    # An enabled sibling still needs it.
+    assert needs_local_model_autostart(_settings(off, _api_row(
+        "local-builder", model="other-model (local)")))

@@ -2,7 +2,9 @@
 
 The physical-send observability contract is implemented in
 `ouroboros/model_send_seal.py`, wired at
-`llm_attempt._candidate_before_dispatch` and swept from `server_maintenance`;
+`llm_attempt._candidate_before_dispatch` and swept by the session-custodied
+history child `ouroboros/startup_historical_audit.py` (launched after
+supervisor readiness, off the readiness path);
 `tests/test_model_send_seal.py` verifies it. The claim is deliberately narrow:
 a reconstruction mismatch is an observability fact, not a dispatch gate.
 
@@ -109,8 +111,9 @@ bounded, local, and on the same drive the record was just written to.
 
 ### 3.3 Reverse direction (audit, `model_send` only)
 
-A bounded reconciliation sweep (rides the existing startup-sweep family in
-`server_maintenance`, not a new scheduler):
+A bounded reconciliation sweep (runs inside the session-custodied history
+child `startup_historical_audit.py`, started by `server.py::_run_supervisor`
+after readiness — not on the readiness path, not a new scheduler):
 
 - every `model_send` seal ⟶ exactly one attempt row in the usage-accounting
   replay (any terminal state, including refused-before-dispatch);
@@ -220,8 +223,9 @@ from "our two copies agree" to "the durable record agrees with the wire".
 - `model_send_seal.py` stamps the physical-candidate manifest, reads back the
   durable projection, writes typed mismatch facts and reconciles both join
   directions. The seal is an additive key under the existing manifest schema.
-- `server_maintenance.py` runs the bounded reconciliation through the existing
-  startup sweep. Unknown accounting evidence does not become an orphan claim;
+- `startup_historical_audit.py` runs the bounded reconciliation as one
+  session-custodied child per generation, launched after supervisor readiness
+  (#1195 F1). Unknown accounting evidence does not become an orphan claim;
   the sweep records facts without deleting records or fabricating attempts.
 - `tests/test_model_send_seal.py` covers reconstruction, typed divergence,
   non-blocking dispatch and reverse joins. Compacted history is resolved through

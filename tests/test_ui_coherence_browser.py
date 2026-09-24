@@ -612,7 +612,7 @@ def test_question_mirrors_full_form_settle_and_reload(subscription_ui, width, he
 
     # A keyboard answer: focus stays in the settled copy, then moves on to the next question.
     card('finished').locator('.chat-quiz-question').focus()
-    page.keyboard.press('Alt+Tab')
+    page.keyboard.press('Tab')
     assert page.evaluate("document.activeElement.classList.contains('chat-quiz-option')"), \
         page.evaluate('document.activeElement.outerHTML')
     page.keyboard.press('Enter')
@@ -657,13 +657,28 @@ def test_question_mirrors_full_form_settle_and_reload(subscription_ui, width, he
 
     # Stale snapshots — the census and a reconnect's history re-read taken before the answers —
     # never bring a removed copy back, also after Main's bounded question memory (2000) let the
-    # answers go: every quiz_state frame is one more remembered question.
-    for index in range(2001):
-        sockets[-1].send(json.dumps({'type': 'quiz_state', 'task_id': 'noise-task', 'quiz_id': f'noise-{index}',
-                                     'state': 'open'}))
-    page.wait_for_timeout(500)
+    # answers go: every quiz_state frame is one more remembered question.  The browser-side
+    # acknowledgement is the barrier here: a fixed delay only made this assertion race the
+    # client's event queue and the periodic state census on slower runners.
     detail_count = len(detail_reads)
+    assert 'late-task' not in detail_reads[:detail_count]
     mode['stale'] = True
+    page.evaluate("""() => {
+        window.__questionMirrorNoiseBarrier = false;
+        window.__questionMirrorNoiseDispose = window.__ouroWs.on('quiz_state', frame => {
+            if (frame?.task_id === 'noise-task' && frame?.quiz_id === 'noise-final')
+                window.__questionMirrorNoiseBarrier = true;
+        });
+    }""")
+    for index in range(2001):
+        page_quiz_id = 'noise-final' if index == 2000 else f'noise-{index}'
+        sockets[-1].send(json.dumps({'type': 'quiz_state', 'task_id': 'noise-task', 'quiz_id': page_quiz_id,
+                                     'state': 'open'}))
+    page.wait_for_function("() => window.__questionMirrorNoiseBarrier === true", timeout=15000)
+    page.evaluate("""() => {
+        window.__questionMirrorNoiseDispose?.();
+        delete window.__questionMirrorNoiseDispose;
+    }""")
     activities[0]['required_question'] = pointer('waiting', asked['waiting'])
     read_count = len(history_reads)
     page.evaluate('window.sameDocument = true')

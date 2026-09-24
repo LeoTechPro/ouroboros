@@ -90,9 +90,7 @@ def collect_routes(
         api_provider_test,
     )
     from ouroboros.gateway.schedules import (
-        api_schedules_delete,
-        api_schedules_list,
-        api_schedules_upsert,
+        api_schedules_action, api_schedules_delete, api_schedules_list, api_schedules_upsert,
     )
     from ouroboros.gateway.control import (
         api_command,
@@ -247,6 +245,7 @@ def collect_routes(
     Route("/api/decisions", endpoint=api_decision_answer, methods=["POST"]),
         Route("/api/schedules", endpoint=api_schedules_list, methods=["GET"]),
         Route("/api/schedules", endpoint=api_schedules_upsert, methods=["POST"]),
+        Route("/api/schedules/{schedule_id}/action", endpoint=api_schedules_action, methods=["POST"]),
         Route("/api/schedules/{schedule_id}", endpoint=api_schedules_delete, methods=["DELETE"]),
         Route("/api/command", endpoint=api_command, methods=["POST"]),
         Route("/api/reset", endpoint=api_reset, methods=["POST"]),

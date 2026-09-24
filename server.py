@@ -5,7 +5,6 @@ import base64  # noqa: F401
 import json
 import logging
 import subprocess
-
 import os
 import pathlib
 import sys
@@ -17,13 +16,10 @@ from typing import Any, Dict, Optional
 
 from starlette.applications import Starlette
 from starlette.routing import Route, Mount
-
 import uvicorn
-
-from ouroboros.server_control import (
-    execute_panic_stop as _execute_panic_stop_impl,
-    restart_current_process as _restart_current_process_impl,
-)
+from ouroboros.server_control import (execute_panic_stop as _execute_panic_stop_impl,
+                                      restart_current_process as _restart_current_process_impl)
+from ouroboros.startup_historical_audit import audit as _historical_audit
 from ouroboros.server_auth import (
     NetworkAuthGate,
     get_network_auth_startup_warning,
@@ -49,6 +45,9 @@ from ouroboros.server_process import (  # noqa: F401
     _request_restart_exit,
     _restart_requested,
     _supervisor_stop,
+    _exit_signalled,
+    _SignalStopServer,
+    _embedded_uvicorn_server,
     log,
 )
 from ouroboros.server_routing_context import (  # noqa: F401
@@ -150,6 +149,7 @@ RESTART_EXIT_CODE = 42
 PANIC_EXIT_CODE = 99
 _planned_delegate_restart_transaction_id = ""
 _LAUNCHER_MANAGED = str(os.environ.get("OUROBOROS_MANAGED_BY_LAUNCHER", "") or "").strip() == "1"
+_LAUNCHER_MANAGED_REPO_DIR = str(os.environ.get("OUROBOROS_MANAGED_REPO_DIR", "") or "").strip()
 
 # Captured in main() for Settings LAN-reachability metadata.
 _BIND_HOST = DEFAULT_HOST
@@ -168,6 +168,15 @@ def _has_active_evolution_transaction() -> bool:
         tx = raw.get("active_transaction")
         return isinstance(tx, dict) and not str(tx.get("commit_sha") or "").strip()
     except Exception:
+        return False
+
+
+def _launcher_managed_repo_matches() -> bool:
+    if not _LAUNCHER_MANAGED: return False
+    if not _LAUNCHER_MANAGED_REPO_DIR: return (REPO_DIR / ".git" / "ouroboros-managed.json").is_file()
+    try:
+        return pathlib.Path(_LAUNCHER_MANAGED_REPO_DIR).resolve(strict=False) == REPO_DIR.resolve(strict=False)
+    except (OSError, RuntimeError, ValueError):
         return False
 
 
@@ -193,6 +202,7 @@ def _restart_current_process(host: str, port: int) -> None:
     )
 
 from ouroboros.config import (
+    SERVER_GRACEFUL_SHUTDOWN_TIMEOUT_SEC,
     SETTINGS_DEFAULTS,
     SettingsIntegrityError,
     load_settings, save_settings, verify_settings_integrity,
@@ -261,16 +271,33 @@ def _start_supervisor_if_needed(settings: dict) -> bool:
         return False
     if _supervisor_thread and _supervisor_thread.is_alive():
         return False
+    if _exit_signalled.is_set():
+        return False  # the process is exiting: no revival behind the teardown
     _supervisor_error = None
     _supervisor_stop.clear()  # in-process revival after a teardown-stopped generation
     _supervisor_thread = threading.Thread(
-        target=_run_supervisor,
+        target=_supervisor_generation,
         args=(settings,),
         daemon=True,
         name="supervisor-main",
     )
     _supervisor_thread.start()
     return True
+
+
+def _supervisor_generation(settings: dict) -> None:
+    """Thread body: re-check the exit latch, then run one supervisor generation.
+
+    Admission (`_start_supervisor_if_needed`) and this thread start are separate steps,
+    so a settings save can pass the latch check a moment before SIGTERM; a generation
+    that starts anyway must end here, before its startup kill/spawn would run behind
+    the teardown's `kill_workers` (#1142).
+    """
+    global _supervisor_thread
+    if _exit_signalled.is_set():
+        _supervisor_thread = None
+        return
+    _run_supervisor(settings)
 
 
 def _process_bridge_updates(bridge, offset: int, ctx: Any) -> int:
@@ -521,7 +548,7 @@ def _bootstrap_supervisor_repo(settings: dict, git_ops_module=None):
     git_ops_module.ensure_repo_present()
     setup_remote_if_configured(settings, log)
 
-    if _LAUNCHER_MANAGED:
+    if _launcher_managed_repo_matches():
         # An in-flight managed-update assisted merge intentionally leaves MERGE_HEAD + the partly
         # resolved merge in the live worktree (over pre_update_sha). Use the NON-destructive
         # rescue_and_block policy so the bootstrap restart does not reset/clean that merge state
@@ -552,6 +579,9 @@ def _bootstrap_supervisor_repo(settings: dict, git_ops_module=None):
                 log.debug("Failed to pause evolution after blocked bootstrap", exc_info=True)
         return ok, msg
 
+    if _LAUNCHER_MANAGED:
+        log.warning("Managed marker lacks matching repository identity; skipping destructive bootstrap for %s.", REPO_DIR)
+
     log.info("Local-dev server start detected — skipping bootstrap git reset.")
     deps_ok, deps_msg = git_ops_module.sync_runtime_dependencies(reason="bootstrap_local_dev")
     if not deps_ok:
@@ -580,8 +610,7 @@ def _run_supervisor(settings: dict) -> None:
     try:
         ensure_legacy_imported(pathlib.Path(DATA_DIR))
 
-        from supervisor.message_bus import init as bus_init
-        from supervisor.message_bus import LocalChatBridge
+        from supervisor.message_bus import LocalChatBridge, init as bus_init
 
         bridge = LocalChatBridge(settings)
         bridge._broadcast_fn = broadcast_ws_sync
@@ -686,9 +715,7 @@ def _run_supervisor(settings: dict) -> None:
 
         def _get_owner_chat_id() -> Optional[int]:
             try:
-                st = load_state()
-                cid = st.get("owner_chat_id")
-                return int(cid) if cid else None
+                return int((load_state() or {}).get("owner_chat_id") or 0) or None
             except Exception:
                 return None
 
@@ -696,8 +723,7 @@ def _run_supervisor(settings: dict) -> None:
             drive_root=DATA_DIR, repo_dir=REPO_DIR, owner_chat_id_fn=_get_owner_chat_id,
             routing_metadata_fn=lambda cid: main_lane_routing_metadata(_event_ctx, cid))  # _event_ctx is built below
 
-        _bg_st = load_state()
-        if _bg_st.get("bg_consciousness_enabled"):
+        if load_state().get("bg_consciousness_enabled"):
             _consciousness.start()
             log.info("Background consciousness auto-restored from saved state.")
 
@@ -743,6 +769,7 @@ def _run_supervisor(settings: dict) -> None:
 
     _supervisor_ready.set()
     log.info("Supervisor ready.")
+    _historical_audit.start(DATA_DIR, REPO_DIR)
 
     offset = 0
     crash_count = 0
@@ -750,15 +777,16 @@ def _run_supervisor(settings: dict) -> None:
     _last_review_job_reconcile = [time.time()]
     # WS3: a dedicated watchdog thread (outside this loop, so it fires even if the
     # loop stalls) surfaces a wedge as an observable signal + owner alert instead
-    # of silent hours; the loop publishes a liveness tick each iteration. The tick
-    # is MONOTONIC: it is only ever read as an elapsed gap, so a wall-clock jump
-    # must not turn a healthy loop into a phantom stall (nor hide a real one).
-    _loop_liveness = [time.monotonic()]
+    # of silent hours; the loop publishes a liveness tick at each tick PHASE. The
+    # tick is MONOTONIC: it is only ever read as an elapsed gap, so a wall-clock
+    # jump must not turn a healthy loop into a phantom stall (nor hide a real one).
+    from ouroboros.server_liveness import loop_phase_facts, observe_worker_event_lag
+    _loop_liveness = [time.monotonic(), {}, time.thread_time(), None]  # slots: server_liveness.py
     _watchdog_stop = threading.Event()  # per-generation: stops the watchdog when THIS loop exits
     _start_supervisor_liveness_watchdog(_loop_liveness, _watchdog_stop)
-    while not _restart_requested.is_set() and not _supervisor_stop.is_set():
+    while not _restart_requested.is_set() and not _supervisor_stop.is_set() and not _exit_signalled.is_set():
         try:
-            _loop_liveness[0] = time.monotonic()
+            _loop_liveness[1], _loop_liveness[0] = loop_phase_facts(_loop_liveness, "events", new_tick=True), time.monotonic()
             rotate_chat_log_if_needed(DATA_DIR)
             # progress.jsonl rotates on the same supervisor tick (v6.90.x P2); its
             # readers (history backfill, SSE replay, api_logs_tail, TB ATIF) are
@@ -787,6 +815,7 @@ def _run_supervisor(settings: dict) -> None:
                 if evt.get("type") == "restart_request":
                     _handle_restart_in_supervisor(evt, _event_ctx)
                     continue
+                observe_worker_event_lag(_loop_liveness, evt)
                 dispatch_event(evt, _event_ctx)
 
             if _restart_requested.is_set():
@@ -798,6 +827,7 @@ def _run_supervisor(settings: dict) -> None:
             # where no task_received fired for hours until a full restart).
             offset = _process_bridge_updates(bridge, offset, _event_ctx)
 
+            _loop_liveness[1], _loop_liveness[0] = loop_phase_facts(_loop_liveness, "maintenance"), time.monotonic()
             enforce_task_timeouts()
             try:
                 from supervisor.queue import check_scheduled_tasks
@@ -805,9 +835,10 @@ def _run_supervisor(settings: dict) -> None:
             except Exception:
                 log.warning("Scheduled task check failed", exc_info=True)
             _periodic_supervisor_maintenance(
-                _last_custody_reap, _last_review_job_reconcile,
+                _last_custody_reap, _last_review_job_reconcile, stop_event=_watchdog_stop,
                 on_orphans_healed=lambda count: _consciousness and _consciousness.notify(f"orphans_healed:{count}"),
             )
+            _loop_liveness[1], _loop_liveness[0] = loop_phase_facts(_loop_liveness, "assign"), time.monotonic()
             # Loop-tick restart drain (no sleep, events keep flowing): while
             # draining a deferred restart, skip starting new work the restart
             # deadline would immediately chop (evolution / pending project tasks).
@@ -835,7 +866,7 @@ def _run_supervisor(settings: dict) -> None:
             time.sleep(0.5)
 
         except Exception as exc:
-            if _supervisor_stop.is_set() or _restart_requested.is_set():
+            if _supervisor_stop.is_set() or _restart_requested.is_set() or _exit_signalled.is_set():
                 # A shutdown-torn Manager proxy is not a supervisor crash.
                 log.info("Supervisor loop exiting on shutdown: %s", exc)
                 break
@@ -1240,7 +1271,8 @@ async def lifespan(app):
     except Exception:
         log.warning("Project registry boot reconcile failed", exc_info=True)
 
-    _supervisor_stop.clear()  # a fresh lifespan owns a fresh generation (symmetric with the teardown set)
+    if not _exit_signalled.is_set():
+        _supervisor_stop.clear()  # a fresh lifespan owns a fresh generation (symmetric with the teardown set)
     if has_startup_ready_provider(settings):
         _start_supervisor_if_needed(settings)
     else:
@@ -1298,7 +1330,7 @@ async def lifespan(app):
             port=host_port,
             log_level="warning",
         )
-        host_service_server = uvicorn.Server(host_service_config)
+        host_service_server = _embedded_uvicorn_server(host_service_config)
         host_service_task = asyncio.create_task(
             host_service_server.serve(sockets=[host_socket]),
             name="host-service-api",
@@ -1378,6 +1410,7 @@ async def lifespan(app):
         yield
     finally:
         _supervisor_stop.set()  # first: the loop must know a teardown owns what follows
+        _historical_audit.stop()
         log.info("Server shutting down...")
         # Let the loop leave its current tick BEFORE workers are killed and the
         # bridge/Manager go down: a tick still running would otherwise respawn
@@ -1517,6 +1550,7 @@ def _restart_cleanup_kwargs() -> dict:
 
 def _emergency_process_cleanup(*, port_sweep: bool = True) -> None:
     """Kill child processes, workers, companions, and runtime port holders."""
+    _historical_audit.stop()  # forced path may skip lifespan's finally; stop never waits
     try:
         from ouroboros.tools.shell import kill_all_tracked_subprocesses
         kill_all_tracked_subprocesses()
@@ -1623,8 +1657,11 @@ def main() -> int:
         log_level="warning",
         ws_ping_interval=20,
         ws_ping_timeout=20,
+        # Bound the open HTTP/WS drain so the lifespan teardown (terminal custody) starts inside
+        # the launcher's stop budget instead of leaving terminalization to the next boot (#1142).
+        timeout_graceful_shutdown=SERVER_GRACEFUL_SHUTDOWN_TIMEOUT_SEC,
     )
-    server = uvicorn.Server(config)
+    server = _SignalStopServer(config)
     _uvicorn_exited = threading.Event()
 
     def _check_restart():

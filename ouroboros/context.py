@@ -68,6 +68,8 @@ _LARGE_CONTEXT_SECTION_CHARS = LARGE_CONTEXT_SECTION_CHARS
 
 
 def build_user_content(task: Dict[str, Any]) -> Any:
+    from ouroboros.presence_context import frame_presence_user_content
+
     text = task.get("text", "")
     metadata = task.get("metadata") if isinstance(task.get("metadata"), dict) else {}
     if metadata.get("force_plan"):
@@ -98,7 +100,7 @@ def build_user_content(task: Dict[str, Any]) -> Any:
     attachment_image_blocks = _build_attachment_image_blocks(task)
 
     if not image_b64 and not attachment_image_blocks:
-        return text or "(empty message)"
+        return frame_presence_user_content(task, text or "(empty message)")
 
     if image_b64:
         # Backward-compat: the legacy single-image path (screenshots, desktop chat
@@ -118,7 +120,7 @@ def build_user_content(task: Dict[str, Any]) -> Any:
     else:
         content = [{"type": "text", "text": text or "(empty message)"}]
     content.extend(attachment_image_blocks)
-    return content
+    return frame_presence_user_content(task, content)
 
 
 def _build_attachment_image_blocks(task: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -519,23 +521,18 @@ def build_runtime_section(env: Any, task: Dict[str, Any], *, ctx: Any = None, sc
             "your judgment picks the target (or none -> answer inline / promote_chat_to_task). A "
             "message in a project room defaults to that project unless it clearly says otherwise."
         )
-    _main_manifest = (
-        _meta.get("main_routing_manifest")
-        if isinstance(_meta.get("main_routing_manifest"), dict)
-        else None
-    )
-    if _main_manifest:
-        runtime_data["main_routing_manifest"] = _main_manifest
-    _last_result = (
-        _meta.get("project_last_task_result")
-        if isinstance(_meta.get("project_last_task_result"), dict)
-        else None
-    )
-    if _last_result:
-        # Host-built ground truth about the thread's most recent task result
-        # (id/status/workspace facts/artifact refs) — read THIS before framing a
-        # "continue" promotion; never reconstruct prior work from chat memory.
-        runtime_data["project_last_task_result"] = _last_result
+    # Host-built ground truth about what THIS lane may continue: Main's bounded
+    # manifest, a project room's own hint (its recent ROOT results and the roots
+    # still live in it) and the thread's most recent result (id/status/workspace
+    # facts/artifact refs). Read these before framing a "continue" promotion;
+    # never reconstruct prior work from chat memory. What promote ACCEPTS is the
+    # predicate in ARCHITECTURE ch. 10 - these rows are the hint, not the door.
+    for _routing_key in (
+        "main_routing_manifest", "project_routing_manifest", "project_last_task_result",
+    ):
+        _routing_fact = _meta.get(_routing_key)
+        if isinstance(_routing_fact, dict) and _routing_fact:
+            runtime_data[_routing_key] = _routing_fact
     _routing_contract = (
         _meta.get("routing_contract")
         if isinstance(_meta.get("routing_contract"), dict)
@@ -864,9 +861,18 @@ def _format_recent_reflections(entries: List[Dict[str, Any]], limit: int = 10) -
 
         lines = [f"### {header}"]
 
+        # A run's first text is not its goal: the recorded origin says whose it was,
+        # and it renders even when the text is empty (empty is not "not recorded").
+        origin = ((entry.get("review_evidence") or {}).get("task_inputs") or {}).get("run_origin")
+        presence = origin.get("presence") if isinstance(origin, dict) and isinstance(origin.get("presence"), dict) else {}
+        lines.append("- Origin: " + (", ".join(
+            [f"owner_ingress={origin.get('owner_ingress')}"]
+            + [f"{key}={origin[key]}" for key in ("task_type", "source", "initiator", "text_author") if origin.get(key)]
+            + [f"{key}={presence[key]}" for key in ("provider", "conversation_id") if presence.get(key)]
+        ) if isinstance(origin, dict) else "not recorded"))
         goal = str(entry.get("goal", "")).strip()
         if goal:
-            lines.append(f"- Goal: {goal}")
+            lines.append(f"- Initial text: {goal}")
 
         markers = [str(m).strip() for m in (entry.get("key_markers") or []) if str(m).strip()]
         if markers:
@@ -903,16 +909,19 @@ def build_recent_sections(
     # awareness/biography (BIBLE P1). A project TASK gets a FOCUSED view of its own
     # thread as working context to reduce interference — focus, not isolation.
     try:
-        from ouroboros.projects_registry import reserved_project_chat_ids
+        from ouroboros.dialogue_provenance import RoomLabelResolver
 
-        _project_chat_ids = reserved_project_chat_ids(memory.drive_root)
+        _room_resolver = RoomLabelResolver(memory.drive_root)
+        _project_chat_ids = _room_resolver.project_chat_ids
     except Exception:
+        _room_resolver = None
         _project_chat_ids = set()
 
     _chat_tail = MAX_RECENT_CHAT_TAIL
     retained_project_origins: List[Dict[str, Any]] = []
 
-    if thread_chat_id and thread_chat_id in _project_chat_ids:
+    _focused_project = bool(thread_chat_id and thread_chat_id in _project_chat_ids)
+    if _focused_project:
         # Post-hoc bindings and retention-proof origins belong to the existing
         # Project dialogue read model; focus changes the working view, not memory.
         from ouroboros.project_dialogue import project_recent_dialogue
@@ -928,7 +937,11 @@ def build_recent_sections(
         )
     if chat_coverage_out is not None:
         chat_coverage_out.update(chat_coverage)
-    chat_summary = memory.summarize_chat(chat_entries, limit=_chat_tail)
+    chat_summary = memory.summarize_chat(
+        chat_entries, limit=_chat_tail,
+        include_room_labels=not _focused_project,
+        room_resolver=_room_resolver,
+    )
     if chat_summary:
         sections.append("## Recent chat\n\n" + chat_summary)
     if retained_project_origins:
@@ -968,23 +981,19 @@ def build_recent_sections(
             + json.dumps(coverage_projection, ensure_ascii=False, sort_keys=True, default=str)
         )
 
-    for log_name, header, formatter in (
-        ("progress.jsonl", "## Recent progress", lambda rows: memory.summarize_progress(rows, limit=50)),
-        ("tools.jsonl", "## Recent tools", memory.summarize_tools),
-        ("events.jsonl", "## Recent events", memory.summarize_events),
-    ):
-        entries = memory.read_jsonl_tail(log_name, 200)
-        if task_id:
-            entries = [e for e in entries if str(e.get("task_id", "")).strip() == task_id]
-        summary = formatter(entries)
-        if summary:
-            sections.append(f"{header}\n\n{summary}")
+    # Each task reads ITS OWN newest rows through a bounded window (#131): a
+    # global tail filtered afterwards handed every task whatever share of the
+    # shared suffix it happened to occupy (Memory.recent_activity_sections).
+    from ouroboros.jsonl_tail import coverage_line
 
-    supervisor_summary = memory.summarize_supervisor(memory.read_jsonl_tail("supervisor.jsonl", 200))
+    sections.extend(memory.recent_activity_sections(task_id))
+
+    supervisor_rows, supervisor_coverage = memory.read_task_recent("supervisor.jsonl", "", 200)
+    supervisor_summary = memory.summarize_supervisor(supervisor_rows)
     if supervisor_summary:
-        sections.append("## Supervisor\n\n" + supervisor_summary)
+        sections.append(f"## Supervisor ({coverage_line(supervisor_coverage)})\n\n" + supervisor_summary)
 
-    reflections_entries = memory.read_jsonl_tail("task_reflections.jsonl", 20)
+    reflections_entries = memory.read_task_recent("task_reflections.jsonl", "", 20)[0]
     reflections_text = _format_recent_reflections(reflections_entries, limit=10)
     if reflections_text:
         sections.append("## Execution reflections\n\n" + reflections_text)
@@ -1327,11 +1336,18 @@ def _capture_context_core(
     if is_child:
         dynamic_parts.append(
             "## Working sources\n\n"
-            "The shared biography is loaded above. Your parent's selected discussion and working "
-            "sources are in this assignment's context. Other raw conversations, the global scratchpad "
-            "and earlier task reports are not preloaded: use chat_history, knowledge_read, "
-            "get_task_result or ask your parent for exact sources when useful."
+            "The shared biography is loaded above; your own recent process (progress, tools, events) "
+            "is loaded below. Your parent's selected discussion and working sources are in this "
+            "assignment's context. Other raw conversations, the global scratchpad and earlier task "
+            "reports are not preloaded: use chat_history, knowledge_read, get_task_result or ask "
+            "your parent for exact sources when useful."
         )
+        # A child keeps its own process memory too (owner decision 2026-09-22):
+        # its execution drive holds exactly its worker rows, progress is canonical.
+        own_drive = memory if context_memory is not memory else None
+        dynamic_parts.extend(context_memory.recent_activity_sections(
+            str(task.get("id") or ""), own_drive=own_drive,
+        ))
     else:
         dynamic_parts.extend(build_recent_sections(
             context_memory, env, task_id=task.get("id", ""), thread_chat_id=int(task.get("chat_id") or 0),

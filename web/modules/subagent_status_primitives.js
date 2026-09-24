@@ -12,6 +12,7 @@ import {
     harnessModelsKnown,
     modelsGapNote,
     routeModelFields,
+    sameEngineAs,
     sourceIdentityLabel,
     splitSessionTarget,
     accountScopedModelCatalog,
@@ -239,6 +240,11 @@ export function rowMeta(row, state, errors) {
     // An empty draft (`openai::` with no model yet) is still an invitation.
     if (!String(row.route?.target_id || '').trim()
         || (!session && !routeModelFields(row.route).model.trim())) return { text: ROUTE_HINT, tone: '' };
+    // A twin is SAID even while it blocks nothing: the editor judges twins only
+    // once the roster is edited, so one saved earlier never blocks an unrelated Save.
+    const items = state.setting?.items || [];
+    const twin = sameEngineAs(items, items.indexOf(row), state.processingPreference);
+    if (twin >= 0) return { text: `Runs the same engine as Subagent ${twin + 1} — change one of them to tell them apart.`, tone: '' };
     const receipt = executionFor(state.snapshot, row.subagent_id);
     const evidence = describeExecutionEvidence(receipt);
     const identity = receipt?.identity;

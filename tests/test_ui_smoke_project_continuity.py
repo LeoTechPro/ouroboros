@@ -990,7 +990,7 @@ def test_ui_smoke_open_project_panel_heals_lost_task_done_from_state_fanout(
 
 @pytest.mark.ui_browser
 def test_ui_smoke_project_pointer_is_a_main_root_affordance(direct_server_with_data):  # noqa: F811
-    """The bound-task pointer (`in project ↗`) belongs to the LIVE Main ROOT card:
+    """The bound-task pointer (the Project reference) belongs to the LIVE Main ROOT card:
     a task that scopes itself into a project mid-run keeps its Main card, which
     gains the pointer; the same task's card inside the project panel carries none;
     and clicking the Main pointer while that panel is already open leaves it open."""

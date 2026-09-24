@@ -1,6 +1,6 @@
 # Module Size & Complexity
 
-This chapter owns the size discipline — the deterministic line, function and byte gates, their debt manifest, and paydown by simplifying where the change lives rather than by extracting a passthrough — and the invariants that keep a growing system readable: projection over replay for hot readers, the source-complete decision pipeline, continuation authority, UI disposers, and embedded-surface geometry and refresh. Every rule here bounds reading cost and names its enforcing surface or discloses that it has none.
+This chapter owns deterministic line/function/byte gates, their debt manifest, and paydown by simplifying in place rather than extracting passthroughs. Its readability invariants cover hot-reader projections, the source-complete decision pipeline, continuation authority, UI disposers, and embedded-surface geometry/refresh. Each rule bounds reading cost and names its enforcement or absence.
 
 P7 makes context fit a maintenance constraint, not a line-count aesthetic.
 
@@ -40,7 +40,9 @@ P7 makes context fit a maintenance constraint, not a line-count aesthetic.
 - Runtime Python function/method count stays under
   `ouroboros/review.py::MAX_TOTAL_FUNCTIONS` (the same runtime-only iterator;
   the module gates include tests/devtools) — a high-water alarm with ample
-  headroom, raised only with a one-line campaign rationale in the same commit.
+  headroom, raised only with a one-line campaign rationale in the same commit
+  (the current 10500 ceiling came with the exact budget-pause lifecycle,
+  owner-approved within 10%, after that change's own single-caller inlines).
 - Enforcement: the OFFICIAL repository's CI runs the dedicated `size_ratchet`
   pytest lane as a blocking step (`OURO_SIZE_RATCHET_BASE_REF` names the event
   base; lane placement and base fallback: ARCHITECTURE §8 "CI topology").
@@ -123,11 +125,15 @@ the answer.
 - **House precedents — reuse these shapes:** archive-aware chat log rotation
   (`supervisor/state.py::rotate_chat_log_if_needed`); the compact
   `containment_faults.jsonl` projection maintained beside an unbounded event
-  log (`ouroboros/delegate_custody.py`); one shared custody replay per context
-  build and per terminal audit (`delegate_terminal.custody_audit_snapshot`,
-  consumed by `context_health.build_health_invariants` and the terminal
-  audit) — sharing ONE traversal bounds the multiplier, not the scan, so that
-  read stays O(history) until a compact projection replaces it; the
+  log (`ouroboros/delegate_custody.py`); the process-local custody row memo
+  behind `delegate_custody.custody_rows` (`ouroboros/delegate_custody_memo.py`:
+  an ordered inode/size/mtime fingerprint of the rotated chain prefix, only
+  appended bytes folded, a refold on any doubt, a bypass while unreadable — it
+  bounds the warm read, not the cold fold, so a durable compact projection
+  stays the next step); the bounded filtered tail reader
+  `ouroboros/jsonl_tail.py` (doubling live tail, three newest archives,
+  coverage facts) for history endpoints and the per-task recent-activity
+  sections alike; the
   fingerprint-keyed render cache in `ouroboros/_usage_rows_memo.py`, held while
   its input is unchanged and invalidated only by advance/refold, never by TTL;
   the `gateway/task_list_scan.py` stat-invalidated result memo and the
@@ -277,18 +283,16 @@ is the ordinary-reply category rather than a finished task. Lineage comes from
 the delegation facts frames carry, because the terminal frame has none — a child
 must not reach the owner's banner.
 
-Classification and the delivery gate stay pure over one frame plus the stored
-preferences, so the rules are testable without a DOM or a socket. Preferences
-are client-local, carry no `s-` field and are excluded from the settings-dirty
-tracker, so they neither reach `/api/settings` nor offer to discard unsaved
-settings (`tests/test_notifications_static.py` asserts those causes, not only
-their effects). Delivery degrades rather than disappearing, and the status line
-says which surface this client has. The optional desktop bridge is invoked at
-delivery time, feature-detected per call, and returns a capability fact rather
-than a banner/delivery claim; it may raise the existing window and request one
-system sound, but it must not add a scheduler, persistence or background
-process. Importance must not acquire a new host field, a text heuristic or a
-second model call.
+Classification and delivery gating are pure over one frame and stored preferences,
+testable without a DOM or socket. Client-local preferences have no `s-` field,
+are excluded from the settings-dirty tracker, never reach `/api/settings` or
+prompt to discard unsaved settings (`tests/test_notifications_static.py` asserts
+these causes, not just effects). Delivery degrades instead of disappearing;
+the status line identifies this client's surface. Feature-detect the optional
+desktop bridge per call at delivery: its result is capability evidence, not a
+banner/delivery claim. It may raise the existing window and request one system
+sound; no scheduler, persistence or background process. Importance adds no host
+field, text heuristic or second model call.
 
 ### Invariant: UI resources carry a disposer
 

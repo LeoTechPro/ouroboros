@@ -18,6 +18,34 @@ import pytest
 from ouroboros.platform_layer import force_kill_pid, pid_is_alive
 
 
+def test_process_container_does_not_propagate_launcher_authority(monkeypatch):
+    """A contained child must not inherit the launcher-only destructive marker.
+
+    The real launcher starts its managed server through its direct Popen seam;
+    ProcessContainer is used for fixtures and helper children, where carrying
+    this authority would let a child bootstrap/reset an arbitrary checkout.
+    """
+    from ouroboros.process_containment import ProcessContainer
+
+    monkeypatch.setenv("OUROBOROS_MANAGED_BY_LAUNCHER", "1")
+    monkeypatch.setenv("OUROBOROS_MANAGED_REPO_DIR", "/private/launcher-repo")
+    container = ProcessContainer()
+    proc = container.spawn(
+        [sys.executable, "-c", "import os; print(os.environ.get('OUROBOROS_MANAGED_BY_LAUNCHER', ''), flush=True); print(os.environ.get('OUROBOROS_MANAGED_REPO_DIR', ''), flush=True)"],
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        assert proc.stdout is not None
+        assert proc.stdout.readline().strip() == ""
+        assert proc.stdout.readline().strip() == ""
+        assert proc.wait(timeout=10) == 0
+    finally:
+        container.close()
+        if proc.stdout is not None:
+            proc.stdout.close()
+
+
 def test_windows_containment_uses_the_shared_job_seam_and_closes_the_spawn_race(monkeypatch):
     """The Windows branch must reuse platform_layer's OWN Job Object seam, and it
     must assign the process to the job BEFORE the process can run.

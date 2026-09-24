@@ -241,10 +241,32 @@ Status, owner action, and urgent notification are separate product concepts:
   product's explicit incident/notification seam, not a red status or a failed
   task as a proxy.
 
+Activity schedule rows use the same factual status rule: `active`, `disabled`,
+`suppressed`, and `consumed once · history` describe lifecycle state, while the
+adjacent Disable/Enable, Restore, and Delete controls state the owner action. A
+consumed one-shot is history even when its task succeeded or failed; the status
+never implies a result. Retained rows — consumed and suppressed — collapse into
+one disclosure rather than padding the standing list or disappearing: history
+the owner can still open, read and act on. A suppressed skill row keeps Restore
+so the owner can ask for it back; a consumed one keeps only Delete, because
+offering Enable on a schedule that cannot fire again would be a lie.
+
 A task-bound `Reviews` history row may be the only retained fact for its owner.
 That row keeps a neutral owner anchor visible, but hides task status and typing
 until a real task status or activity arrives; review presence alone never means
 `Working`, `Done`, or owner attention.
+
+A review that was only awaited when its task ended is not a warning. Reviewers
+that had simply not answered yet leave the task `Done`. For a plan review the
+task result keeps the host's typed disclosure that the review was still open
+(the `terminal_host_notice` field, read by the CLI and by parents), the card
+states the same fact as its cause sentence, and no second chat bubble carries
+it; a card that is amber or red for another reason keeps that reason, with the
+open review stated beside it when the result records it. For task acceptance the host's
+decision sentence already says that no reviewer verdict was established. A real
+outcome keeps its word: no reviewer quorum, a failed, refused or unresolved
+slot, a collected blocking finding, a reviewer verdict nobody closed, a rail or
+a blocking exit still read `Done with warnings` or `Failed`.
 
 A host fact about a task is a row of that task's card, never a standalone
 bubble beside it. A reviewer panel that settles after its task already ended
@@ -280,6 +302,13 @@ pointer alone; a card in another chat keeps the excerpt.
 - **Status renders as dot + text.** The dot carries the state at a glance, so
   the sentence does not have to shout it in saturated colour and can sit at
   ordinary reading contrast.
+- **A known outcome owns the status; an unfinished lifecycle stands beside it.**
+  When a task's outcome is already settled while post-task work still runs, the
+  chip states that outcome from the five-word family and `Finalizing…` is a
+  SECOND, quieter fact next to it — not a replacement, not a sixth status word,
+  and never something the card title has to carry instead. The pair is one
+  accessible name, so a screen reader hears the outcome and the hold together.
+  An owner stop outranks the hold entirely and speaks for itself.
 - **Neutral is a real state**, not an absence of one. A classification chip
   (which agent, which family) is neutral: it is a tag, not an alarm.
   A tone value the code actually emits (`muted`) must have a rule; falling
@@ -324,6 +353,61 @@ text its contrast.
 Adopting these tokens is applying the semantic status contract, which already
 governs every surface — it is not a token migration of those surfaces and does
 not move them into the migrated set in section 8.
+
+### Sidebar activity dots
+
+Project navigation rows may carry the existing three 4px working dots
+(`chat-live-typing`, 3px gap) for the live `active_chat_activities` census.
+`Working`, `Thinking` and `Finalizing` are the only moving states, using the
+existing 1.4s bounce rhythm; `Queued` stays static at a quieter step.
+Budget-paused work, confirmed model access waits and required owner questions
+are static amber, with `resumed` questions no longer waiting. A wait on the same
+producer row suppresses its working motion; an independent working row keeps
+motion, and the row's accessible name states both facts. Unknown or unconfirmed
+census state stays static and explicitly unavailable. The dots take the row's
+own foreground, like the status-sentence dot, so they never out-shout the title
+and follow its hover and selected ink; the wait is the one hue, and no row
+paints them in a saturated project colour of its own. In a Project row the dots
+and the unread dot each own a reserved trailing column, so both sit at one x
+across rows whether or not the other is present, whatever the name length, and
+while the sibling kebab is hovered, focused or has its menu open; a deleting
+row draws only `Deleting…` and keeps its census fact in the accessible name.
+The collapsed Projects header carries the aggregate dots beside its label, and
+an activity repaint preserves the existing row and menu nodes. The dots are
+separate from unread dots and never carry a counter, percent or text
+animation. Reduced-motion clients receive the same state without the bounce.
+
+### References and actions
+
+One owner intent has one control, built in one module. Tokens and primitives
+cannot guarantee that on their own: every copy of a control can truthfully reuse
+a primitive while its callers still choose the words, the glyph and the class —
+that is how "take me to this Project" came to be drawn six ways. The rule is
+therefore about intents.
+
+- A **reference** points at an entity that exists in the product and goes there
+  when pressed. A Project is referred to by the Project reference — the Projects
+  glyph, the Project's name, `↗` — and by nothing else, wherever content points
+  at it: a bound task card's footer, a converted card, a System lifecycle row,
+  the owner's routed message, a mirrored answer, a mirrored question's head.
+  `web/modules/project_reference.js` builds it and alone raises
+  `ouro:open-project`; a caller chooses a layout (`inline`, `bar`, `footer`),
+  never a label or a class. It names the Project wherever its row carries the
+  name; a Project that was never named, and the owner's routed message (whose
+  caption names the destination), read `Project`, never an id. The handoff's separate phase chip states observed activity; the reference
+  itself makes no running claim. Its accessible name
+  says in words what the glyph and the arrow say in pixels (`Open project <name>`),
+  and nothing depends on hover.
+- A **command** is a button: it changes or confirms something, or goes to a
+  place that is not such a reference (`Load older messages`, `Open widgets`).
+  Tabs, toggles, menus and the navigation list keep their own roles; a status
+  chip states a fact and is not a destination.
+- An intent that will be drawn in a second place gets its door first.
+  `docs/inventories/UI_CONTROL_TEXT_INVENTORY.md` lists the fixed text of the
+  hand-written buttons sorted by text (a label passed to a factory is that
+  factory's business), and the `ouro:*` events with the modules that raise
+  them, so a diff that adds a button shows its siblings in the same hunk. Read
+  them: "it reuses a shared primitive" does not show that two controls agree.
 
 ### Chat authorship and System rows
 
@@ -450,6 +534,12 @@ keys.
   status pair, never dimmed — with the section-level line as the summary. A
   save attempt judges the entries that existed then; one added afterwards is
   an invitation again.
+- A per-entry on/off switch is a native `.ui-checkbox` leading that entry's
+  head, before its title, with its own accessible name and pointer target. It
+  is a draft like every other field — the section's Save is the one writer, and
+  no entry saves on its own click. An entry switched off is not dimmed, locked
+  or removed: it keeps every control editable and its own status reading, and
+  the switch never merges into the availability axis beside it.
 - A multi-field card (an MCP server) follows the add-and-reveal rule without
   adopting the §6 row anatomy.
 
@@ -476,6 +566,34 @@ not child-task cards and never prove execution by themselves.
 - Disclosure is user-owned. Review results, retries, failures, terminal task
   state, reconnect, and lazy-detail loading update content in place but never
   open or close the task, Reviews section, or group.
+- A plan wave whose reviewers may still answer reads as work in progress only
+  while its own task is running: the working tone, `in progress · k of n
+  answered` where the verdict token would sit, and each awaited reviewer listed
+  as awaiting rather than unavailable, under no verdict word. Once the task has
+  ended the same wave reads `no verdict · k of n answered` in the neutral tone.
+  A reviewer whose window expired is unresolved. A settled wave whose reviewers
+  were too few for a verdict reads `no verdict · k of n answered · m
+  unavailable` in the neutral tone: the verdict word `DEGRADED` is the host's
+  placeholder and never paints.
+- A task-acceptance panel whose reviewers may still answer never reads as a bare
+  verdict token. While its own task is running it is work in progress: the
+  working tone and `in progress · k of n answered`, or `PASS so far · k of n
+  answered` once the quorum is met. Once the task has ended the same panel reads
+  `no verdict · k of n answered` in the neutral tone, or `PASS · k of n
+  answered`, until a late settlement replaces it. A reviewer FAIL keeps the
+  error tone and reads `FAIL · k of n answered` in both.
+- On a plan wave and an acceptance panel alike, a slot that is neither answered
+  nor awaited (a settled failure, an expired window, lost custody, a refusal)
+  adds `· m unavailable` and keeps the warning tone beside the awaited slots; a
+  settled plan wave with no awaited slot reads its `no verdict` line in the
+  neutral tone (an acceptance panel with none still keeps the warning tone and
+  its `DEGRADED` verdict), and each unavailable plan reviewer row names the
+  model and quotes the engine's reported sentence when one exists — the
+  failure code stays in the task detail and Logs.
+- An awaited or unresolved reviewer row adds `· since HH:MM` in the viewer's
+  local 24-hour clock, prefixed with the short date when the wait began on an
+  earlier day, only where the host recorded the moment it sent that reviewer's
+  request; a time is never inferred.
 - A panel that settled after its task ended stays one attempt row of its group,
   labelled as settled after the task ended; its note (which verdict, which
   revision, whether a reviewer's outcome is still unknown) is host-composed and
@@ -560,11 +678,27 @@ element in the card shares one keyboard ring (2px `--focus-accent-border`,
 2px offset). Component geometry (card min/max width) keeps local literals like
 the rest of the chat surface.
 
-**Project question mirror.** A Project question the owner has not answered appears in Main as the Project's own quiz card — the same `buildQuizCard` form with the question through the chat markdown pipeline, the options with their details and the `recommended` badge, the stake, the assumption or waiting line, the status and the own-answer field — inside the same assistant bubble. The one addition is a Project chip in the head beside the `Question` chip: a pill in the project chip's own language (the `--project` tints, the Project name in project ink with `↗`) that opens that exact question in its Project, with the card's shared keyboard ring. A long Project name yields first (the chip is capped and ellipsized, its title names the Project whole) so the status keeps its place; a phone column wraps the head. Every lifecycle state reads as it does in the Project: waiting, open, resumed and finished questions stay answerable, and a replaced question stays as a read-only record. An unreadable source keeps what Main already knew; with nothing known the copy says `Status unavailable`, takes no answer and keeps its chip, and a row that cannot carry the form yet shows `Open the original question for its text.` until it can. The first confirmed answer from any source — a press in Main, the Project form or another device, a history or census snapshot — shows the recorded result (the chosen option, `Owner's answer: …`, `You answered`) for five seconds and then removes only the Main copy, through the ordinary message retirement and without moving the reader's viewport; the Project keeps its card. The countdown starts once and later observations never restart it. When focus was inside the copy it stays there while the result shows, then moves to the next Main question, or to the composer for a keyboard owner, never summoning a touch keyboard. A copy that learns its form and its answer in one delivery shows that result for the same five seconds. An answered question never enters Main again: fresh history, a reconnect or a stale open snapshot cannot bring the copy back. Main remembers the lifecycle of a bounded number of questions; a question it no longer remembers mounts a safe unknown copy, whose answer controls appear only after a fresh canonical record confirms it unanswered. A failed, missing or wrong-project canonical read leaves a safe `Status unavailable` copy with its Project chip and no answer controls; the chip opens the original Project form, while a later owned refresh retries the Main copy, so an unavailable read never turns a stale open snapshot into an answerable form and never permanently suppresses a legitimate unanswered question. The mirror and the quiz header share the lifecycle wording above.
+**Project question mirror.** A Project question the owner has not answered appears in Main as the Project's own quiz card — the same `buildQuizCard` form with the question through the chat markdown pipeline, the options with their details and the `recommended` badge, the stake, the assumption or waiting line, the status and the own-answer field — inside the same assistant bubble. The one addition is the Project reference ("References and actions") in the head beside the `Question` chip: its inline pill (the `--project` tints, the Project name in project ink with `↗`) opens that exact question in its Project, with the card's shared keyboard ring. A long Project name yields first (the chip is capped and ellipsized, its title names the Project whole) so the status keeps its place; a phone column wraps the head. Every lifecycle state reads as it does in the Project: waiting, open, resumed and finished questions stay answerable, and a replaced question stays as a read-only record. An unreadable source keeps what Main already knew; with nothing known the copy says `Status unavailable`, takes no answer and keeps its chip, and a row that cannot carry the form yet shows `Open the original question for its text.` until it can. The first confirmed answer from any source — a press in Main, the Project form or another device, a history or census snapshot — shows the recorded result (the chosen option, `Owner's answer: …`, `You answered`) for five seconds and then removes only the Main copy, through the ordinary message retirement and without moving the reader's viewport; the Project keeps its card. The countdown starts once and later observations never restart it. When focus was inside the copy it stays there while the result shows, then moves to the next Main question, or to the composer for a keyboard owner, never summoning a touch keyboard. A copy that learns its form and its answer in one delivery shows that result for the same five seconds. An answered question never enters Main again: fresh history, a reconnect or a stale open snapshot cannot bring the copy back. Main remembers the lifecycle of a bounded number of questions; a question it no longer remembers mounts a safe unknown copy, whose answer controls appear only after a fresh canonical record confirms it unanswered. A failed, missing or wrong-project canonical read leaves a safe `Status unavailable` copy with its Project chip and no answer controls; the chip opens the original Project form, while a later owned refresh retries the Main copy, so an unavailable read never turns a stale open snapshot into an answerable form and never permanently suppresses a legitimate unanswered question. The mirror and the quiz header share the lifecycle wording above.
 
-**Project completion mirror.** A Project root that ended with Ouroboros's own final answer reaches Main as an ordinary Ouroboros message: that answer through the chat markdown pipeline, in the assistant voice, because the bytes are model-authored — the host stamps the answer on the completion row only for a model-authored final, so the browser never infers authorship. A long answer is folded to about seven lines; the fold is a visual clamp over the complete, selectable text, with a fade only when it really hides something, and never a cut. Under it sits one control: the Project chip in the project chip's own language, which names the Project and opens it. The durable row and its wire frame stay `role="system"`: like the Project question mirror, this is a browser presentation of model-authored bytes, not a change of the row's author. The message carries no status word, cause sentence, title or duration, so a host verdict on that answer (a warning, an unaccepted review) is not shown in Main: it stays loud on the task's card in the Project, one press away. Copy copies the answer. An ending with no model-authored answer (a provider failure, a stop, preserved output), a start row, and every row written before the answer rode the row keep the System row with its `Open Project` action. One durable row either way: its plain text is unchanged, so the Telegram mirror, Ouroboros's own context and one-ending-one-notification behave as before.
+**Project handoff.** Each independent Main request transferred into a Project retains
+one compact chronological anchor, not one mutable capsule for the whole Project.
+The anchor names the work, projects its observed phase and ends with the shared
+Project reference. It uses Project colour, not a warning treatment. Binding alone
+means neither Working nor Done; unavailable activity stays explicitly unconfirmed.
+A manually converted card opens its room; an agent-created handoff does not steal
+focus. A converted card is always visible — two cards of one owner message both stay —
+and the durable receipt row shows only when no card carries the transfer; a folded
+receipt returns when its card leaves the feed. Matching Started and routing
+references fold visually into that anchor only while it is mounted; their durable
+records remain, including their plain-text presentation to non-browser consumers.
+A converted card whose Main receipt is not durable keeps a dashed border and a plain
+warning names the gap; the binding still holds. Genuine initiator work and failures
+are not hidden. A later final answer remains a separate message at its completion
+time, never a replacement for the handoff.
 
-Project-lifecycle and routing actions use the shared `createSystemMessageActions` composition. It owns token-based space above and below the controls, wrapping and clearance for the existing button focus ring; action buttons never sit in a clipped/nowrap text line. This is a row composition, not a new card framework or a global button-margin rule.
+**Project completion mirror.** A Project root that ended with Ouroboros's own final answer reaches Main as an ordinary Ouroboros message: that answer through the chat markdown pipeline, in the assistant voice, because the bytes are model-authored — the host stamps the answer on the completion row only for a model-authored final, so the browser never infers authorship. A long answer is folded to about seven lines; the fold is a visual clamp over the complete, selectable text, with a fade only when it really hides something, and never a cut. Under it sits one control, the Project reference ("References and actions"). The durable row and its wire frame stay `role="system"`: like the Project question mirror, this is a browser presentation of model-authored bytes, not a change of the row's author. The message carries no status word, cause sentence, title or duration, so a host verdict on that answer (a warning, an unaccepted review) is not shown in Main: it stays loud on the task's card in the Project, one press away. Copy copies the answer. An ending with no model-authored answer (a provider failure, a stop, preserved output), a start row, and every row written before the answer rode the row keep the System row, which ends with that same reference: the voice of a row never chooses how the UI points at its Project. One durable row either way: its plain text is unchanged, so the Telegram mirror, Ouroboros's own context and one-ending-one-notification behave as before.
+
+The row under a Project lifecycle row or a routed message is the shared `createSystemMessageActions` composition around the Project reference. It owns token-based space above and below the controls, wrapping and clearance for the focus ring; a control never sits in a clipped/nowrap text line. This is a row composition, not a new card framework or a global button-margin rule.
 
 History with no current execution or known outcome keeps its expandable content under `Outcome unavailable`, without a task chip, typing or Stop. Before complete live-source reconciliation, it is `Activity unconfirmed`. Positive current activity restores only its proven controls. A delivery warning may coexist with a preserved task-acceptance PASS. Model metadata says `Last solve response`, naming the initial request only when the route changed.
 
@@ -591,7 +725,10 @@ step, a wait, a review, a child. What the host says about how the turn is
 running (a checkpoint, a model fallback, a review verdict, a nudge) is a
 visible timeline row that never claims the title or the collapsed line, so a
 turn whose only notes were the host's keeps its coined or task name and an
-empty activity line. Successful tool calls are not rows at all: they fold into
+empty activity line. When the task ends with a cause, the collapsed line states
+that cause in the owner's words — the same sentence as the durable row and the
+expanded body — so a `Done with warnings` chip never stands beside an unrelated
+last action; a clean ending keeps the last narration. Successful tool calls are not rows at all: they fold into
 ONE evidence row per block — `N tool calls`, or `N tool calls · M errors` once
 a call failed — that stands at the first call's position and time and is
 patched in place; Expand shows the per-tool counts (`read_file ×3 ·
@@ -637,7 +774,18 @@ the wait controls stay, and its first row of work gives it the title. The
 collapsed header carries the tool count live and, once the turn ends, cost and
 duration (a replayed header carries the count and cost; duration is a live
 fact); its `updated` stamp follows the turn's own narration, never a host note
-and never a tool call. The
+and never a tool call. Money on that header is ONE line whose wording carries
+its own openness, and it never renders an unknown as a number: `$0.00` only
+where priced rows evidenced that zero, `up to $1.20` while the tracked subtotal
+is still inexact, `Tracked: $1.20` with the reason stated in words
+beside it (`some steps have no price`) when part of the same scope has no price
+at all (`Tracked: up to $1.20` when that subtotal itself is inexact), and
+`Cost unknown` for unpriced rows with no tracked amount. An empty, intact ledger
+has no money line; an empty view with an integrity gap stays unknown. Neither
+proves a free result. The explanation is text on the line,
+never a hover-only title, because a tooltip is invisible on touch, to assistive
+technology and in a copied line. Every part of that meta line is separated by a
+real ` · ` text part for the same reason. The
 host's `_is_direct_chat` fact keeps its host jobs (routing, census `kind`, Stop
 custody, terminal rows) and, on the client, only the header pill (a direct turn
 keeps the census verdict beside its block). A block whose only reason to exist
@@ -804,7 +952,10 @@ stored spellings (`provider::model`, `claudexor::source=model`,
 `harness=model`) are serialization authored by the editor: never required from
 the owner, never a field placeholder or help-text instruction, never the
 primary displayed value; the exact stored id may appear in a meta line or
-tooltip. The route identity chip names the source (API · OpenAI, Codex · model,
+tooltip. A configured-subagent reference is the one place a stored spelling
+names a thing: a roster row is labelled by its handle — its route target plus
+the facets that row really runs with, defaults omitted — because a friendlier
+stored label rots as soon as the owner re-points the row. The route identity chip names the source (API · OpenAI, Codex · model,
 Claude Code · agent), not the channel alone. A last-run receipt is shown
 against the route that produced it: when the row's route changed since, the
 line says so and names the earlier route.

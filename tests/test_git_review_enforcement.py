@@ -275,6 +275,31 @@ class TestReviewEnforcementModes:
             for w in ctx._review_advisory
         )
 
+    @pytest.mark.parametrize("message,expected", [
+        ("⚠️ PREFLIGHT_BLOCKED: Release metadata diagnostics (index).\n"
+         "  - Missing from staged: README.md (badge + changelog).\n", "preflight"),
+        ("⚠️ PREFLIGHT_UNAVAILABLE: Release metadata diagnostics (index).\n"
+         "  - Unavailable: index:README.md could not be read (CalledProcessError).\n",
+         "infra_failure"),
+    ])
+    def test_preflight_block_reason_separates_unavailable_evidence_from_a_defect(
+        self, review_ctx, monkeypatch, message, expected
+    ):
+        """A release source the gate could not read is an infra failure, not the
+        candidate's own defect. The split is read off the one tool-result
+        classifier, so this gate cannot drift from the code the agent is shown."""
+        review, ctx = review_ctx
+        self._mock_staged(monkeypatch, review, changed_files="VERSION")
+        monkeypatch.setattr(review, "_preflight_check", lambda *a, **kw: message)
+        monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")
+        monkeypatch.setattr(
+            review, "_handle_multi_model_review",
+            lambda *a, **k: (_ for _ in ()).throw(AssertionError("no reviewer may run")),
+        )
+        result = review._run_unified_review(ctx, "v1.0.0: bump version", repo_dir=ctx.repo_dir)
+        assert result is not None and message in result
+        assert ctx._last_review_block_reason == expected
+
     def test_triad_one_pass_fit_removes_only_duplicated_context(self, review_ctx, monkeypatch):
         """Oversized triad evidence is compacted before its single dispatch."""
         review, ctx = review_ctx
@@ -522,14 +547,33 @@ class TestReviewEnforcementModes:
         # No version-ref in commit message, so no preflight block expected
         assert result is None
 
+    @staticmethod
+    def _mock_indexed_release(monkeypatch, review, *, readme: bool, version: str = "3.24.0"):
+        """Give the name-status checks an index of their own.
+
+        ``_preflight_check`` reads its release carriers out of the real Git
+        index, and an index it cannot read is honestly reported as unavailable
+        evidence. These cases pin the lexical name-status handling, so they
+        supply the indexed carriers instead of leaving admission to fail on a
+        directory that is not a repository.
+        """
+        indexed = {"VERSION": f"{version}\n"}
+        if readme:
+            indexed["README.md"] = (
+                f"[![Version {version}](https://img.shields.io/badge/version-{version}-green.svg)]\n"
+                f"| {version} | release |\n"
+            )
+        monkeypatch.setattr(review, "_git_show_staged", lambda repo_dir, path: indexed.get(path))
+
     def test_rename_of_readme_counts_as_present(self, tmp_path, monkeypatch):
         """If README.md appears as a rename destination, preflight sees it as staged."""
         review = _get_review_module()
+        self._mock_indexed_release(monkeypatch, review, readme=True)
         # Simulate: VERSION staged + README.md arrived via rename
         result = review._preflight_check(
             "v1.0.0: rename readme",
             "M  VERSION\nR  README.md",
-            "/tmp",
+            tmp_path,
         )
         # Both VERSION and README.md present → no check 1 block
         # No ouroboros .py → no check 3 block
@@ -593,17 +637,21 @@ class TestReviewEnforcementModes:
         assert "PREFLIGHT_BLOCKED" in result
         assert "ARCHITECTURE.md" in result
 
-    def test_deleted_readme_does_not_satisfy_check1(self):
+    def test_deleted_readme_does_not_satisfy_check1(self, tmp_path, monkeypatch):
         """Deleting README.md while VERSION is staged triggers check 1."""
         review = _get_review_module()
+        self._mock_indexed_release(monkeypatch, review, readme=False)
         result = review._preflight_check(
             "v1.0.0: bump version",
             "M  VERSION\nD  README.md",
-            "/tmp",
+            tmp_path,
         )
         assert result is not None
-        assert "PREFLIGHT_BLOCKED" in result
-        assert "README.md" in result
+        assert "Missing from staged: README.md" in result
+        # The deleted README is also the release source the carrier checks need,
+        # so its absence is reported as unavailable evidence beside the finding
+        # rather than collapsing the two into one candidate defect.
+        assert "PREFLIGHT_UNAVAILABLE" in result
 
     def test_copied_module_triggers_via_run_unified_review(self, tmp_path, monkeypatch):
         """Check 4 fires for C-status copy via _run_unified_review, but source NOT treated as deleted."""

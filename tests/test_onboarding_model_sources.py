@@ -258,3 +258,37 @@ def test_recovery_endpoint_keeps_authored_counts_ids_effort_and_disabled_advisor
     assert [(r["slot_id"], r["effort"]) for r in result["triad"]] == [("own-triad", "xhigh")]
     assert [(r["slot_id"], r["effort"]) for r in result["scope"]] == [("own-scope", "high")]
     assert result["advisory"]["enabled"] is False and result["advisory"]["effort"] == "high"
+
+
+def test_main_review_recovery_never_proposes_an_owner_disabled_roster_row():
+    """A switched-off row is not a reviewer seat: reusing it would compile a
+    draft the reviewer parser refuses at save. The recovery mints a fresh
+    enabled seat instead, and the owner's disabled row is preserved untouched."""
+    from ouroboros.subscription_install_presets import preview_main_reviewer_slots
+
+    main = "claudexor::source=main-model"
+    disabled_match = {
+        "subagent_id": "paused-main", "recommended_use": "Paused reviewer seat",
+        "route": {"kind": "api_model", "target_id": main, "credential_profile_id": ""},
+        "enabled": False,
+    }
+    raw, roster_raw = preview_main_reviewer_slots({
+        "OUROBOROS_MODEL": main,
+        "OUROBOROS_SUBAGENTS": {"enabled": True, "items": [disabled_match]},
+        "OUROBOROS_REVIEWER_SLOTS": json.dumps({
+            "triad": [{"slot_id": "t1", "route": {"kind": "agent_session", "target_id": "codex"}}],
+            "scope": [{"slot_id": "s1", "route": {"kind": "api_chat", "target_id": "old"}}],
+        }),
+    })
+    roster = json.loads(roster_raw)
+    referenced = json.loads(raw)["triad"][0]["subagent_id"]
+    assert referenced != "paused-main"
+    minted = next(row for row in roster["items"] if row["subagent_id"] == referenced)
+    assert "enabled" not in minted
+    assert roster["items"][0] == disabled_match
+
+    # The compiled draft survives the reviewer-slot parser it must be saved through.
+    from ouroboros.reviewer_slot_config import parse_reviewer_slots, roster_env_override
+
+    with roster_env_override(roster_raw, environ={}):
+        assert parse_reviewer_slots(raw).triad[0].subagent_id == referenced

@@ -76,8 +76,10 @@ def test_real_reply_is_sent(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("silent", [None, "off", "on"], ids=["default", "off", "on"])
-def test_terminal_host_notice_preserves_answer_and_silent_reply_chain(tmp_path, monkeypatch, silent):
-    """The real split delivery keeps both authors' text through Telegram's edit mode."""
+def test_a_terminal_answer_reaches_telegram_alone_and_keeps_the_silent_reply_chain(tmp_path, monkeypatch, silent):
+    """The real terminal delivery sends the model's answer alone through Telegram's
+    edit mode: the host notice stays a field of the result and never becomes a
+    second message (the non-clean line of the notifier carries that fact now)."""
     from collections import deque
     import queue
 
@@ -125,6 +127,7 @@ def test_terminal_host_notice_preserves_answer_and_silent_reply_chain(tmp_path, 
         "terminal_origin": "model_final", "terminal_host_notice": notice,
     }, {"type": "send_message", "task_id": task["id"], "chat_id": 1,
         "text": answer, "log_text": answer, "format": "markdown"}, presence=False)
+    assert "terminal_host_notice" not in event
     register_final_answer_owed(task, event, env_drive_root=tmp_path)
     delivery_id = event["delivery_id"]
     delivery._handle_send_message(event, host)
@@ -133,13 +136,14 @@ def test_terminal_host_notice_preserves_answer_and_silent_reply_chain(tmp_path, 
     assert sent_counts == (len(_Rec.sent), len(_Rec.edited), len(published))
     assert event["text"] == event["log_text"] == answer and event["delivery_id"] == delivery_id
     assert [(row["role"], row["content"]) for row in frames] == [
-        *(('assistant', text) for text in ongoing), ('assistant', answer), ('system', notice),
+        *(('assistant', text) for text in ongoing), ('assistant', answer),
     ]
     assert pending_deliveries(tmp_path) == []
     visible = {row[3]: row[1] for row in _Rec.sent}
     for _chat, message_id, text, _format in _Rec.edited:
         visible[message_id] = text
-    assert list(visible.values()) == ([answer, notice] if silent == "on" else [*ongoing, answer, notice])
+    assert list(visible.values()) == ([answer] if silent == "on" else [*ongoing, answer])
+    assert all(notice not in text for text in visible.values())
     if silent == "on":
         # The system notice neither overwrites nor takes ownership of the normal edit chain.
         assert plugin._get_silent_msg(api, 42) == _Rec.sent[0][3]
@@ -151,6 +155,19 @@ def test_terminal_host_notice_preserves_answer_and_silent_reply_chain(tmp_path, 
         delivery._handle_send_message(events.get_nowait(), host)
         assert _Rec.edited[-1][1:3] == (_Rec.sent[0][3], "A later ongoing reply.")
         assert all(row[1] != receipt_id for row in _Rec.edited)
+
+
+def test_routing_refusal_speaks_in_the_third_person(tmp_path, monkeypatch):
+    """astra A-miss1: the mirror's routing refusal names no narrator."""
+    plugin, api = _setup(tmp_path, monkeypatch)
+    handle = plugin._make_outbound(api)
+    asyncio.run(handle({"annotation_type": "routing_ack", "status": "needs_manual_target",
+                        "options": [{"task_id": "t1", "label": "Fix the parser"}]}))
+    (message,) = [row[1] for row in _Rec.sent]
+    lines = message.splitlines()
+    assert lines[0] == "Choose a target for the last message:"
+    assert "1. Fix the parser" in lines
+    assert not any(line.startswith("I ") for line in lines) and "I couldn't" not in message
 
 
 def test_subagent_cards_off_hides_activity(tmp_path, monkeypatch):

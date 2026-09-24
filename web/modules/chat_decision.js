@@ -6,7 +6,7 @@
 // settles into the plain routing ack line once its dispatch is confirmed.
 import { MAX_DECISION_COMMENT, MAX_QUIZ_OPTIONS } from './api_types.js';
 import { renderRoutingAnnotation, routingOptionLabel } from './chat_activity.js';
-import { renderProjectChip } from './ui_helpers.js';
+import { nameProjectReference, projectReference } from './project_reference.js';
 
 import { ANSWERABLE_QUIZ_STATES, QUIZ_LIFECYCLE, questionPresentation, waitFacts } from './question_presentation.js';
 
@@ -158,10 +158,6 @@ export function createChatDecision({
     // there never blanks what a complete row already carried.
     const MIRROR_FIELDS = ['question', 'options', 'option_details', 'stake', 'project_name', 'assumption', 'recommended_index'];
     const MIRROR_SIGNATURE = ['quiz_state', ...MIRROR_FIELDS, 'answered_index', 'comment', ...WAIT_FIELDS];
-    const openQuestion = (row) => window.dispatchEvent(new CustomEvent('ouro:open-project', { detail: {
-        project: { id: row.project_id, name: row.project_name, chat_id: row.project_chat_id },
-        task_id: row.task_id, quiz_id: row.quiz_id,
-    } }));
     // The pointer row in the shape of the Project's quiz row, so one normalizer reads both.
     const mirrorQuiz = (row) => ({ ...row, type: 'quiz', role: 'assistant', state: row.quiz_state });
     // An empty recorded comment and no comment are the same fact.
@@ -194,11 +190,9 @@ export function createChatDecision({
         return view.row;
     }
 
+    const mirrorProject = (row) => ({ id: row.project_id, name: row.project_name, chat_id: row.project_chat_id });
     function mirrorChip(view) {
-        const name = view.row.project_name || 'Project';
-        view.chip = renderProjectChip({ name, status: '↗', className: 'chat-quiz-project', onClick: () => openQuestion(view.row) });
-        view.chip.title = `Open this question in ${name}`;
-        view.chip.querySelector('.chat-live-project-status')?.setAttribute('aria-hidden', 'true');
+        view.chip = projectReference(mirrorProject(view.row), { taskId: view.row.task_id, quizId: view.row.quiz_id });
         return view.chip;
     }
 
@@ -233,9 +227,7 @@ export function createChatDecision({
                 if (focused) view.chip.focus?.({ preventScroll: true });
                 return true;
             }
-            const name = view.row.project_name || 'Project';
-            const label = view.chip.querySelector('.chat-live-project-name');
-            if (label && label.textContent !== name) { label.textContent = name; view.chip.title = `Open this question in ${name}`; }
+            nameProjectReference(view.chip, mirrorProject(view.row));
             buildQuizCard(mirrorQuiz(view.row), view);
             return true;
         });

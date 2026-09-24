@@ -139,5 +139,7 @@ def test_pending_finish_cannot_hide_a_failed_empty_agent_result(tmp_path, monkey
     events = agent._handle_task_scoped({"id": "failed", "chat_id": 7, "type": "presence", "_presence_turn": True,
         "_is_direct_chat": True, "_skip_post_task_synthesis": True, "text": "Go"})
     result = next(row for row in events if row["type"] == "presence_result")
-    assert result["outcome"] == "message" and "empty response" in result["text"]
-    assert load_task_result(tmp_path, "failed")["status"] == "failed"
+    assert result["outcome"] == "silent" and result["text"] == ""
+    stored = load_task_result(tmp_path, "failed")
+    assert stored["status"] == "failed" and "empty response" in stored["result"]
+    assert stored["terminal_origin"] == "host_notice"

@@ -13,17 +13,27 @@ from collections import deque
 
 import pytest
 
+from tests.candidate_checkout import (
+    assert_served_candidate as _assert_served_candidate,
+    candidate_checkout, require_candidate_interpreter, verify_checkout,
+)
+from ouroboros.test_environment import isolated_environment
 from tests.fixtures_mock_llm import MockLLMServer
 from tests.ui_chat_viewport_smoke import _CAPTURE_TEST_SOCKET, _emit_ws_frame
 
 REPO_ROOT = os.path.dirname(os.path.dirname(__file__))
 
 
-def _fixture_python() -> str:
+def _fixture_interpreter() -> str:
     """Use the real Windows interpreter, bypassing the venv PID redirector."""
     if os.name == "nt":
         return str(getattr(sys, "_base_executable", sys.executable))
     return sys.executable
+
+
+def _fixture_python() -> str:
+    """Launch target; Settings may wrap it."""
+    return _fixture_interpreter()
 
 
 def _open_review_checkpoint(card, *, open_card=True):
@@ -239,44 +249,37 @@ def _run_docker_ui_assertions(url: str) -> None:
 def direct_server_with_data(tmp_path):
     if os.environ.get("OUROBOROS_RUN_UI_SMOKE") != "1":
         pytest.skip("set OUROBOROS_RUN_UI_SMOKE=1 to run browser UI smoke")
-    with MockLLMServer() as llm:
+    checkout = tmp_path / "repo"
+    # Static/VERSION sentinels prove each boot's origin.
+    with candidate_checkout(pathlib.Path(REPO_ROOT), checkout, origin_proof=True) as candidate, \
+            MockLLMServer() as llm:
         port = _free_port()
         data_dir = tmp_path / "data"
         data_dir.mkdir(parents=True)
-        model = "openai-compatible::mock-model"
-        (data_dir / "settings.json").write_text(
-            json.dumps(
-                {
-                    "OPENAI_COMPATIBLE_API_KEY": "ui-smoke-key",
-                    "OPENAI_COMPATIBLE_BASE_URL": llm.base_url,
-                    "OUROBOROS_MODEL": model,
-                    "OUROBOROS_MODEL_HEAVY": model,
-                    "OUROBOROS_MODEL_LIGHT": model,
-                    "OUROBOROS_MODEL_FALLBACKS": model,
-                    # Every smoke case is single-task or deterministic log replay;
-                    # a ten-process default pool adds only process churn and makes
-                    # sequential browser history fetches flaky on shared hosts.
-                    "OUROBOROS_MAX_WORKERS": 1,
-                    "OUROBOROS_RUNTIME_MODE": "light",
-                }
-            ),
-            encoding="utf-8",
+        settings = dict.fromkeys(
+            ("OUROBOROS_MODEL", "OUROBOROS_MODEL_LIGHT", "OUROBOROS_MODEL_FALLBACKS"),
+            "openai-compatible::mock-model",
         )
-        env = {
-            **os.environ,
-            "OUROBOROS_APP_ROOT": str(tmp_path),
-            "OUROBOROS_DATA_DIR": str(data_dir),
-            "OUROBOROS_SETTINGS_PATH": str(data_dir / "settings.json"),
-            "OUROBOROS_REPO_DIR": REPO_ROOT,
+        settings.update(
+            OPENAI_COMPATIBLE_API_KEY="ui-smoke-key", OPENAI_COMPATIBLE_BASE_URL=llm.base_url,
+            # Single-task cases and deterministic replay need only one worker;
+            # extra workers churn processes and make shared-host history flaky.
+            OUROBOROS_MAX_WORKERS=1, OUROBOROS_RUNTIME_MODE="light",
+        )
+        (data_dir / "settings.json").write_text(json.dumps(settings), encoding="utf-8")
+        env = isolated_environment(tmp_path, checkout)
+        env.update({
             "OUROBOROS_SERVER_HOST": "127.0.0.1",
             "OUROBOROS_SERVER_PORT": str(port),
-            "OUROBOROS_HOST_SERVICE_PORT": str(port + 1),
+            "OUROBOROS_HOST_SERVICE_PORT": str(_free_port()),
             "OUROBOROS_NETWORK_PASSWORD": "ui-smoke-password",
-        }
+        })
         if os.name == "nt":
             site = pathlib.Path(sys.executable).resolve().parent.parent / "Lib" / "site-packages"
             if site.is_dir():
                 env["PYTHONPATH"] = os.pathsep.join([str(site), env.get("PYTHONPATH", "")])
+        # Probe the actual child, not the parent venv.
+        require_candidate_interpreter(_fixture_interpreter(), env, checkout)
         url = f"http://127.0.0.1:{port}"
         active_proc = active_container = None
 
@@ -292,35 +295,41 @@ def direct_server_with_data(tmp_path):
                     try:
                         proc.wait(timeout=10)
                     except subprocess.TimeoutExpired:
-                        pass  # The container below also owns surviving descendants.
+                        pass  # Reap descendants below.
             finally:
                 try:
-                    # Parent exit never proves the entire incarnation is gone.
+                    # Parent exit alone is insufficient.
                     error = container.reap()
                 finally:
                     container.close()
                 if error:
                     if proc is not None:
-                        proc.poll()  # Collect an exited parent without masking the reap failure.
+                        proc.poll()  # Preserve the reap failure.
                     raise RuntimeError(f"UI fixture process cleanup failed: {error}")
                 if proc is not None:
                     proc.wait(timeout=5)
+            # Only proven teardown releases the copy.
+            candidate.release()
 
         def start_server() -> None:
             nonlocal active_proc, active_container
             from ouroboros.process_containment import ProcessContainer
 
-            # Reap consumes the token/Job: every restart needs fresh containment.
+            # Reap consumes custody: restart needs a new container.
+            verify_checkout(checkout, candidate)
             active_container = ProcessContainer()
+            # Pin before spawn.
+            candidate.hold()
             active_proc = active_container.spawn(
                 [_fixture_python(), "server.py"],
-                cwd=REPO_ROOT,
+                cwd=checkout,
                 env=env,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
             _wait_health(url)
             _wait_supervisor_ready(url)
+            _assert_served_candidate(url, checkout, data_dir, active_proc.pid, candidate)
 
         def restart_server() -> None:
             stop_server()
@@ -330,8 +339,11 @@ def direct_server_with_data(tmp_path):
             start_server()
             yield {
                 "url": url, "data_dir": data_dir, "restart_server": restart_server,
-                # A seed that must survive into the next boot (queue snapshot, state files) has to
-                # land while no server runs: the main loop persists its own snapshot every tick.
+                "repo_dir": checkout, "candidate_identity": candidate.identity,
+                # Static and Python origin proof.
+                "candidate_sentinel": candidate.sentinel_bytes,
+                "candidate_version": candidate.version_text,
+                # Seed only while stopped: live ticks overwrite snapshots.
                 "stop_server": stop_server, "start_server": start_server,
             }
         finally:

@@ -17,6 +17,7 @@ from ouroboros.settings_defaults import (
     SUPERVISOR_LIVENESS_DEADLINE_DEFAULT_SEC,
 )
 from ouroboros.settings_integrity import runtime_setting
+from ouroboros.settings_scales import optional_bound_value
 
 # Local model-operation status polling; not a provider deadline or quota timer.
 CLAUDEXOR_MODEL_POLL_INTERVAL_SEC = 0.25
@@ -32,6 +33,12 @@ EXTERNAL_PLATFORM_UPDATE_TIMEOUT_SEC = 3600.0
 EXTENSION_STREAM_CHUNK_BYTES = 64 * 1024
 # Exit/pipe-drain grace after a response ends; never a response lifetime timer.
 EXTENSION_CHILD_CLEANUP_GRACE_SEC = 2
+# Ordinary close (#1142): the launcher waits this long for the server to exit before the group SIGKILL
+# fallback; uvicorn's graceful drain of open HTTP/WS tasks is bounded to the second value so the lifespan
+# teardown — the terminal-custody write `kill_workers` — starts well inside the first. The pair is one
+# budget, not two knobs: raise the drain only with the launcher wait (which ships with a release).
+LAUNCHER_STOP_GRACE_SEC = 10.0
+SERVER_GRACEFUL_SHUTDOWN_TIMEOUT_SEC = 3.0
 NESTED_SETTLEMENT_MARGIN_SEC = 30  # Structural ordering margin, not a cognition timeout.
 # Owner-note cadence while a task waits out a provider-connection outage; the effective interval is min(this, idle_timeout/2) so the notes also keep the idle rail alive.
 NETWORK_WAIT_NOTE_INTERVAL_SEC = 300
@@ -100,11 +107,42 @@ def get_task_idle_timeout_sec() -> int:
     return _clamped_number_setting("OUROBOROS_TASK_IDLE_TIMEOUT_SEC", low=60, cast=int)
 
 
-def get_task_abs_ceiling_sec() -> int:
-    """Absolute wall-clock backstop per task, independent of activity — the only hard
-    time axis (budget/cost is the other, separate hard axis). A productively-waiting
-    orchestrator survives to this ceiling instead of a flat 1800s wall-clock kill."""
-    return _clamped_number_setting("OUROBOROS_TASK_ABS_CEILING_SEC", low=300, cast=int)
+def _optional_bound_setting(key: str, *, low: int) -> Optional[int]:
+    """Env-or-default optional bound (``settings_scales.optional_bound_value``): ``None`` = no
+    bound, else at least ``low``. An absent variable is the shipped default; an explicitly empty
+    or malformed one is a typo and takes the finite legacy fallback, never "no bound"."""
+    raw = runtime_setting(key)
+    value = optional_bound_value(key, SETTINGS_DEFAULTS[key] if raw is None else raw)
+    return None if value is None else max(low, value)
+
+
+def get_max_rounds() -> Optional[int]:
+    """The total round limit of one task loop; ``None`` = no limit (the shipped default).
+    Presence turns add their own finite inline cap (``loop._resolve_loop_max_rounds``)."""
+    return _optional_bound_setting("OUROBOROS_MAX_ROUNDS", low=1)
+
+
+def get_task_abs_ceiling_sec() -> Optional[int]:
+    """Absolute wall-clock backstop per task, independent of activity; ``None`` = no lifetime
+    bound (the shipped default). Budget/cost and an explicit deadline stay separate hard axes,
+    and a productively-waiting orchestrator is never killed by a flat wall-clock timer. A set
+    value is floored at 300 s so a typo cannot end every task at birth."""
+    return _optional_bound_setting("OUROBOROS_TASK_ABS_CEILING_SEC", low=300)
+
+
+# The finite window ONE physical operation that inherits the task lifetime keeps when the task
+# has none: a delegated agent-session run, a retrieving review session, a VLM child, the
+# plan/preflight tool envelopes, an active-operation idle lease. It is the former shipped task
+# ceiling, so an unlimited task never turns a wedged operation into an unbounded one and never
+# shrinks those operations to a transport bound; a finite lifetime and every deadline still
+# narrow it. Structural, not a settings key.
+OPERATION_WINDOW_FALLBACK_SEC = 21600
+
+
+def operation_window_sec(task_lifetime_sec: Optional[float]) -> float:
+    """The outer window of an operation bounded by the task lifetime: that lifetime when it
+    is finite (``get_task_abs_ceiling_sec()``), else ``OPERATION_WINDOW_FALLBACK_SEC``."""
+    return float(OPERATION_WINDOW_FALLBACK_SEC if task_lifetime_sec is None else task_lifetime_sec)
 
 
 def get_per_call_timeout_ceiling_sec() -> int:
@@ -188,6 +226,39 @@ def get_settings_document_lock_timeout_sec() -> int:
 def get_direct_turn_stop_wait_sec() -> float:
     """How long custody waits for a stopped direct-chat turn to reach its next round boundary."""
     return _clamped_number_setting("OUROBOROS_DIRECT_TURN_STOP_WAIT_SEC", low=0, high=10, cast=float)
+
+
+# How long a pooled worker waits for ONE answer to an acceptance-fence request; it re-sends
+# the same request once and waits this long again, then the outcome is a typed unknown. Short
+# by design: the idle rail does not count heartbeats as progress, so this wait is never
+# lengthened to ride out a stalled supervisor. Structural, not a settings key.
+ACCEPTANCE_FENCE_ACK_WAIT_SEC = 10.0
+
+
+def get_acceptance_fence_ack_wait_sec() -> float:
+    return ACCEPTANCE_FENCE_ACK_WAIT_SEC
+
+
+# How long a routing verb waits for the supervisor's DURABLE admission receipt before it
+# reports an unconfirmed promote/route. Short by design: the cure for a busy supervisor is
+# the reconciliation read of the emitted admission, never a longer wait. Structural, not a
+# settings key; the tool layer and the gateway dispatcher share this one bound.
+PROMOTE_CONFIRM_WAIT_SEC = 15.0
+
+
+def get_promote_confirm_wait_sec() -> float:
+    return PROMOTE_CONFIRM_WAIT_SEC
+
+
+# How many of a lane's newest ROOT results one routing manifest offers as continuation
+# candidates. A HINT window: what promote ACCEPTS is a predicate (same project, a root, a
+# readable result, not live), so a root older than this window stays addressable in its own
+# room. Structural, not a settings key.
+ROUTING_MANIFEST_RESULT_ROWS = 16
+
+
+def get_routing_manifest_result_rows() -> int:
+    return ROUTING_MANIFEST_RESULT_ROWS
 
 
 def get_vision_caption_timeout_sec() -> int:
@@ -289,6 +360,16 @@ CONSCIOUSNESS_AUTONOMY_LEVELS = ("observe", "act", "full")
 # (``consciousness_allowance``, a 24 h window) reads. Twice the window, so a root that
 # spent inside the window is still attributable when the window closes.
 USAGE_LEDGER_FOLD_MIN_AGE_SEC = 48 * 3600
+# A DISPLAY reader of the usage ledger (heartbeat cost fields, the ``llm_usage`` budget
+# refresh, loop-thread budget pre-checks, ``/api/state``, the cost views) waits at most
+# this long for the monetary lock, then serves the last validated snapshot: a 45 s wait on
+# the supervisor loop or a gateway thread starves every worker behind it. Money never
+# reads through this bound — ``reserve_attempt`` keeps the full monetary timeout.
+USAGE_DISPLAY_LOCK_TIMEOUT_SEC = 0.25
+# After one contended display read, further display reads of that ledger serve the
+# snapshot without touching the lock for this long, so a sustained write convoy costs a
+# display thread about one bounded attempt per second instead of one per read.
+USAGE_DISPLAY_REVALIDATE_AFTER_SEC = 1.0
 
 
 def get_consciousness_autonomy() -> str:

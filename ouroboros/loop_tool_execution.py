@@ -13,8 +13,9 @@ import os
 import pathlib
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, Iterator, List, Optional
 
+from ouroboros import budget_pause
 from ouroboros.config import (
     NESTED_SETTLEMENT_MARGIN_SEC,
     get_finalization_grace_sec,
@@ -22,6 +23,7 @@ from ouroboros.config import (
 )
 from ouroboros.deadline_utils import deadline_remaining_sec
 from ouroboros.observability import new_call_id, persist_call
+from ouroboros.task_results import resolve_task_lineage
 from ouroboros.tool_capabilities import (
     FOREGROUND_MUTATIVE_TOOLS,
     PARALLEL_SAFE_ENQUEUE_TOOLS,
@@ -112,29 +114,37 @@ def _attach_late_tool_settlement(
     """Close the cognitive lease when a timed-out worker finally settles."""
     tool_ctx = getattr(tools, "_ctx", None)
     event_queue = getattr(tool_ctx, "event_queue", None)
+    # Claim the quiescence row BEFORE attaching: a budget pause may not release
+    # the native worker while this callback is still producing effects, and
+    # ``future.done()`` is not callback-complete (#1196).
+    release_quiescence = budget_pause.hold_tool_settlement(tool_ctx, tool_call_id)
 
     def _settled(_future: Any) -> None:
-        if on_settled is not None:
-            try:
-                on_settled()
-            except Exception:
-                log.debug("Late tool cleanup failed", exc_info=True)
-        emit_cognitive_operation_event(
-            event_queue,
-            task_id=task_id,
-            operation_id=tool_call_id,
-            phase="finished",
-            kind="tool",
-            task_attempt=getattr(tool_ctx, "task_attempt", None),
-            execution_id=str(correlation.get("execution_id") or ""),
-            round_id=str(correlation.get("round_id") or ""),
-            tool=str(correlation.get("tool") or ""),
-        )
+        try:
+            if on_settled is not None:
+                try:
+                    on_settled()
+                except Exception:
+                    log.debug("Late tool cleanup failed", exc_info=True)
+            emit_cognitive_operation_event(
+                event_queue,
+                task_id=task_id,
+                operation_id=tool_call_id,
+                phase="finished",
+                kind="tool",
+                task_attempt=getattr(tool_ctx, "task_attempt", None),
+                execution_id=str(correlation.get("execution_id") or ""),
+                round_id=str(correlation.get("round_id") or ""),
+                tool=str(correlation.get("tool") or ""),
+            )
+        finally:
+            release_quiescence()
 
     try:
         future.add_done_callback(_settled)
     except Exception:
         log.debug("Failed to attach late tool settlement callback", exc_info=True)
+        release_quiescence()
 
 
 def _tool_correlation(tools: ToolRegistry) -> Dict[str, Any]:
@@ -162,7 +172,14 @@ def _tool_task_metadata(tools: ToolRegistry) -> Dict[str, Any]:
 
 def _append_tool_log(tools: ToolRegistry, drive_logs: pathlib.Path, payload: Dict[str, Any]) -> None:
     meta = _tool_task_metadata(tools)
-    for key in ("parent_task_id", "root_task_id", "delegation_role", "task_depth"):
+    if task_id := str(payload.get("task_id") or "").strip():
+        # ONE lineage resolver (a direct root is its own root), so every task row
+        # carries root_task_id/delegation_role for the task log stream readers.
+        lineage = resolve_task_lineage(task_id, metadata=meta)
+        payload["root_task_id"] = lineage["root_task_id"]
+        if role := lineage["delegation_role"] or ("root" if lineage["is_root_task"] else ""):
+            payload["delegation_role"] = role
+    for key in ("parent_task_id", "task_depth"):
         if meta.get(key) not in (None, ""):
             payload[key] = meta.get(key)
     append_jsonl(drive_logs / "tools.jsonl", payload)
@@ -273,7 +290,7 @@ def _get_tool_timeout(
 # per-call/run_command machinery and the deadline milestones own those.
 _DEADLINE_CLAMPED_TOOLS = frozenset({
     "web_search", "browse_page", "browser_action", "youtube_transcript",
-    "wait_task", "wait_tasks", "plan_task", "task_acceptance_review",
+    "wait_task", "wait_tasks", "await_messages", "plan_task", "task_acceptance_review",
     "analyze_screenshot", "vlm_query",
 })
 
@@ -389,11 +406,13 @@ def _persist_truncated_tool_source(
     tool_call_id: str,
     result: Any,
     tool_args: Optional[Dict[str, Any]] = None,
+    *,
+    force: bool = False,
 ) -> Dict[str, Any]:
     """Write a generic over-limit result to this actor's existing artifact root."""
 
     text = str(result)
-    if (
+    if not force and (
         _should_skip_tool_result_truncation(tool_name, tool_args)
         or len(text) <= _tool_result_limit(tool_name)
     ):
@@ -724,6 +743,9 @@ def _execute_single_tool(
                 "round_id": correlation.get("round_id"),
                 "args": args,
                 "result": result,
+                **({"producer_result": tool_result.producer_text,
+                    "host_annotations": list(tool_result.host_annotations)}
+                   if tool_result.producer_text is not None else {}),
                 "tool_ok": tool_ok,
                 "semantic_ok": not is_error,
                 "result_meta": result_meta,
@@ -811,6 +833,44 @@ class StatefulToolExecutor:
             self._executor = None
 
 
+def tool_timeout_text(fn_name: str, timeout_sec: float, reset_msg: str = "") -> str:
+    """The ONE sentence a model reads when its own tool call was abandoned.
+
+    Shared with the native reviewer episode, whose inspection calls run under
+    this same timeout policy: two spellings of "your tool did not come back"
+    would be two contracts for one host fact.
+    """
+    return (
+        f"⚠️ TOOL_TIMEOUT ({fn_name}): exceeded {timeout_sec}s limit. "
+        f"The tool is still running in background but control is returned to you. "
+        f"{reset_msg}Try a different approach or inform the user{' about the issue' if not reset_msg else ''}."
+    )
+
+
+@contextlib.contextmanager
+def abandoned_on_timeout(timeout_sec: float, *, bounded: bool = True) -> Iterator[Callable[..., Any]]:
+    """Own the private worker of ONE call so a timed-out call can be ABANDONED.
+
+    The late-settlement half of tool execution, without its task-log rows, so
+    the native reviewer episode bounds its inspection calls on the same
+    mechanics the loop uses: the worker inherits the caller's execution
+    deadline through a copied context (its inner waits share the bound), the
+    caller waits with ``future_result`` (a quota pause does not spend the
+    budget), and the executor is retired WITHOUT joining — a caller that timed
+    out walks away, and the value the worker settles on later is evidence of
+    nothing. ``bounded=False`` leaves the context unscoped for a terminal wait
+    that must not be cut at all.
+    """
+    executor = ThreadPoolExecutor(max_workers=1)
+    try:
+        with (execution_deadline_scope(monotonic_now() + timeout_sec) if bounded
+              else contextlib.nullcontext()):
+            context = contextvars.copy_context()
+        yield lambda fn, *args: executor.submit(context.run, fn, *args)
+    finally:
+        executor.shutdown(wait=False, cancel_futures=True)
+
+
 def _make_timeout_result(
     fn_name: str,
     tool_call_id: str,
@@ -832,11 +892,7 @@ def _make_timeout_result(
     except Exception:
         pass
 
-    result = (
-        f"⚠️ TOOL_TIMEOUT ({fn_name}): exceeded {timeout_sec}s limit. "
-        f"The tool is still running in background but control is returned to you. "
-        f"{reset_msg}Try a different approach or inform the user{' about the issue' if not reset_msg else ''}."
-    )
+    result = tool_timeout_text(fn_name, timeout_sec, reset_msg)
     tool_result = ToolResult(
         status="timeout",
         code="TOOL_TIMEOUT",
@@ -954,6 +1010,10 @@ def _execute_with_timeout(
             future = stateful_executor.submit(
                 _execute_browser_tool_bound, tools, tc, drive_logs, task_id, submit_generation,
             )
+        # The registration PINS settlement ownership until this call's own
+        # handling is over (result in time, or the late hold claimed below):
+        # released in the finally, after either branch (#1196).
+        release_tool_custody = budget_pause.register_tool_future(tool_ctx, tool_call_id, fn_name, future)
         try:
             result = future_result(future, timeout_sec)
             result_meta = result.get("result_meta") or {}
@@ -1025,14 +1085,15 @@ def _execute_with_timeout(
                 "timeout_sec": timeout_sec,
             }, correlation, tool_call_id=tool_call_id))
             return timeout_result
+        finally:
+            release_tool_custody()
     else:
-        executor = ThreadPoolExecutor(max_workers=1)
-        try:
-            with (contextlib.nullcontext() if is_reviewed_mutative else execution_deadline_scope(monotonic_now() + timeout_sec)):
-                context = contextvars.copy_context()
-            future = executor.submit(
-                context.run, _execute_single_tool, tools, tc, drive_logs, task_id,
-            )
+        with abandoned_on_timeout(timeout_sec, bounded=not is_reviewed_mutative) as submit:
+            future = submit(_execute_single_tool, tools, tc, drive_logs, task_id)
+            # Registered before the wait, so a call abandoned at its timeout is
+            # already visible to budget-pause quiescence (#1196); ownership is
+            # pinned until the finally below, after any late hold was claimed.
+            release_tool_custody = budget_pause.register_tool_future(tool_ctx, tool_call_id, fn_name, future)
             try:
                 result = future.result() if is_reviewed_mutative else future_result(future, timeout_sec)
                 result_meta = result.get("result_meta") or {}
@@ -1102,8 +1163,8 @@ def _execute_with_timeout(
                         "timeout_sec": timeout_sec,
                     }, correlation, tool_call_id=tool_call_id))
                     return timeout_result
-        finally:
-            executor.shutdown(wait=False, cancel_futures=True)
+            finally:
+                release_tool_custody()
 
 
 _PARALLEL_SAFE_TOOLS: frozenset[str] = READ_ONLY_PARALLEL_TOOLS | PARALLEL_SAFE_ENQUEUE_TOOLS
@@ -1192,6 +1253,7 @@ def handle_tool_calls(
                 for idx, tc in enumerate(tool_calls)
             }
             results = [None] * len(tool_calls)
+            batch_raised = True
             for future in as_completed(future_to_index):
                 idx = future_to_index[future]
                 try:
@@ -1229,8 +1291,13 @@ def handle_tool_calls(
                         },
                         "tool_result": tool_result,
                     }
+            batch_raised = False
         finally:
-            executor.shutdown(wait=False, cancel_futures=True)
+            # A batch leaving on an exception (BudgetExceeded) must not strand an
+            # already-running wrapper that has not yet registered its inner future
+            # with budget-pause quiescence: cancel the queued ones, WAIT for the
+            # started ones (each bounded by its own tool timeout) (#1196, Astra #4).
+            executor.shutdown(wait=batch_raised, cancel_futures=True)
 
     return process_tool_results(results, messages, llm_trace, emit_progress, tools=tools)
 
@@ -1276,7 +1343,8 @@ def _maybe_auto_attach_image(
     typed = exec_result.get("tool_result")
     if isinstance(typed, ToolResult) and typed.code == "TOOL_REPORTED_FAILURE":
         return
-    raw = exec_result.get("result")
+    raw = (typed.producer_text if isinstance(typed, ToolResult)
+           and typed.producer_text is not None else exec_result.get("result"))
     if not isinstance(raw, str) or '"auto_attach_image"' not in raw:
         return
     observation = None
@@ -1367,6 +1435,25 @@ def process_tool_results(
             tool_args=exec_result.get("tool_args"),
             source_ref=result_source_ref,
         )
+        typed = exec_result.get("tool_result")
+        producer_ref = {}
+        if isinstance(typed, ToolResult) and typed.producer_text is not None:
+            if ctx is not None:
+                producer_ref = _persist_truncated_tool_source(
+                    ctx, fn_name, str(exec_result["tool_call_id"]) + ".producer",
+                    typed.producer_text, force=True,
+                )
+            # The complete annotated source above remains review evidence. This
+            # separate source is for parsers; neither bytes nor notes live in meta.
+            if result_partial and typed.host_annotations:
+                truncated_result += "\n\n" + "\n\n".join(typed.host_annotations)
+            truncated_result += (
+                "\nPRODUCER_RESULT_SOURCE_JSON=" + json.dumps(producer_ref, ensure_ascii=False)
+                + "\nUnannotated tool data for programmatic reading; host notes and outcome still apply."
+                if producer_ref else
+                "\nPRODUCER_RESULT_SOURCE_UNAVAILABLE=true"
+                "\nHost notes remain in the result; no clean producer file was retained."
+            )
 
         messages.append({
             "role": "tool",
@@ -1392,10 +1479,16 @@ def process_tool_results(
                 ctx._tool_trace_refs = refs
             refs[str(exec_result["tool_call_id"])] = trace_ref
 
+        # Ensure args are JSON-serializable for trace logging.
+        try:
+            trace_args = json.loads(json.dumps(exec_result["args_for_log"], ensure_ascii=False, default=str))
+        except Exception:
+            log.debug("Failed to serialize args for trace logging", exc_info=True)
+            trace_args = {"_repr": repr(exec_result["args_for_log"])}
         llm_trace["tool_calls"].append({
             "tool": fn_name,
             "tool_call_id": exec_result["tool_call_id"],
-            "args": _safe_args(exec_result["args_for_log"]),
+            "args": trace_args,
             # Evidence-parity (v6.71.1): store the SAME view the agent saw
             # (per-tool TOOL_RESULT_LIMITS, head-truncated) rather than a hidden
             # 700-char head+tail copy. A decider (acceptance reviewer, reflection)
@@ -1413,6 +1506,9 @@ def process_tool_results(
                 ),
             } if result_partial else {}),
             **(exec_result.get("result_meta") or {}),
+            **({"producer_source_ref": producer_ref,
+                "host_annotations": list(typed.host_annotations)}
+               if isinstance(typed, ToolResult) and typed.producer_text is not None else {}),
         })
         if fn_name == "task_acceptance_review" and not is_error:
             raw = str(exec_result.get("result") or "")
@@ -1434,6 +1530,12 @@ def process_tool_results(
                     )
                     if deferred_to_host:
                         llm_trace.setdefault("acceptance_evidence_calls", []).append(parsed)
+                        if isinstance(parsed.get("acceptance_retry"), dict):
+                            # One explicit, source-bound retry of a disclosed local
+                            # preparation failure. Duplicate deliveries are idempotent.
+                            from ouroboros.acceptance_preparation import record_retry_intent
+
+                            record_retry_intent(llm_trace, parsed["acceptance_retry"], ctx)
                         if ctx is not None:
                             ctx._acceptance_request_pending = {
                                 **(parsed.get("request") or {}),
@@ -1493,10 +1595,3 @@ def process_tool_results(
     return error_count
 
 
-def _safe_args(v: Any) -> Any:
-    """Ensure args are JSON-serializable for trace logging."""
-    try:
-        return json.loads(json.dumps(v, ensure_ascii=False, default=str))
-    except Exception:
-        log.debug("Failed to serialize args for trace logging", exc_info=True)
-        return {"_repr": repr(v)}

@@ -270,6 +270,18 @@ APPROVED_DELTAS: Mapping[str, Delta] = MappingProxyType({
     # same defect class the 329 OSWorld rows measured, on the composition seam.
     "compose:reported:route": Delta(False, "ok", True, "tool_reported_failure", "A.24", "a tool that reported its own failure is a failure, even behind an appended host note"),
     "compose:reported:route+safety": Delta(False, "ok", True, "tool_reported_failure", "A.24", "a tool that reported its own failure is a failure, even behind two appended host notes"),
+    # A.25 — cross-focus publication refusals.  The retired text chain only
+    # recognized the generic *_UNAVAILABLE suffix; stale/liveness names were
+    # warnings, while a TOOL_ prefix was still a generic execution failure.  The one identifier register now recovers
+    # the producer's substrate/policy split as typed results: an unavailable
+    # target or projection is policy-denied availability, while a stale or
+    # unauthorized publication is an explicit policy block.
+    "FOCUS_PROJECTION_UNAVAILABLE": Delta(True, "error", True, "unavailable", "A.25", "a direct focus projection the host cannot accept is unavailable, not a generic execution error"),
+    "FOCUS_TASK_NOT_LIVE": Delta(False, "ok", True, "unavailable", "A.25", "a focus update for a settled task has no live publication target"),
+    "FOCUS_STALE": Delta(False, "ok", True, "blocked", "A.25", "a newer focus wins the CAS and blocks the stale publication"),
+    "FOCUS_SOURCE_UNRESOLVED": Delta(False, "ok", True, "unavailable", "A.25", "a focus source the named reader refused or cannot answer is unavailable evidence, not a published focus"),
+    "FOCUS_SOURCE_UNRETAINED": Delta(False, "ok", True, "unavailable", "A.25", "a focus whose source answer could not be stored has no retained evidence to publish"),
+    "TOOL_FORBIDDEN": Delta(True, "error", True, "blocked", "A.25", "an unauthorized project/focus operation is a policy denial, not a generic tool failure"),
     # Owner's recovered transport WORK-ORDER B7 / #744: these producers now
     # publish existing codes for known refusals. No text-adapter policy changed.
     "native:LEGACY_BLOCKED:CHILD_RESULT_STALE": Delta(False, "ok", True, "blocked", "A.B7", "join_ledger refuses a disposition when the inspected child result changed"),
@@ -369,6 +381,16 @@ CURRENT_PRODUCER_CONTRACTS = {
     "SCOPE_UNCONFIRMED": (True, "tool_reported_failure"),
     "TOOL_ERROR": (True, "error"),
     "native:TOOL_REPORTED_FAILURE:TOOL_ERROR": (True, "tool_reported_failure"),
+    # Release admission split its one PREFLIGHT_BLOCKED text in two: a source it
+    # could not read is unavailable evidence, not a candidate defect. The new
+    # identifier reaches its text through the `code` variable, so it is declared
+    # in the corpus' interpolated list and answered live here — the retired pair
+    # never saw a tree that emitted it.
+    "PREFLIGHT_UNAVAILABLE": (True, "unavailable"),
+    # Peer admission adds current producers; the historical fixture stays intact.
+    "TASK_CANCEL_STATE_UNAVAILABLE": (True, "unavailable"),
+    "TASK_FORBIDDEN": (True, "blocked"),
+    "native:LEGACY_BLOCKED:TASK_FORBIDDEN": (True, "blocked"),
 }
 
 

@@ -18,6 +18,7 @@ import threading
 from pathlib import Path
 from typing import Any, Dict
 
+from ouroboros.runtime_limits import get_promote_confirm_wait_sec
 from ouroboros.tool_capabilities import ROUTING_VERBS
 from ouroboros.tools.registry import ToolContext
 from ouroboros.utils import append_jsonl, utc_now_iso
@@ -33,7 +34,7 @@ log = logging.getLogger(__name__)
 _SCHEDULE_EMIT_LOCK = threading.Lock()
 
 
-_PROMOTE_CONFIRM_TIMEOUT_SEC = 15.0
+_PROMOTE_CONFIRM_TIMEOUT_SEC = get_promote_confirm_wait_sec()
 
 
 _PROMOTE_CONFIRM_POLL_SEC = 0.05
@@ -179,6 +180,53 @@ def _wait_for_routing_annotation(
     )
 
 
+def _record_promotion_admission_stub(ctx: ToolContext, evt: Dict[str, Any], mode: str) -> None:
+    """Make the EMITTED promote durably readable before the wait can time out.
+
+    An admission the supervisor has not confirmed yet left NOTHING to read, so
+    ``get_task_result`` answered "unknown or not yet registered" - which reads as
+    "your promote never happened" and invites the second promote that mints a
+    duplicate root (#1160). The stub is the negative side only: ``emitted`` is not
+    a scheduled status, positive scheduling authority stays with the supervisor's
+    own receipt, and ``create_only`` initializes ABSENCE alone, so a supervisor
+    that already answered keeps its row byte-for-byte.
+    """
+    from ouroboros.routing_wait import PROMOTION_ADMISSION_EMITTED
+    from ouroboros.task_results import STATUS_REQUESTED, write_task_result
+
+    task_id = str(evt.get("task_id") or "")
+    try:
+        write_task_result(
+            _routing_status_root(ctx), task_id, STATUS_REQUESTED,
+            create_only=True, strict_existing_dict=True,
+            project_id=str(evt.get("project_id") or ""),
+            description=str(evt.get("objective") or ""),
+            promotion_admission={
+                "status": PROMOTION_ADMISSION_EMITTED,
+                "routing_token": str(evt.get("routing_token") or ""),
+                "emitted_at": utc_now_iso(),
+                "transport_mode": mode,
+            },
+        )
+    except Exception as exc:
+        # The promote itself proceeds; what is lost is the reconciliation read, so
+        # the failure is loud and durable rather than a DEBUG line (BIBLE P1).
+        log.warning("Failed to record the emitted promote admission for %s", task_id, exc_info=True)
+        try:
+            append_jsonl(
+                _routing_status_root(ctx) / "logs" / "supervisor.jsonl",
+                {
+                    "ts": utc_now_iso(),
+                    "type": "promote_admission_stub_failed",
+                    "task_id": task_id,
+                    "routing_token": str(evt.get("routing_token") or ""),
+                    "error": f"{type(exc).__name__}: {exc}",
+                },
+            )
+        except Exception:
+            log.debug("Failed to record the admission-stub failure", exc_info=True)
+
+
 def _emit_and_wait_for_routing(
     ctx: ToolContext,
     evt: Dict[str, Any],
@@ -193,6 +241,7 @@ def _emit_and_wait_for_routing(
         }
     timeout = _PROMOTE_CONFIRM_TIMEOUT_SEC if mode == "live" else 0.0
     if str(evt.get("type") or "") == "promote_chat_to_task":
+        _record_promotion_admission_stub(ctx, evt, mode)
         return mode, _wait_for_promotion_admission(
             ctx,
             str(evt.get("task_id") or ""),

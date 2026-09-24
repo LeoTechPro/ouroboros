@@ -562,7 +562,16 @@ def scan_data_paths(root: pathlib.Path = REPO) -> frozenset[str]:
 # and its startup fold; the archive segments ``archive/consciousness_observations_<ts>``
 # left the population and the one-time ``archive/consciousness_observations.jsonl``
 # move target (``ouroboros/consciousness.py``) took their place.
-EXPECTED_SCAN_PATHS = 290  # Linked project knowledge history is a dynamic validated shelf.
+# 290 -> 291: the retained focus source (``task_results/artifacts/*/source_handles/
+# context_checkpoints``, ``ouroboros/task_finalization.py``'s digest glob) is the
+# one new durable plane of cross-focus awareness; it has its own row in section 2.
+# 291 -> 292: the streamed bytes blob's temp name under observability/blobs (the existing
+# ``observability/{calls,blobs,salvaged}/**`` row covers it).
+# 292 -> 293: the Presence previous-turn pointer (``state/presence_turn_gate/last-<sha256>.json``),
+# one rebuildable projection per conversation written by presence_runner at the end of an executed
+# turn; it has its own row in section 2.
+# 293 -> 295: the disposable test-environment caches (``cache/pip``, ``cache/uv``; test root only).
+EXPECTED_SCAN_PATHS = 295
 
 # Scanned paths that must always be present — guards the scanner itself
 # against a silent regression that would shrink coverage while keeping counts

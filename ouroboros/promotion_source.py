@@ -15,7 +15,7 @@ def _source_project_id(source: str, is_git: bool) -> str:
 
 
 def resolve_promote_source(
-    ctx: Any, source: str, project_id: str,
+    ctx: Any, source: str, project_id: str, *, project_name: str = "",
 ) -> Tuple[str, str, str, str, bool]:
     """Attach/clone only after the supervisor has admitted an executor.
 
@@ -27,7 +27,10 @@ def resolve_promote_source(
     the project row — the promote continuation carries it so the one
     workers-side ``project_started`` announce still fires for a creation that
     happened in this off-loop half (owner 2=A: it is the same agent-initiated
-    promote flow).
+    promote flow). ``project_name`` is the display name the model gave: this
+    half registers the row FIRST, and a later named ``create_project`` returns
+    the existing row untouched, so a name withheld here is lost for good and
+    the Project shows its id (``proj_<digest>`` for a non-Latin name).
     """
     from ouroboros.config import DATA_DIR
     from ouroboros.project_sources import clone_project_repo, valid_git_url, validate_attach_path
@@ -88,11 +91,14 @@ def resolve_promote_source(
     if prior_wd == folder and str((existing or {}).get("provenance") or "").strip() not in ("", "none"):
         return folder, note, "", pid, False
     try:
-        from ouroboros.projects_registry import create_project, update_project
+        from ouroboros.projects_registry import PROJECT_NAME_MAX, create_project, update_project
         from ouroboros.utils import utc_now_iso
 
+        name = str(project_name or "").strip()
+        if len(name) > PROJECT_NAME_MAX:
+            name = ""  # never refuse a finished clone over a long title; the row keeps its id
         created = bool(create_project(
-            drive_root, pid, origin="promote_chat_to_task",
+            drive_root, pid, name=name, origin="promote_chat_to_task",
         ).get("created"))
         update_project(
             drive_root,

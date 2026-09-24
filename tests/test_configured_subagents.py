@@ -506,3 +506,48 @@ def test_settings_legacy_singleton_uses_the_canonical_linear_compiler(
         "fast-scout",
         "independent-perspective",
     ]
+
+
+def test_row_enabled_defaults_true_and_only_a_false_row_changes_the_saved_bytes():
+    """The per-row owner switch is additive: an existing roster's canonical
+    serialization — and every fingerprint, receipt and snapshot bound to it —
+    is byte-identical after the field exists, because `true` is omitted."""
+    legacy_bytes = _config(_row("builder"))
+    legacy = parse_configured_subagents(legacy_bytes)
+    assert legacy.items[0].enabled is True
+    assert "enabled" not in serialize_configured_subagents(legacy).split('"items"')[1]
+
+    explicit_true = parse_configured_subagents(_config(_row("builder", enabled=True)))
+    assert serialize_configured_subagents(explicit_true) == serialize_configured_subagents(legacy)
+    assert configured_subagents_fingerprint(explicit_true) == configured_subagents_fingerprint(legacy)
+
+    off = parse_configured_subagents(_config(_row("builder", enabled=False)))
+    assert off.items[0].enabled is False
+    assert json.loads(serialize_configured_subagents(off))["items"][0]["enabled"] is False
+    assert configured_subagents_fingerprint(off) != configured_subagents_fingerprint(legacy)
+
+    # A switched-off row keeps its complete configuration through the round trip.
+    round_tripped = parse_configured_subagents(serialize_configured_subagents(off))
+    assert round_tripped == off
+    assert round_tripped.items[0].route.target_id == "codex=gpt-5.6-sol"
+    assert round_tripped.items[0].effort == "medium"
+
+
+@pytest.mark.parametrize("value", ["false", 0, 1, None, [], {}])
+def test_a_nonboolean_row_enabled_is_refused_rather_than_coerced(value):
+    with pytest.raises(ValueError, match=r"enabled must be a boolean"):
+        parse_configured_subagents(_config(_row("builder", enabled=value)))
+
+
+def test_the_row_switch_and_the_list_level_switch_are_independent():
+    both_axes = parse_configured_subagents(
+        _config(_row("a"), _row("b", enabled=False), enabled=False)
+    )
+    assert both_axes.enabled is False
+    assert [row.enabled for row in both_axes.items] == [True, False]
+
+    list_on = parse_configured_subagents(
+        _config(_row("a"), _row("b", enabled=False), enabled=True)
+    )
+    assert list_on.enabled is True
+    assert [row.enabled for row in list_on.items] == [True, False]

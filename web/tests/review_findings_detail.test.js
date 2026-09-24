@@ -67,7 +67,7 @@ test('a full Plan wave renders findings, mapped dispositions, degraded reviewers
     assert.match(detail, /  agent: accept — second thoughts after re-reading/);
     assert.match(detail, /\[note\] Naming could be clearer — slot_2/);
     assert.match(detail, /General dispositions:\n  slot_9:gone: accept — will fold into phase 2/);
-    assert.match(detail, /Reviewer unavailable: slot_3 · openai\/gpt-5\.6-sol — window_exhausted/);
+    assert.match(detail, /^openai\/gpt-5\.6-sol · unavailable$/m);
     assert.match(detail, /Showing 2 of 40 findings \(per-slot page cap\)/);
     assert.match(detail, /Some finding texts were truncated at capture\./);
     assert.match(detail, /Spec body was truncated at capture\./);

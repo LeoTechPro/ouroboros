@@ -501,16 +501,9 @@ class ToolRegistry:
                     parameters["properties"]["contract_kind"]["enum"] = ["delegation_zero_run"]
                 parameters["required"] = ["contract_kind", "zero_run_decision", "zero_run_basis"]
             elif entry.name in {"read_file", "list_files", "search_code", "query_code"}:
-                schema = copy.deepcopy(schema)
-                root_schema = schema.get("parameters", {}).get("properties", {}).get("root", {})
-                if entry.name == "search_code":
-                    allowed = {"active_workspace", "system_repo", "skill_payload"}
-                elif entry.name == "query_code":
-                    # query_code itself rejects non-repo roots — do not advertise more.
-                    allowed = {"active_workspace", "system_repo"}
-                else:
-                    allowed = {"active_workspace", "system_repo", "runtime_data", "task_drive", "skill_payload", "artifact_store"}
-                if isinstance(root_schema.get("enum"), list): root_schema["enum"] = [root for root in root_schema["enum"] if root in allowed]
+                # The advertised roots are the matrix's answer for this profile and
+                # operation (the same SSOT the dispatcher enforces), never a second list.
+                schema = self._schema_with_matrix_roots(entry)
             elif entry.name in {"browse_page", "browser_action"}:
                 schema = copy.deepcopy(entry.schema)
                 if entry.name == "browse_page":
@@ -557,15 +550,21 @@ class ToolRegistry:
             elif (entry.name in tool_resolution._ROOT_ARG_REPO_WRITE_TOOLS
                   or entry.name in _GENERIC_VCS_TARGET_TOOLS
                   or entry.name in {"read_file", "list_files", "search_code", "query_code"}):
-                schema = copy.deepcopy(schema)
-                root_schema = schema.get("parameters", {}).get("properties", {}).get("root", {})
-                operation = _target_binding_operation(entry.name, {})
-                if isinstance(root_schema.get("enum"), list) and operation:
-                    root_schema["enum"] = [root for root in root_schema["enum"]
-                        if decide_tool_access(profile=active_tool_profile(self._ctx), root=root,
-                                              operation=operation).allow
-                        and (entry.name != "query_code" or root in {"active_workspace", "system_repo"})]
+                schema = self._schema_with_matrix_roots(entry)
         return {"type": "function", "function": schema}
+
+    def _schema_with_matrix_roots(self, entry: ToolEntry) -> Dict[str, Any]:
+        """A copy of the schema whose ``root`` enum is what the matrix grants this
+        profile for the tool's operation; query_code stays repo-only by contract."""
+        schema = copy.deepcopy(entry.schema)
+        root_schema = schema.get("parameters", {}).get("properties", {}).get("root", {})
+        operation = _target_binding_operation(entry.name, {})
+        if isinstance(root_schema.get("enum"), list) and operation:
+            root_schema["enum"] = [root for root in root_schema["enum"]
+                if decide_tool_access(profile=active_tool_profile(self._ctx), root=root,
+                                      operation=operation).allow
+                and (entry.name != "query_code" or root in {"active_workspace", "system_repo"})]
+        return schema
 
     def _schemas_for_entry(self, entry: ToolEntry) -> List[Dict[str, Any]]:
         return [self._schema_for_entry(entry)]

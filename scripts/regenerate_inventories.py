@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Regenerate the three CPL-2 gen/verify inventories (plan §7.2).
+"""Regenerate the generated inventories (the three CPL-2 gen/verify ones, plan §7.2, and the UI one).
 
 Each inventory is a generated document whose staleness turns CI red
 (``tests/test_generated_inventories.py`` pins byte-identity against a fresh
@@ -24,6 +24,11 @@ in-memory regeneration, plus the resolution invariants below):
    declared "this binding exists for compatibility" convention, per the
    reference FACADE_CONSUMERS method), with its leaves, name counts and
    domain from ``ouroboros/domains.toml``.
+
+4. ``docs/inventories/UI_CONTROL_TEXT_INVENTORY.md`` — the fixed control text of the web UI sorted
+   by text, and every ``ouro:*`` CustomEvent with the modules that raise it, so that the siblings
+   of a new control appear next to it in the diff (builder and rationale:
+   ``scripts/ui_control_inventory.py``; staleness is its only red).
 
 Convention follows the ratchet/domain-manifest pairs: generator in scripts/,
 deterministic output (no timestamps, no HEAD SHAs), verify test in tests/.
@@ -53,6 +58,8 @@ from ouroboros.reference_books import (  # noqa: E402
     load_reference_book,
     read_book_section,
 )
+
+from scripts.ui_control_inventory import UI_CONTROLS_OUT, build_ui_control_inventory  # noqa: E402
 
 OUT_DIR = REPO_ROOT / "docs" / "inventories"
 FROZEN_OUT = OUT_DIR / "FROZEN_CONTRACTS_INVENTORY.md"
@@ -425,6 +432,7 @@ BUILDERS = {
     FROZEN_OUT: build_frozen_inventory,
     LAYOUT_OUT: build_layout_inventory,
     FACADE_OUT: build_facade_inventory,
+    UI_CONTROLS_OUT: build_ui_control_inventory,
 }
 
 

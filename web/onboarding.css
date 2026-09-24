@@ -898,6 +898,17 @@ textarea::placeholder {
   font-weight: 600;
 }
 
+/* The per-row owner switch leads the card head; padding buys the pointer
+   target around the 14px native box and the negative margin keeps the head's
+   own rhythm (docs/DESIGN.md §6). */
+.available-subagent-enable {
+  display: inline-flex;
+  align-items: center;
+  padding: var(--space-2);
+  margin: calc(-1 * var(--space-2));
+  cursor: pointer;
+}
+
 .available-subagent-head .settings-inline-status {
   min-width: 0;
   white-space: nowrap;

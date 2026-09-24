@@ -1,24 +1,110 @@
 """Wedge detection for the supervisor generation.
 
 The two silent-wedge predicates (a stalled supervisor loop, a heartbeat-silent
-in-process chat turn), the owner alert one of them raises, and the dedicated
-watchdog thread that evaluates both outside the loop it watches.
+in-process chat turn), the owner alert one of them raises, the measurements the
+loop publishes about itself, and the dedicated watchdog thread that evaluates
+both outside the loop it watches.
 """
 
 from __future__ import annotations
 
-import os
 import threading
 import time
+from typing import Any, Optional
 
+from ouroboros.deadline_utils import parse_deadline_ts, utc_now
 from ouroboros.server_process import DATA_DIR, log, _restart_requested
 from ouroboros.utils import utc_now_iso
+
+# The loop hands the watchdog ONE list: [0] the monotonic stamp the watchdog
+# triggers on, [1] the facts published with that stamp, [2] the loop thread's CPU
+# base and [3] the worst worker-event lag of the drain in progress. The LOOP
+# THREAD owns every write; the watchdog only reads them, so it never takes a
+# lock, calls the daemon or touches disk — a watchdog that waits on the thread it
+# watches reports nothing. Older/foreign callers may pass the stamp alone.
+_STAMP, _FACTS, _CPU, _LAG = 0, 1, 2, 3
 
 
 def _supervisor_loop_stalled(last_tick: float, now: float, deadline_sec: int) -> bool:
     """True when the supervisor loop has not published a liveness tick within the
     deadline (WS3). deadline_sec<=0 disables the watchdog."""
     return deadline_sec > 0 and (now - last_tick) > deadline_sec
+
+
+def _daemon_pin_matched() -> Optional[bool]:
+    """Does the engine this process already PROVED serve the next-spawn pin?
+
+    A generation whose daemon lags the installed pin is one of the suspects behind
+    a stalled loop (every ``ensure`` on such a generation pays a probe/install
+    path a matched one skips), so the stall row carries the answer the process
+    ALREADY holds in memory: the version proven by the last successful handshake
+    (``owned_engine_version``, explicitly no new I/O) against the loaded pin.
+    ``None`` means unknown — no handshake has succeeded here yet, or this install
+    carries no pin — never a guess.
+    """
+    try:
+        from ouroboros.claudexor_daemon import owned_engine_version
+        from ouroboros.claudexor_runtime import get_runtime_manager
+
+        pin = get_runtime_manager().pin
+        proven = owned_engine_version()
+        return proven == pin.version if (proven and pin is not None) else None
+    except Exception:
+        log.debug("owned-daemon pin match is unknown", exc_info=True)
+        return None
+
+
+def loop_phase_facts(liveness: list, phase: str, *, new_tick: bool = False) -> dict:
+    """The measurements the LOOP THREAD publishes with its own liveness stamp.
+
+    ``phase`` is the coarse tick phase the loop is entering — ``events`` |
+    ``maintenance`` | ``assign``, one stamp per phase and never per sub-step — so a
+    stall names where the thread went silent instead of only how long it was.
+    ``loop_thread_cpu_sec`` is the ``time.thread_time()`` delta over the interval
+    that ENDS with this stamp, sampled on the loop thread itself: read beside the
+    wall gap it separates a thread that BURNED that gap from one blocked on a lock
+    or starved of the GIL. ``max_event_lag_sec`` is the worst worker-stamped lag of
+    the most recently completed drain, absent when no drained event carried a
+    worker stamp. ``new_tick`` opens a fresh drain maximum (the events phase opens
+    the tick), so a lag can never outlive the tick that observed it. No
+    registered-project count rides here: the set the retire sweep walks exists
+    only as a full custody-log replay, and a measurement may not pay disk on the
+    thread it measures — an absent key beats a cheap-looking wrong one.
+    """
+    cpu = time.thread_time()
+    facts = {
+        "phase": phase,
+        "loop_thread_cpu_sec": round(cpu - liveness[_CPU], 3),
+        "daemon_pin_matched": _daemon_pin_matched(),
+    }
+    if liveness[_LAG] is not None:
+        facts["max_event_lag_sec"] = round(liveness[_LAG], 1)
+    liveness[_CPU] = cpu
+    if new_tick:
+        liveness[_LAG] = None
+    return facts
+
+
+def observe_worker_event_lag(liveness: list, evt: Any) -> None:
+    """Record how far behind the loop is on the worker event it is draining now.
+
+    The worker stamps ``ts`` in its OWN process when it queues the event, so this
+    is a cross-process wall-clock gap — a measurement, never the watchdog's
+    monotonic trigger. An event without a parsable worker stamp is skipped: the
+    host's own clock is not evidence about when a worker spoke.
+    """
+    stamped = parse_deadline_ts(evt.get("ts")) if isinstance(evt, dict) else None
+    if stamped is None:
+        return
+    lag = (utc_now() - stamped).total_seconds()
+    if liveness[_LAG] is None or lag > liveness[_LAG]:
+        liveness[_LAG] = lag
+
+
+def _published_loop_facts(liveness: list) -> dict:
+    """The facts the loop published with its last stamp ({} when it published none)."""
+    facts = liveness[_FACTS] if len(liveness) > _FACTS else None
+    return dict(facts) if isinstance(facts, dict) else {}
 
 
 def _chat_turn_wedged(busy: bool, last_activity_ts, now: float, deadline_sec: int) -> bool:
@@ -65,9 +151,15 @@ def _alert_chat_turn_wedge(task_id, gap: float) -> None:
 
 def _start_supervisor_liveness_watchdog(liveness: list, stop_event=None) -> None:
     """Dedicated daemon thread (NOT inside the supervisor loop, so it fires even when
-    that loop stalls). It ALERTS the owner on two silent-wedge classes — a supervisor
-    loop stall (new-message intake starvation) and a heartbeat-silent in-process
-    direct-chat turn — converting a multi-hour silent wedge into an immediate signal.
+    that loop stalls). It observes two silent-wedge classes and reports them
+    DIFFERENTLY (owner decision 4C). A heartbeat-silent in-process direct-chat turn
+    ALERTS the owner, because /restart is a recovery they can perform. A supervisor
+    loop stall (new-message intake starvation) is JOURNAL ONLY: the ``log.error``
+    and one durable ``supervisor_loop_stall`` row with the phase facts the loop
+    published with its last stamp, closed once the loop ticks again by one
+    ``supervisor_loop_stall_end`` — onset without an end is a generation that never
+    recovered. Nothing reaches the owner's chat from that half: a stall they cannot
+    act on is an alarm, not information, and the rows carry the diagnosis anyway.
     It deliberately does NOT kill a hung thread; independent native actors keep
     the chat responsive meanwhile. ``stop_event`` is
     a PER-GENERATION token: when the supervisor loop that owns ``liveness`` exits (incl.
@@ -80,9 +172,10 @@ def _start_supervisor_liveness_watchdog(liveness: list, stop_event=None) -> None
         return
 
     def _watch() -> None:
-        from supervisor.state import append_jsonl, load_state
+        from supervisor.state import append_jsonl
         interval = min(15, max(1, deadline // 3))
         loop_alerted = False
+        stall_onset: tuple = ()  # (stalled stamp, phase) of the OPEN alerted stall
         wedged_tasks: set[str] = set()
         while not _restart_requested.is_set() and not (stop_event is not None and stop_event.is_set()):
             time.sleep(interval)
@@ -93,40 +186,45 @@ def _start_supervisor_liveness_watchdog(liveness: list, stop_event=None) -> None
             # nor mask a real one on either half.
             now = time.monotonic()
             # (1) Supervisor loop stall — new-message intake starvation.
-            if _supervisor_loop_stalled(liveness[0], now, deadline):
+            if _supervisor_loop_stalled(liveness[_STAMP], now, deadline):
                 if not loop_alerted:
-                    gap = now - liveness[0]
+                    gap = now - liveness[_STAMP]
+                    facts = _published_loop_facts(liveness)
                     log.error(
                         "Supervisor loop STALLED ~%.0fs — new-message intake starved (native "
                         "chat still answers); investigate a blocking step.", gap,
                     )
                     try:
+                        # The facts the loop published with the stamp it went silent
+                        # on: where it was, what its own thread burned, how far
+                        # behind the drained worker events already were.
                         append_jsonl(DATA_DIR / "logs" / "supervisor.jsonl", {
-                            "ts": utc_now_iso(), "type": "supervisor_loop_stall", "stalled_sec": round(gap, 1),
+                            "ts": utc_now_iso(), "type": "supervisor_loop_stall",
+                            "stalled_sec": round(gap, 1), **facts,
                         })
                     except Exception:
                         log.debug("loop-stall log failed", exc_info=True)
-                    try:
-                        owner_chat = int((load_state() or {}).get("owner_chat_id") or 0)
-                        if owner_chat:
-                            from supervisor.message_bus import send_with_budget
-                            send_with_budget(
-                                owner_chat,
-                                f"⚠️ The supervisor loop stalled for ~{int(gap)}s — new messages may be "
-                                "delayed. A later tick or restart may restore responsiveness.",
-                                is_progress=True,
-                                progress_meta={
-                                    "task_incident": "supervisor_loop_stall",
-                                    # pid disambiguates server GENERATIONS: the monotonic stamp alone can
-                                    # repeat at a similar uptime offset across restarts, and the browser's
-                                    # toast-dedupe set outlives this process while the page stays open.
-                                    "toast_once": f"supervisor-loop-stall:{os.getpid()}:{int(liveness[0])}",
-                                },
-                                role="system", system_type="runtime_liveness_notice")
-                    except Exception:
-                        log.debug("loop-stall owner alert failed", exc_info=True)
                     loop_alerted = True
+                    stall_onset = (liveness[_STAMP], facts.get("phase"))
             else:
+                if loop_alerted:
+                    # The loop ticked again: close the episode ONCE, and only one
+                    # that was alerted. Both ends are stamps the LOOP published on
+                    # the monotonic clock, so the duration survives a wall-clock
+                    # jump; it rounds up by at most one watchdog interval, the
+                    # resolution at which recovery is observed at all.
+                    try:
+                        append_jsonl(DATA_DIR / "logs" / "supervisor.jsonl", {
+                            "ts": utc_now_iso(), "type": "supervisor_loop_stall_end",
+                            "stalled_sec": round(liveness[_STAMP] - stall_onset[0], 1),
+                            "phase": stall_onset[1],
+                            # The recovery stamp's CPU delta covers the stalled interval itself:
+                            # beside the wall gap it tells a thread that burned it from one that
+                            # waited on a lock, IO or the GIL.
+                            "loop_thread_cpu_sec": _published_loop_facts(liveness).get("loop_thread_cpu_sec"),
+                        })
+                    except Exception:
+                        log.debug("loop-stall-end log failed", exc_info=True)
                 loop_alerted = False
             # (2) Each native actor has its own liveness and alert identity.
             try:

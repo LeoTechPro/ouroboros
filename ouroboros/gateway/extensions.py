@@ -594,6 +594,9 @@ async def api_extension_dispatch(request: Request) -> Response:
         spec = list_routes().get(mount)
         if state.get("action") == "extension_load_error":
             return json_error(f"extension {skill!r} failed to go live", 409, state=state)
+        state = await asyncio.to_thread(
+            runtime_state_for_skill_name, skill, drive_root, repo_path=repo_path,
+        )
     if not state.get("desired_live") or not state.get("live_loaded"):
         return json_error(f"extension {skill!r} not live: {state.get('reason')}", 409, state=state)
     if spec is None:

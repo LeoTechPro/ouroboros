@@ -1,5 +1,9 @@
 import { accountedUpperBound, accountedUpperBoundWithChildren, formatUsd4, joinMarkdownHeadings } from './utils.js';
+import { cancelCauseClauses } from './cancel_presentation.js';
+import { taskCheckpointLabel, checkpointHasProgressRow } from './task_checkpoints.js';
+export { taskCheckpointLabel } from './task_checkpoints.js';
 import { harnessPresentation } from './harness_presentation.js';
+import { acceptanceIncidentClauses } from './acceptance_incident_presentation.js';
 import {
     classifyReviewLifecycle,
     classifyReviewLifecyclePointer,
@@ -407,21 +411,22 @@ export function taskStoppedWithSummary(evt) {
     return String(evt?.reason_code || '') === 'owner_requested_finalization';
 }
 
-// The typed causes a card can state in the owner's words, keyed on the CODE
-// alone. The record keeps the machine code (Logs, task detail, benchmark
-// ledgers); only the card speaks. An UNKNOWN code stays raw on purpose: a
-// reason we have no sentence for must read as itself rather than as a wrong
-// sentence. The byte-identical twin of project_dialogue.TASK_CAUSE_PHRASES;
-// web/tests/fixtures/outcome_phase_parity.json pins both.
+// The typed causes a card can state in the owner's words, keyed on the CODE alone. The
+// record keeps the machine code (Logs, task detail, benchmark ledgers); only the card
+// speaks. An UNKNOWN code stays raw on purpose: a reason we have no sentence for must read
+// as itself rather than as a wrong sentence. The byte-identical twin of
+// project_dialogue.TASK_CAUSE_PHRASES; web/tests/fixtures/outcome_phase_parity.json pins both.
 const TASK_CAUSE_PHRASES = {
     previous_revision_accepted: "The reviewers approved an earlier version of this answer; the current version was not re-reviewed.",
-    author_stop: "Main stopped with unfinished work; no review approval was granted.",
-    review_outcome_received: "Main received the review outcome or recorded limitation.",
-    author_finish: "The answer was delivered on Main's own judgement; the reviewers had not signed it off.",
-    review_degraded: "No reviewer verdict was established for this answer.",
-    infra_failure: "A review infrastructure failure prevented a settled verdict.",
-    dialogue_terminal: "The reviewers and Main could not agree, and both positions were kept.",
-    improvement_capsule: "The reviewers asked for one more pass and Main was given their notes.",
+    admission_close_unconfirmed: "Reviewers approved this answer; the supervisor did not confirm that task admission was closed.",
+    author_stop: "Ouroboros stopped with unfinished work; no review approval was granted.",
+    review_outcome_received: "Ouroboros received the reviewers' outcome and finished on that.",
+    author_finish: "Ouroboros delivered this answer on its own judgement; the reviewers had not signed it off.",
+    review_degraded: "The reviewers did not reach a verdict on this answer.",
+    infra_failure: "The review could not run because of an infrastructure failure, so there is no verdict.",
+    acceptance_preparation_failed: "Ouroboros could not assemble the evidence for this answer's review, so this preparation attempt dispatched no new reviewers; the work itself is kept.",
+    dialogue_terminal: "The reviewers and Ouroboros could not agree, and both positions were kept.",
+    improvement_capsule: "The reviewers asked for one more pass and Ouroboros was given their notes.",
     fence_reopen_failed: "The requested extra pass could not be started, so the answer stands as it was.",
     review_cycles_exhausted: "The task used up its review rounds before the answer was signed off.",
     open_obligations: "The answer was delivered with reviewer requests still open.",
@@ -443,12 +448,26 @@ const TASK_CAUSE_PHRASES = {
     acceptance_bypassed_provider_unavailable: "The model provider was unavailable, so the answer was never reviewed.",
     acceptance_bypassed_context_overflow: "The task outgrew its context before the answer could be reviewed.",
     acceptance_bypassed_children_unabsorbed: "Some sub-tasks had not been folded in, so the answer was never reviewed.",
-    plan_review_advisory: "Plan review never closed; the work continued under advisory enforcement",
+    plan_review_advisory: "The plan review was never closed; the work went on with what the reviewers said.",
+    plan_review_awaiting: "Not every plan reviewer had answered when the task ended.",
+    // The plan review's outcome CLASS at delivery (outcome_axes.execution.plan_review) picks one of these.
+    plan_review_unanswered: "Only some of the plan reviewers answered; the work went on with their notes.",
+    plan_review_none_answered: "None of the plan reviewers answered; the work went on without their notes.",
+    plan_review_answered_open: "The plan reviewers answered, but the review was never closed; the work went on with their notes.",
+    plan_review_quorum_unreachable: "Too few plan reviewers could answer, so the work was held.",
     host_child_status_suffix: "A child task had not settled when the answer was delivered",
-    invalid_delivery_control_after_repair: "The delivery control object was still malformed after repair",
+    invalid_delivery_control_after_repair: "Ouroboros's final delivery instruction could not be read even after repair, so the answer stands as delivered.",
     budget_exhausted: "The task ran out of budget before it could finish cleanly",
-    delivery_control_degraded: "Delivery finished in a degraded control state",
+    // #869: the provider-death rail's terminal words (twin of project_dialogue.TASK_CAUSE_PHRASES).
+    provider_unavailable: "The model provider stopped answering, so the task could not finish",
+    delivery_control_degraded: "Ouroboros's final delivery instruction could not be applied, so the answer stands as delivered.",
+    authoring_handover_incomplete: "The replacement model stopped before resuming tool work.",
     delegated_custody_unreconciled: "Some delegated work was never reconciled.",
+    // The one non-reason-code key: the task-result FIELD terminal_plan_review_open, a standing limitation.
+    terminal_plan_review_open: "The plan review was still open when this answer was delivered",
+    child_results_deferred: "Some sub-task results were deferred instead of being folded into this answer",
+    tool_failure: "A tool this task used failed and nothing recovered it",
+    task_exception: "The task stopped on an internal error",
 };
 
 export function taskReasonPhrase(code) {
@@ -480,54 +499,94 @@ function custodyDebtReason(record) {
     ];
 }
 
-// Transport is recorded fact, never proof that an HTTP caller was the owner.
-const CANCEL_SOURCE_PHRASES = {
-    http_single: 'Stopped from the app (Stop now)',
-    http_cascade: 'Stopped from the app (Stop now)',
-    http_graceful: 'Stopped from the app (Wrap up)',
-};
+// The plan review's outcome class at delivery (outcome_axes.execution.plan_review, a
+// closed vocabulary) picks the owner sentence; a record naming no class keeps the
+// fallback key. Read by presence of a sentence, never by the class word itself.
+function planReviewKey(record, fallback) {
+    const key = `plan_review_${String(record?.outcome_axes?.execution?.plan_review || '')}`;
+    return Object.hasOwn(TASK_CAUSE_PHRASES, key) ? key : fallback;
+}
 
+// The browser twin of project_dialogue._join_cause_clauses: one line, one
+// clause per distinct fact; a clause that is not last drops its own full stop.
+function joinCauseClauses(clauses) {
+    const kept = [];
+    for (const clause of clauses) if (clause && !kept.includes(clause)) kept.push(clause);
+    return kept
+        .map((clause, index) => (index < kept.length - 1 && clause.endsWith('.')
+            ? clause.slice(0, -1) : clause))
+        .join(' · ');
+}
+
+// Standing limitations of the delivered answer, from facts already on the
+// record: deferred children, and a plan review still open at delivery (the
+// result's terminal_plan_review_open flag), worded by its class when one is
+// named. The twin of project_dialogue._terminal_limitations.
+// The open-review classes that state a standing limitation (never the merely awaited case).
+const PLAN_REVIEW_OPEN_CLASSES = new Set(['plan_review_unanswered', 'plan_review_none_answered', 'plan_review_answered_open']);
+
+function terminalLimitations(record, reason, held = false) {
+    const deferred = Number(record?.outcome_axes?.objective?.deferred_count || 0) > 0;
+    const planKey = reason === 'plan_review_advisory' ? reason : 'terminal_plan_review_open';
+    // The class rides the live event and the replayed row where the result-only flag does not;
+    // a HELD task states the hold as its primary cause and never a limitation of work that went on.
+    const open = !held && (record?.terminal_plan_review_open === true
+        || PLAN_REVIEW_OPEN_CLASSES.has(`plan_review_${String(record?.outcome_axes?.execution?.plan_review || '')}`));
+    return [deferred ? taskReasonPhrase('child_results_deferred') : '', open ? taskReasonPhrase(planReviewKey(record, planKey)) : ''];
+}
+
+// Every simultaneous cause the record holds, as ONE line: the primary cause is what
+// ENDED the task; a deferred child, a plan review still open at delivery and an
+// unreconciled custody debt are standing limitations of the SAME answer, stated
+// BESIDE it instead of replacing it or being replaced by it. Nothing ranks or folds;
+// equivalent clauses state themselves once. The twin of project_dialogue._completion_verdict.
 export function taskReasonDetail(evt) {
-    // An owner-requested stop is a success and carries its own marker instead.
-    if (taskStoppedWithSummary(evt)) return '';
-    // A warning caused by REVIEW must not be explained by the execution reason
-    // that happens to sit beside it: the host's acceptance decision is the
-    // cause, and it speaks in its own stored words. A hard failure or a
-    // cancellation keeps explaining itself by its execution reason.
     const record = normalizeTaskTerminalRecord(evt);
     const decision = record.outcome_axes?.review?.acceptance_decision
         ?? record.review_status?.acceptance_decision;
     const severity = taskOutcomeSeverity(evt);
     const decisionCause = String(decision?.reason || '');
-    if (severity !== 'error' && severity !== 'cancelled' && decision?.status
-        && (decision.status !== 'accepted' || Object.hasOwn(TASK_CAUSE_PHRASES, decisionCause))) {
-        // The decision's own typed reason speaks (an accepted decision only when
-        // it has a sentence); the stored reviewer rationale stays in the card
-        // body, the task result and Logs.
-        return taskReasonPhrase(decisionCause);
-    }
-    const origin = record.cancel_origin;
-    if (severity === 'cancelled' && origin && typeof origin === 'object' && !Array.isArray(origin)) {
-        const source = String(origin.source || '');
-        const actor = origin.request_origin?.kind === 'agent_task' ? origin.request_origin.task_id : '';
-        return [
-            Object.hasOwn(CANCEL_SOURCE_PHRASES, source) ? CANCEL_SOURCE_PHRASES[source] : source,
-            origin.scope === 'cascade' ? 'this task and its sub-tasks' : '',
-            `initiator: ${String(actor || origin.requested_by || '') || 'not recorded'}`,
-        ].filter(Boolean).join(' · ');
-    }
-    if (!evt?.reason_code || evt.reason_code === 'final_message') return '';
+    const objective = record.outcome_axes?.objective;
     // A healed debt is never restored: naming it again would state a debt the
-    // same record shows as empty. The current execution reason speaks when
-    // there is one, otherwise the row states no cause and leaves the headline
-    // to the frozen outcome axis that owns it.
+    // same record shows as empty. Resolved once for every branch.
     const [reason, custody] = custodyDebtReason(record);
-    if (!reason) return taskReasonPhrase(custody);
-    const receiptVeto = record.outcome_axes?.objective?.receipt_veto;
-    const cause = receiptVeto?.reason === reason && receiptVeto.detail
-        ? String(receiptVeto.detail).split(/\s+/).filter(Boolean).join(' ')
-        : taskReasonPhrase(reason);
-    return `${cause}${custody ? ` (${taskReasonPhrase(custody)})` : ''}`;
+    const origin = record.cancel_origin;
+    const held = severity === 'error' && String(objective?.source || '').startsWith('plan_review_');
+    let clause;
+    if (taskStoppedWithSummary(evt)) {
+        // An owner-requested stop is a success and carries its own marker instead.
+        clause = '';
+    } else if (severity !== 'error' && severity !== 'cancelled' && decision?.status
+        && (decision.status !== 'accepted' || Object.hasOwn(TASK_CAUSE_PHRASES, decisionCause))) {
+        // A warning caused by REVIEW is explained by the host's acceptance decision, in its
+        // own typed reason (an accepted decision only when it has a sentence); the stored
+        // reviewer rationale stays in the card body, the task result and Logs.
+        clause = taskReasonPhrase(decisionCause);
+    } else if (severity === "cancelled" && origin && typeof origin === "object"
+        && !Array.isArray(origin) && Object.keys(origin).length) {
+        clause = joinCauseClauses(cancelCauseClauses(origin, record));
+    } else if (held) {
+        // A task HELD by a blocking plan review states the objective's own reason, so it
+        // never reads as work that went on.
+        clause = taskReasonPhrase(String(objective.reason || ''));
+    } else if (!evt?.reason_code || evt.reason_code === 'final_message') {
+        // A clean finish over a plan review that was only awaited states that fact; an amber
+        // or red card owes its colour to something else, so the fact never sits in its cause slot.
+        clause = severity === 'done' && record.outcome_axes?.execution?.plan_review === 'awaiting'
+            ? taskReasonPhrase('plan_review_awaiting') : '';
+    } else {
+        // The current execution reason speaks when there is one (the open plan review by its
+        // class), otherwise the row states no cause and leaves the headline to its own axis.
+        const receiptVeto = objective?.receipt_veto;
+        clause = !reason ? '' : receiptVeto?.reason === reason && receiptVeto.detail
+            ? String(receiptVeto.detail).split(/\s+/).filter(Boolean).join(' ')
+            : taskReasonPhrase(reason === 'plan_review_advisory' ? planReviewKey(record, reason) : reason);
+    }
+    const line = joinCauseClauses([clause, ...acceptanceIncidentClauses(decision, reason, TASK_CAUSE_PHRASES),
+        ...terminalLimitations(record, reason, held), custody ? taskReasonPhrase(custody) : '']);
+    // Cancellation's host/browser sentence has identical punctuation. Other
+    // cause policy stays with the runtime owner of this shared seam.
+    return severity === 'cancelled' && line && !/[.!?…)\u2026]$/.test(line) ? `${line}.` : line;
 }
 
 // S3 (HQ1): the ONE shared projection of a typed owner_hurry event for the
@@ -616,6 +675,8 @@ export function taskTerminalPhase(evt) {
 const TERMINAL_TASK_DETAIL_STATUSES = new Set([
     'completed', 'failed', 'cancelled', 'rejected_duplicate',
 ]);
+// Statuses that make the OUTCOME known, whether or not the card may close yet.
+const OBSERVED_OUTCOME_STATUSES = new Set([...TERMINAL_TASK_DETAIL_STATUSES, 'done', 'cancel_requested']);
 const OPEN_POST_TASK_SYNTHESIS_STATUSES = new Set(['pending_once', 'running']);
 
 export function isTerminalTaskDetail(record) {
@@ -932,9 +993,16 @@ export function summarizeLogEvent(evt) {
         });
     }
 
-    if (t === 'worker_spawn_start') {
-        return view('start', `Spawning ${evt.count || '?'} workers`, { meta: [evt.start_method || ''] });
-    }
+    // One row per worker-lifecycle frame, naming the fields it carries: the two
+    // readiness frames fell through to the unknown-name remainder and rendered as a
+    // bare event name with no fields, so a stalled spawn wave was unreadable (#1073).
+    if (t === 'worker_spawn_start') return view('start', `Spawning ${evt.count || '?'} workers`, { meta: [evt.start_method || ''] });
+    if (t === 'worker_starting') return view('start', 'Worker starting', { meta: [
+        evt.worker_id != null ? `worker ${evt.worker_id}` : '', evt.pid ? `pid ${evt.pid}` : '', evt.phase ? `phase ${evt.phase}` : ''] });
+    if (t === 'worker_ready_window_extended') return view('warn', 'Worker readiness window extended', { meta: [
+        Array.isArray(evt.worker_ids) && evt.worker_ids.length ? `workers ${evt.worker_ids.join(', ')}` : '',
+        evt.attempt != null ? `attempt ${evt.attempt}` : '', evt.window_sec != null ? `window ${evt.window_sec}s` : '',
+        evt.ceiling_sec != null ? `ceiling ${evt.ceiling_sec}s` : ''] });
 
     if (t === 'worker_sha_verify') {
         return view(evt.ok ? 'ok' : 'warn', evt.ok ? 'Worker SHA verified' : 'Worker SHA mismatch', {
@@ -946,11 +1014,8 @@ export function summarizeLogEvent(evt) {
         });
     }
 
-    if (t === 'worker_boot') {
-        return view('boot', 'Worker booted', {
-            meta: [evt.pid ? `pid ${evt.pid}` : '', evt.git_sha ? String(evt.git_sha).slice(0, 8) : ''],
-        });
-    }
+    if (t === 'worker_boot') return view('boot', 'Worker booted', {
+        meta: [evt.pid ? `pid ${evt.pid}` : '', evt.git_sha ? String(evt.git_sha).slice(0, 8) : ''] });
 
     if (t === 'deps_sync_ok') {
         return view('ok', 'Dependencies in sync', { meta: [evt.reason || '', shortText(evt.source, 60)] });
@@ -966,23 +1031,12 @@ export function summarizeLogEvent(evt) {
         });
     }
 
-    if (t === 'task_checkpoint') {
-        if (evt.checkpoint_kind === 'context_fit_low_retry') {
-            return view('warn', 'Context rebuilt in Low mode', {
-                meta: taskMeta(
-                    evt.model ? compactModel(evt.model) : '',
-                    evt.round ? `r${evt.round}` : '',
-                    'same-model retry',
-                ),
-            });
-        }
-        const cpNum = evt.checkpoint_number || Math.floor((evt.round || 0) / 15);
-        return view('thinking', `Checkpoint ${cpNum}`, {
-            meta: taskMeta(
-                evt.round ? `r${evt.round}` : '',
-                evt.context_tokens ? `~${evt.context_tokens} tok` : '',
-                formatLogMoney(evt.task_cost),
-            ),
+    if (t === 'task_checkpoint' || t === 'context_reclaim') {
+        const lowRetry = evt.checkpoint_kind === 'context_fit_low_retry';
+        return view(lowRetry ? 'warn' : 'thinking', taskCheckpointLabel(evt), {
+            meta: taskMeta(evt.model ? compactModel(evt.model) : '', evt.round ? `r${evt.round}` : '',
+                lowRetry ? 'same-model retry' : '', evt.context_tokens ? `~${evt.context_tokens} tok` : '',
+                formatLogMoney(evt.task_cost)),
         });
     }
 
@@ -1055,16 +1109,7 @@ function chatView({
     receipt = false,
     toolCall = null,
 } = {}) {
-    const out = {
-        phase,
-        headline,
-        body,
-        visible,
-        promote,
-        terminal,
-        human,
-        dedupeKey,
-    };
+    const out = { phase, headline, body, visible, promote, terminal, human, dedupeKey };
     // A receipt row renders inside a block but is not content the block can
     // stand on: the fact it reports lives elsewhere (the owner message's
     // routing annotation for an addressing call).
@@ -1094,15 +1139,30 @@ export function taskTerminalSummary(evt = {}) {
         && (evt.outcome_final === true || evt.system_type === 'task_summary'
             || taskDoneIsTerminal(evt));
     const outcome = taskTerminalPhase(evt);
-    const presentation = taskPresentation(terminal || outcome === 'error' ? outcome : 'working');
+    // Terminality and outcome knowledge are two facts (#1110): the lifecycle status
+    // can settle while post-task finalization still runs. Painting the whole frame
+    // 'error' put Failed where only a terminal frame may, so the title carried it.
+    // The stamp (`task_terminal_status`/`status`) is the producer's word; a row
+    // that carries only the canonical axes still knows its lifecycle, so a
+    // settled `outcome_axes.lifecycle.status` counts too (as taskOutcomeSeverity
+    // already reads it) — an unstamped finalizing replay of a Failed root must
+    // not hide the Failed behind "Finalizing…".
+    const record = normalizeTaskTerminalRecord(evt);
+    const knownStatus = String(record?.status || record?.outcome_axes?.lifecycle?.status || '').toLowerCase();
+    const observedOutcome = OBSERVED_OUTCOME_STATUSES.has(knownStatus) ? outcome : '';
+    const presentation = taskPresentation(terminal ? outcome : 'working');
     const body = [taskStoppedWithSummary(evt) ? OWNER_STOP_DETAIL_MARKER : '', taskReasonDetail(evt)]
         .filter(Boolean).join('\n');
+    const cause = terminal ? taskReasonDetail(evt) : '';
     return {
         ...chatView({
             phase: presentation.phase, headline: presentation.headline, body,
             visible: true, promote: true, terminal,
             dedupeKey: `task_done|${evt.task_id || ''}`,
+            // A task that ends with a cause states it on the collapsed line (DESIGN, activity block).
+            ...(cause ? { activityPreview: cause } : {}),
         }),
+        ...(observedOutcome ? { observedOutcome } : {}),
         ...(evt.model_execution && typeof evt.model_execution === 'object'
             ? { modelExecution: evt.model_execution } : {}),
         ...(Number.isInteger(evt.tool_calls) ? { toolCalls: evt.tool_calls } : {}),
@@ -1192,7 +1252,11 @@ function summarizeChatLiveEventView(evt) {
         const errorText = describeText(evt.error || '', 220);
         const cancelDetail = evt.cancel_origin && (rawEvent === 'cancelled'
             || (rawEvent === 'completed' && taskOutcomeSeverity(evt) === 'cancelled'))
-            ? taskReasonDetail({ status: 'cancelled', cancel_origin: evt.cancel_origin }) : '';
+            // The child's OWN lineage rides along, so the cancel clause can prove the
+            // parent relation instead of naming the swept root as an initiator (#1061).
+            ? taskReasonDetail({ status: 'cancelled', cancel_origin: evt.cancel_origin,
+                task_id: evt.subagent_task_id || evt.task_id,
+                parent_task_id: evt.parent_task_id, root_task_id: evt.root_task_id }) : '';
         const reasonDetail = cancelDetail || (evt.reason_code ? taskReasonPhrase(evt.reason_code) : '');
         const detailParts = [
             progressText.full,
@@ -1343,23 +1407,15 @@ function summarizeChatLiveEventView(evt) {
         });
     }
 
-    if (t === 'task_checkpoint') {
-        if (evt.checkpoint_kind === 'context_fit_low_retry') {
-            return chatView({
-                phase: 'warn',
-                headline: 'Context rebuilt in Low mode — retrying the same model once',
-                visible: true,
-                dedupeKey: key(evt.checkpoint_kind, evt.round || ''),
-            });
-        }
-        // Not visible in chat live card — the emit_progress message is the visible source
-        // for the chat timeline (avoids duplicate timeline entries). This event remains
-        // visible in the Logs tab via summarizeLogEvent.
-        const cpNum = evt.checkpoint_number || Math.floor((evt.round || 0) / 15);
+    if (t === 'task_checkpoint' || t === 'context_reclaim') {
+        // Visible in the expanded timeline, with no narration/title promotion.
+        const lowRetry = evt.checkpoint_kind === 'context_fit_low_retry';
         return chatView({
-            phase: 'thinking',
-            headline: `Checkpoint ${cpNum} — periodic self-check`,
-            dedupeKey: key(cpNum),
+            phase: lowRetry ? 'warn' : 'thinking',
+            headline: lowRetry ? 'Context rebuilt in Low mode — retrying the same model once'
+                : taskCheckpointLabel(evt),
+            visible: !checkpointHasProgressRow(evt),
+            dedupeKey: key(evt.checkpoint_kind || '', evt.checkpoint_number || evt.round || ''),
         });
     }
 

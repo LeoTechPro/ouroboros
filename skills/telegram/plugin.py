@@ -1067,7 +1067,7 @@ def _make_outbound(api):
                 labels = [label for label in labels if label][:8]
                 if not labels:
                     return
-                lines = ["I couldn't pick a destination for your last message. Options:"]
+                lines = ["Choose a target for the last message:"]
                 lines.extend(f"{index}. {label}" for index, label in enumerate(labels, 1))
                 if len(raw_options) > len(labels):
                     lines.append(f"…and {len(raw_options) - len(labels)} more in the web chat.")
@@ -1434,9 +1434,11 @@ def register(api):
                          "placeholder": "on"},
                         {"name": "TELEGRAM_NOTIFY_TASKS", "label": "Notify on task completion", "type": "select",
                          "options": [
-                             {"value": "off", "label": "Off"},
+                             {"value": "off", "label": "Off — non-clean finishes only"},
                              {"value": "on", "label": "On — ✅ Task done · cost · rounds"},
                          ],
+                         "help": "A task that ends with warnings, fails or is cancelled always sends one short "
+                                 "line, because Telegram has no task card. On adds the clean finishes.",
                          "placeholder": "off"},
                         {"name": "TELEGRAM_NOTIFY_BUDGET", "label": "Notify on budget thresholds", "type": "select",
                          "options": [

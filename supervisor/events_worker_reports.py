@@ -104,6 +104,49 @@ def _handle_task_dispatch_resolved(evt: Dict[str, Any], ctx: Any) -> None:
     ctx.persist_queue_snapshot(reason="dispatch_resolved")
 
 
+def _handle_task_focus_updated(evt: Dict[str, Any], ctx: Any) -> None:
+    """Project a root-authored focus into the existing RUNNING snapshot."""
+    from ouroboros.focus import compact_focus
+    from supervisor.queue import _queue_lock
+
+    task_id = str(evt.get("task_id") or "").strip()
+    focus = compact_focus(evt.get("focus"))
+    if not task_id or focus is None or str(focus.get("author_task_id") or "") != task_id:
+        return
+    changed = False
+    with _queue_lock:
+        meta = ctx.RUNNING.get(task_id)
+        task = meta.get("task") if isinstance(meta, dict) else None
+        if not isinstance(task, dict):
+            return
+        if str(task.get("parent_task_id") or "").strip() or str(task.get("delegation_role") or "") == "subagent":
+            return
+        # The event is advisory transport.  The canonical result remains the
+        # lifecycle authority, so a focus queued just before completion cannot
+        # resurrect a terminal task in the queue projection.
+        drive_root = meta.get("budget_drive_root") if isinstance(meta, dict) else None
+        drive_root = drive_root or task.get("budget_drive_root") or getattr(ctx, "DRIVE_ROOT", None)
+        if drive_root:
+            try:
+                from ouroboros.task_results import STATUS_RUNNING, load_task_result
+
+                durable = load_task_result(drive_root, task_id)
+                if not isinstance(durable, dict) or str(durable.get("status") or "") != STATUS_RUNNING:
+                    return
+                durable_focus = compact_focus(durable.get("focus"))
+                if durable_focus != focus:
+                    return
+            except Exception:
+                return
+        prior_task = compact_focus(task.get("focus"))
+        if prior_task and str(prior_task.get("authored_at") or "") >= str(focus.get("authored_at") or ""):
+            return
+        task["focus"] = focus
+        changed = True
+    if changed:
+        ctx.persist_queue_snapshot(reason="task_focus_updated")
+
+
 def _handle_task_metrics(evt: Dict[str, Any], ctx: Any) -> None:
     payload = {
         "ts": str(evt.get("ts") or utc_now_iso()),
@@ -175,10 +218,14 @@ def _handle_skill_lifecycle(evt: Dict[str, Any], ctx: Any) -> None:
 
 
 def _handle_acceptance_fence(evt: Dict[str, Any], ctx: Any) -> None:
-    """Apply a worker's acceptance fence under the supervisor queue lock, then ack."""
-    token = str(evt.get("token") or "").strip().lower()
-    if not token or len(token) > 64 or any(ch not in "0123456789abcdef" for ch in token):
-        log.warning("Rejected malformed acceptance-fence token")
+    """Apply a worker's acceptance fence under the supervisor queue lock, then ack.
+
+    The ack belongs to ONE request: ``<token>.<req>.json``. begin/inspect/end share
+    the fence token, so a late answer must never be readable as another request's.
+    """
+    token, req = (str(evt.get(key) or "").strip().lower() for key in ("token", "req"))
+    if any(not part or len(part) > 64 or any(ch not in "0123456789abcdef" for ch in part) for part in (token, req)):
+        log.warning("Rejected malformed acceptance-fence token or request id")
         return
     try:
         from supervisor.queue import transition_acceptance_fence
@@ -198,7 +245,7 @@ def _handle_acceptance_fence(evt: Dict[str, Any], ctx: Any) -> None:
         log.warning("Acceptance-fence transition failed", exc_info=True)
         result = {"ok": False, "status": "error", "error": f"{type(exc).__name__}: {exc}"}
     ack_dir = pathlib.Path(ctx.DRIVE_ROOT) / "state" / "acceptance_fence_acks"
-    ack_path = ack_dir / f"{token}.json"
+    ack_path = ack_dir / f"{token}.{req}.json"
     try:
         now = time.time()
         prior = sorted(ack_dir.glob("*.json"), key=lambda path: path.stat().st_mtime, reverse=True)

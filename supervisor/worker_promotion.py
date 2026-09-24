@@ -147,8 +147,12 @@ def _canonical_promoted_repair_constraint(value: Any) -> tuple[Optional[dict], s
     }, ""
 
 
-def _promote_duplicate_reason(task_id: str, ctx: Any) -> str:
-    """Fail closed if a promoted id is already live, durable, or uncheckable."""
+def _promote_duplicate_reason(task_id: str, ctx: Any, *, admission_token: str) -> str:
+    """Fail closed if a promoted id is already live, durable, or uncheckable.
+
+    A row that is only THIS admission's emitted stub (#1160) is its own
+    pre-receipt, not a second owner of the id, so it is read around here.
+    """
     pending = getattr(ctx, "PENDING", _pool().PENDING)
     running = getattr(ctx, "RUNNING", _pool().RUNNING)
     with _queue_lock:
@@ -157,12 +161,14 @@ def _promote_duplicate_reason(task_id: str, ctx: Any) -> str:
             for row in list(pending or [])
         ) or task_id in (running or {})
     try:
+        from ouroboros.routing_wait import is_own_admission_stub
         from ouroboros.task_results import load_task_result
 
-        stored_duplicate = bool(
-            load_task_result(
-                getattr(ctx, "DRIVE_ROOT", _pool().DRIVE_ROOT), task_id, strict=True,
-            )
+        stored = load_task_result(
+            getattr(ctx, "DRIVE_ROOT", _pool().DRIVE_ROOT), task_id, strict=True,
+        )
+        stored_duplicate = bool(stored) and not is_own_admission_stub(
+            stored, admission_token,
         )
     except Exception:
         log.warning("promote: duplicate-id lookup failed for %s", task_id, exc_info=True)
@@ -405,7 +411,7 @@ def promote_chat_to_task(evt: dict, ctx: Any) -> dict:
         return {"status": "needs_manual_target", "reason": "empty_objective", "task_id": tid}
     # Reject before project/source/workspace side effects. enqueue_task repeats
     # the check atomically for the tiny race before queue insertion.
-    duplicate_reason = _promote_duplicate_reason(tid, ctx)
+    duplicate_reason = _promote_duplicate_reason(tid, ctx, admission_token=admission_token)
     if duplicate_reason:
         return {
             "status": "needs_manual_target",
@@ -510,6 +516,10 @@ def promote_chat_to_task(evt: dict, ctx: Any) -> dict:
         task["origin_message_ref"] = dict(evt["source_ref"])
         if isinstance(evt.get("source_text"), str) and evt.get("source_text"):
             task["origin_message_text"] = evt["source_text"]
+    elif evt.get("origin_suppressed") is True:
+        # The door's other stamp (an owner message it never logged) rides the root
+        # in METADATA, where run_origin reads it, the way a ref rides by value.
+        task.setdefault("metadata", {})["origin_suppressed"] = True
     if isinstance(evt.get("predecessor_authority_source"), dict):
         task["predecessor_authority_source"] = dict(evt["predecessor_authority_source"])
     # Owner Surface Fact: the promoting turn's sending-surface fact lands in
@@ -744,6 +754,18 @@ def _admit_promoted_workspace(evt: dict, ctx: Any, task: dict, *, pid: str, tid:
         task["workspace_root"] = resolved_ws
         task["workspace_mode"] = "external"
         task["memory_mode"] = "forked"
+        if pid and str(evt.get("workspace_root") or "").strip():
+            # An explicit folder for a room that has none yet becomes the room's
+            # folder: the same validated canonical path this task runs in, written
+            # only while `working_dir` is still empty (compare-and-set under the
+            # registry lock), so a set value is never overwritten and the room's
+            # later direct turns are not blind to where the work went.
+            try:
+                from ouroboros.projects_registry import update_project
+
+                update_project(_pool().DRIVE_ROOT, pid, working_dir=resolved_ws, only_if_empty=("working_dir",))
+            except Exception:
+                log.warning("promote: could not record working_dir for project %s", pid, exc_info=True)
         # The lease lane keys off task["project_id"]: for a project room it is already
         # set; for a bare workspace promote, resolve it (registry-first → derived hash)
         # so one folder is one serialized lane on EVERY entry path (slice 0 invariant).

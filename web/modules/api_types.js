@@ -1,6 +1,16 @@
 /** Dependency-free JSDoc mirror of `ouroboros.gateway.contracts`. */
 
 /**
+ * @typedef {Object} CostPresentation
+ * @property {'own'|'root_tree'} scope
+ * @property {?number} tracked_amount
+ * @property {boolean} has_unpriced
+ * @property {boolean} tracked_final
+ * @property {boolean} accounting_open
+ * @property {boolean} has_rows
+ */
+
+/**
  * @typedef {Object} StateResponse
  * @property {number} uptime
  * @property {number} workers_alive
@@ -37,8 +47,7 @@
 
 /**
  * Background Consciousness alarm-clock snapshot (server._describe_bg_consciousness_state over
- * consciousness.status_snapshot). A wake-up is an ordinary Main turn; its liveness is the
- * direct-activity census, never a flag here.
+ * consciousness.status_snapshot). A wake-up is an ordinary Main turn; its liveness is the direct-activity census, never a flag here.
  * @typedef {Object} BgConsciousnessState
  * @property {boolean} enabled
  * @property {string} status  // disabled | stopped | thinking | sleeping | waiting_for_first_conversation | allowance_exhausted | allowance_unknown | wake_rejected | wake_failed
@@ -76,6 +85,7 @@
 /**
  * @typedef {Object} ActiveChatActivity
  * @property {Object=} required_question  // read-only pointer to the current required Project quiz
+ * @property {boolean=} required_question_unavailable  // a recorded owner-question wait whose detail could not be read: possibly blocked, never "no question"
  * @property {Object.<string,Object>=} model_waits
  * @property {number=} task_attempt
  * @property {string} activity_id
@@ -83,7 +93,7 @@
  * @property {string} project_id
  * @property {string} client_message_id  // empty for managed queue rows
  * @property {string} kind  // direct_chat | managed_task — presentational label; membership in this census, not kind, decides liveness
- * @property {string} phase  // managed rows: queued | working | finalizing
+ * @property {string} phase  // managed rows: queued | budget_pausing | budget_paused | working | finalizing; direct rows: thinking or unknown; budget-paused direct turns retain their ID/kind and use the managed phases after parking
  * @property {number} started_at
  */
 
@@ -131,7 +141,7 @@
 /**
  * @typedef {Object} AvailableSubagentItem
  * @property {string} subagent_id
- * @property {string} name
+ * @property {boolean=} enabled - Omitted means true; false withdraws new selections.
  * @property {string} recommended_use
  * @property {AvailableSubagentRoute} route
  * @property {string=} effort
@@ -402,6 +412,11 @@
  *   v6.87.48: the count of OPEN ledger rows — the disclosed cause of `cost_final: false`,
  *   which can hold with every dollar bucket at zero (an estimated $0.00, or a dispatched
  *   row whose reservation is exactly zero).
+ * @property {?CostPresentation=} cost_presentation
+ *   #498: the facts that EXPLAIN the amount beside it, bound to the scope whose ledger
+ *   rows produced them (`own` or `root_tree`). `tracked_amount` is null unless a priced
+ *   or bounded row actually evidenced it, so an empty ledger and an all-unpriced one
+ *   never read as a measured zero. Null when the ledger could not be read.
  * @property {?boolean=} ledger_integrity_degraded
  *   C12: the ledger's INTEGRITY marker, produced by the cost authority all along but
  *   named in no carry list — an amount computed over a degraded ledger used to reach the
@@ -430,7 +445,14 @@
  *   transport/parse hole, never "zero findings". panels[].late_settlement
  *   ({note, reviewed_revision: "earlier"|"delivered", settled_after_terminal})
  *   is the host-composed sentence of a panel that settled after its task ended;
- *   the Reviews group prints the note verbatim.
+ *   the Reviews group prints the note verbatim. `acceptance_incident`
+ *   ({incident_id, status: "failed"|"resolved", stage, attempts, source_known,
+ *   feedback_delivered, failure_kind?, failure_detail?, retry?, prior_incidents?})
+ *   is the host's own LOCAL acceptance-preparation failure — published even when
+ *   there is no panel at all, keyed by its stable incident id, with the REAL host
+ *   attempt count; absent when no preparation ever failed. The Reviews group is
+ *   its only carrier (no card row, no toast); a `resolved` status clears the
+ *   active warning and keeps the row as history.
  * @property {boolean=} worker_saturation_warning
  * @property {string=} source
  * @property {string=} sender_label
@@ -443,11 +465,11 @@
  *   timeline item of the task's card, "reviews" = the card's Reviews group
  *   carries the fact (the row is still attached to the card); absent = an
  *   ordinary row.
- * @property {string=} card_row_id
- *   The row's stable identity across live delivery, outbox replay and history.
+ * @property {string=} card_row_id  // the row's stable identity across live delivery, outbox replay and history
  * @property {string=} target_label
  * @property {string=} project_id
  * @property {string=} project_name
+ * @property {string=} handoff_id  // immutable origin/destination receipt identity
  * @property {string=} completion_answer  // a Project root's model-authored final answer, mirrored into Main
  * @property {number=} chat_id
  * @property {boolean=} project_thread  // server-stamped: chat_id is a reserved Project thread; Main never adopts it even before projectChatIds learns the project
@@ -1252,18 +1274,35 @@
  */
 
 /**
+ * Mirrors `gateway/schedule_contracts.py`, which states what each field means.
  * @typedef {Object} ScheduledTasksResponse
  * @property {number} schema_version
- * @property {Object[]} tasks
+ * @property {Object[]} tasks  // each row carries status/retained/restorable
  */
 
 /**
  * @typedef {Object} ScheduleUpsertResponse
- * @property {boolean} ok
+ * @property {boolean} ok  // follows schedule.audit: an incomplete audit is not ok
  * @property {Object} schedule
  */
 
 /**
+ * @typedef {Object} ScheduleActionResponse
+ * @property {boolean} ok  // the requested state was ACHIEVED and both audit records landed (restored_not_ready: changed, not ok)
+ * @property {boolean} changed  // the durable fact, whatever the audit did
+ * @property {string} status
+ * @property {string} schedule_id
+ * @property {string=} operation_id
+ * @property {?boolean=} running_or_queued  // already admitted; null = unknown
+ * @property {('recorded'|'incomplete'|'not_written')} audit
+ * @property {string=} detail
+ * @property {Object=} schedule
+ * @property {string[]=} allowed
+ */
+
+/**
+ * Legacy name for the DELETE response: the subset every previous caller read of
+ * what that endpoint now answers as a ScheduleActionResponse.
  * @typedef {Object} ScheduleDeleteResponse
  * @property {boolean} ok
  */
@@ -1477,7 +1516,7 @@ export const MAX_QUIZ_OPTIONS = 6;
 // REFUSES a longer comment (it is delivered verbatim, never truncated), so
 // the card must not offer to send one.
 export const MAX_DECISION_COMMENT = 2000;
-export const GATEWAY_CONTRACT_VERSION = '7.4.0';
+export const GATEWAY_CONTRACT_VERSION = '7.4.11';
 
 /**
  * @typedef {Object} ChatHistoryPosition

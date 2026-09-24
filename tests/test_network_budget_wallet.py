@@ -131,6 +131,37 @@ def test_local_soft_landing_keeps_the_same_local_affordability_contract(tmp_path
         assert loop._soft_land_exhausted_ceiling(ctx, ceiling)[0] == "local final"
 
 
+def test_forced_prompt_facts_are_priced_before_the_wrap_up_is_admitted(tmp_path, monkeypatch):
+    """The typed facts block is added INSIDE ``_prepare_forced_prompt``, so the tokens
+    it adds go through the existing wrap-up reservation probe, never around it."""
+    from types import SimpleNamespace
+    from ouroboros import loop
+    from tests.test_tree_cost_ceiling import _ctx
+
+    decision = {"required": True, "status": "advisory_open", "allow": True, "closed": False,
+                "outcome": "DEGRADED", "enforcement": "advisory", "reviewer_slots_degraded": True}
+    ctx = _ctx(active_use_local=True, drive_root=tmp_path, drive_logs=tmp_path / "logs",
+               llm=SimpleNamespace(), llm_trace={"force_plan_decision": decision})
+    priced = []
+    monkeypatch.setattr(task_pacing, "prepared_wrapup_candidate",
+                        lambda _ctx, messages, **_k: (priced.append(messages), (_request(1.5, "local"), messages))[1])
+    monkeypatch.setattr(loop, "_forced_final_answer", lambda *_a, **_k: ("local final", {}, {}))
+    ceiling = task_pacing.resolve_cost_ceiling(10.0, {"cost_hard_stop_pct": 50}, root_cap_usd=0.5)
+    scope = accounting.UsageScope(drive_root=tmp_path, task_id="local-soft", root_task_id="local-soft", global_limit_usd=0.0)
+    with accounting.usage_scope(scope):
+        assert loop._soft_land_exhausted_ceiling(ctx, ceiling)[0] == "local final"
+    (messages,) = priced
+    last = next(m for m in reversed(messages) if m["role"] == "user")
+    assert "[TASK_STATE_FACTS]" in str(last["content"]) and "plan_review_open=true" in str(last["content"])
+    assert "[BUDGET LIMIT]" in str(last["content"])
+    # Nothing to state, nothing priced: a closed gate adds no block to the probe.
+    priced.clear()
+    ctx.llm_trace = {"force_plan_decision": {**decision, "status": "closed", "closed": True}}
+    with accounting.usage_scope(scope):
+        loop._soft_land_exhausted_ceiling(ctx, ceiling)
+    assert "[TASK_STATE_FACTS]" not in str(next(m for m in reversed(priced[0]) if m["role"] == "user")["content"])
+
+
 @pytest.mark.parametrize("root_cap", [None, 50.0])
 def test_live_wallet_triggers_the_existing_final_call_path_without_a_root_cap(tmp_path, monkeypatch, root_cap):
     from types import SimpleNamespace

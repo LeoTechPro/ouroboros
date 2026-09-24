@@ -93,6 +93,7 @@ _CODE_RE = re.compile(r"^[A-Z][A-Z0-9_]*$")
 _INTERPOLATED_IDENTIFIERS = (
     "APPLY_PATCH_BLOCKED",   # tools/edit_ops.py::apply_patch error_tag
     "EDIT_BATCH_BLOCKED",    # tools/edit_ops.py::edit_batch error_tag
+    "PREFLIGHT_UNAVAILABLE", # commit_admission.py::format_release_metadata_preflight code
     "READ_FILE_BLOCKED",     # tools/core_file_tools.py::_local_readonly_resource_block action
     "SCRIPT_CWD_BLOCKED",    # tools/tool_resolution.py::_binding_error_text prefixes
     "SEARCH_BLOCKED",        # tools/core.py search_code, same action argument

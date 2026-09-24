@@ -1,7 +1,54 @@
+import { accountRows, claudexorStatus, READ_OK } from './claudexor_status_store.js';
 import { apiFetch } from './api_client.js';
 import { setInlineStatus } from './ui_helpers.js';
 export const MODEL_CATALOG_TIMEOUT_MS = 25000;
 let catalogRefreshSeq = 0;
+const buttonRefreshes = new WeakMap();
+
+// Account login/status is the authority for subscription model discovery. Keep
+// one small signature of the confirmed account facts so a newly settled login
+// (or a changed account) can refresh the existing catalog without polling or
+// replacing the owner's in-memory model draft.
+export function accountCatalogRefreshKey(view) {
+    if (view?.reads?.accounts !== READ_OK) return null;
+    return JSON.stringify(accountRows(view.snapshot || {}).map((row) => ({
+        harness: row.harness,
+        profile_id: row.profile_id,
+        display_name: row.display_name,
+        enabled: row.enabled,
+        identity: {
+            email: row.identity?.email || '',
+            plan: row.identity?.plan || '',
+        },
+        verification: row.status?.verification || '',
+        availability: row.status?.availability || '',
+    })));
+}
+
+/** Own the Accounts subscription beside catalog refresh; never reload Settings. */
+export function watchAccountModelCatalog() {
+    let ready = false;
+    let lastKey = null;
+    const dispose = claudexorStatus.subscribe((view) => {
+        const next = accountCatalogRefreshKey(view);
+        if (!ready || next === null) {
+            // An unread/failed facet resets confirmation, so reconnect refreshes
+            // even unchanged accounts; an identical settled poll stays quiet.
+            lastKey = next;
+            return;
+        }
+        if (next === lastKey) return;
+        lastKey = next;
+        void refreshModelCatalog();
+    });
+    return {
+        arm() {
+            lastKey = accountCatalogRefreshKey(claudexorStatus);
+            ready = true;
+        },
+        dispose,
+    };
+}
 
 /**
  * Read provenance belongs to discovery, never to the owner's saved assignment.
@@ -148,6 +195,7 @@ export async function refreshModelCatalog({ button } = {}) {
     const statusEl = document.getElementById('settings-model-catalog-status');
     setCatalogStatus(statusEl, 'Refreshing model catalog...', 'muted');
     if (button) {
+        buttonRefreshes.set(button, refreshSeq);
         button.disabled = true;
         button.setAttribute('aria-busy', 'true');
     }
@@ -195,7 +243,9 @@ export async function refreshModelCatalog({ button } = {}) {
         return { items: [], errors: [{ provider_id: 'catalog', error: String(message) }] };
     } finally {
         clearTimeout(timeoutId);
-        if (button && refreshSeq === catalogRefreshSeq) {
+        // Global freshness governs data, not a particular button's busy lease.
+        if (button && buttonRefreshes.get(button) === refreshSeq) {
+            buttonRefreshes.delete(button);
             button.disabled = false;
             button.removeAttribute('aria-busy');
         }

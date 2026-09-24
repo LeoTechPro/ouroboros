@@ -126,6 +126,9 @@ def test_block_count_is_zero_when_nomination_retention_is_refused(tmp_path, fit,
 
     class Nominating:
         def chat(self, **kwargs):
+            if kwargs["messages"][0]["content"].startswith("Compare this draft memory"):
+                return {"content": "Episode, checked against its source.\nKNOWLEDGE_ENTRIES_JSON: " + json.dumps(
+                    [{"topic": "people/alex", "content": "A durable understanding."}])}, {"cost": 0.01}
             return {"content": "Episode.\nKNOWLEDGE_ENTRIES_JSON: " + json.dumps(
                 [{"topic": "people/alex", "content": "A durable understanding."}])}, {"cost": 0.01}
 
@@ -175,8 +178,14 @@ class _Nominating:
         self.topic, self.count = topic, 0
 
     def chat(self, **kwargs):
-        if kwargs["messages"][0]["content"].startswith("Compress these older memory blocks"):
-            return {"content": "### Era\nThe full historical span remains represented."}, {"cost": 0.01}
+        prompt = kwargs["messages"][0]["content"]
+        if prompt.startswith("Compress these older memory blocks"):
+            return {"content": "The full historical span remains represented."}, {"cost": 0.01}
+        if prompt.startswith("Compare this draft memory"):
+            # The correction returns the checked text with the draft's nomination
+            # block carried through the same source check; that block is released.
+            return {"content": f"Episode {self.count}, checked against its source.\nKNOWLEDGE_ENTRIES_JSON: " + json.dumps(
+                [{"topic": self.topic, "content": f"Understanding {self.count}."}])}, {"cost": 0.01}
         self.count += 1
         return {"content": f"Episode {self.count}.\nKNOWLEDGE_ENTRIES_JSON: " + json.dumps(
             [{"topic": self.topic, "content": f"Understanding {self.count}."}])}, {"cost": 0.01}

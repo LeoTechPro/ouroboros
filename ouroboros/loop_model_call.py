@@ -43,6 +43,57 @@ def _loop():
     return loop
 
 
+def _record_authoring_handover(
+    tool_ctx: Any,
+    *,
+    from_model: str,
+    to_model: str,
+    reason: str,
+    tool_calls_at_handover: int,
+) -> None:
+    """Record a host-driven authoring handover for the current loop.
+
+    A route change is not itself an error: the successor may continue normally.
+    It is, however, a typed fact that the next tool-less response must see as a
+    continuation when the predecessor already used tools.  Keep the fact on the
+    existing ToolContext/usage/trace seams; no second custody store is needed.
+    """
+    source = str(from_model or "").strip()
+    target = str(to_model or "").strip()
+    if not source or not target or source == target or tool_calls_at_handover < 1:
+        return
+    row = {
+        "from_model": source,
+        "to_model": target,
+        "reason": str(reason or "host_route_change"),
+        "tool_calls_at_handover": int(tool_calls_at_handover),
+        "recovery_prompted": False,
+        "status": "pending",
+    }
+    tool_ctx._authoring_handover = row
+    usage = getattr(tool_ctx, "_accumulated_usage", None)
+    if isinstance(usage, dict):
+        handovers = usage.setdefault("authoring_handovers", [])
+        if isinstance(handovers, list):
+            handovers.append(row)
+    trace = getattr(tool_ctx, "_execution_trace", None)
+    if isinstance(trace, dict):
+        trace.setdefault("route_handovers", []).append(row)
+
+
+def _pending_model_wait_handover(
+    tool_ctx: Any, *, from_model: str, to_model: str, tool_calls: int,
+) -> None:
+    """Hold one distinct wait-switch until its re-prepared send succeeds."""
+    if str(from_model or "") == str(to_model or ""):
+        return
+    pending = getattr(tool_ctx, "_pending_model_wait_handover", None)
+    tool_ctx._pending_model_wait_handover = (
+        pending[0] if pending else str(from_model or ""), str(to_model or ""),
+        pending[2] if pending else int(tool_calls),
+    )
+
+
 def _adopt_fallback_route(
     ctx: Any,
     tools: ToolRegistry,
@@ -54,6 +105,10 @@ def _adopt_fallback_route(
     active_context_mode: str,
     tool_schemas: List[Dict[str, Any]],
     accumulated_usage: Dict[str, Any],
+    *,
+    handover_from_model: str = "",
+    handover_reason: str = "fallback",
+    tool_calls_at_handover: Optional[int] = None,
 ) -> tuple:
     """Round-4 C1.1: adopt a SUCCESSFUL cross-family fallback as the active
     route for the rest of the loop. Otherwise a later round (esp. a tool
@@ -68,6 +123,18 @@ def _adopt_fallback_route(
     ctx.active_model = fallback_model
     ctx.active_use_local = fallback_use_local
     messages[:] = fallback_messages
+    trace = getattr(ctx, "_execution_trace", None)
+    trace_calls = trace.get("tool_calls") if isinstance(trace, dict) else []
+    _record_authoring_handover(
+        ctx,
+        from_model=handover_from_model,
+        to_model=fallback_model,
+        reason=handover_reason,
+        tool_calls_at_handover=(
+            len(trace_calls or [])
+            if tool_calls_at_handover is None else int(tool_calls_at_handover)
+        ),
+    )
     if context_fit_plan is not None:
         tools._ctx.context_fit_plan = context_fit_plan
         tools._ctx.messages = messages
@@ -213,6 +280,16 @@ def _run_cross_model_fallback_chain(
                 candidate_mode,
                 tool_schemas,
                 accumulated_usage,
+                # The predecessor author is the route whose round entered this
+                # fallback chain.  ``previous_model`` may name a candidate that
+                # failed before the successful candidate ever authored a turn.
+                handover_from_model=active_model,
+                handover_reason=reason or "fallback",
+                tool_calls_at_handover=len(
+                    ((getattr(tools._ctx, "_execution_trace", {})
+                      if isinstance(getattr(tools._ctx, "_execution_trace", {}), dict) else {})
+                     .get("tool_calls") or [])
+                ),
             )
             break
         tools._ctx.context_fit_plan = context_fit_plan
@@ -539,6 +616,18 @@ def _dispatch_round_model(
             model_turn_state=getattr(ctx.tools._ctx, "model_turn_state", None),
             model_context_observer=observe_feedback,
         )
+    pending_wait_handover = getattr(ctx.tools._ctx, "_pending_model_wait_handover", None)
+    if pending_wait_handover is not None:
+        if result[0] is not None:
+            from_model, to_model, tool_count = pending_wait_handover
+            _record_authoring_handover(
+                ctx.tools._ctx,
+                from_model=from_model,
+                to_model=to_model,
+                reason="model_wait",
+                tool_calls_at_handover=tool_count,
+            )
+        ctx.tools._ctx._pending_model_wait_handover = None
     observed = ctx.accumulated_usage.get("_model_route")
     if (plan is not None and isinstance(observed, dict)
             and observed != getattr(plan, "model_route", {})):
@@ -569,6 +658,7 @@ def _reprepare_waiting_main(ctx: _RoundModelCallContext, kwargs: dict):
     from ouroboros.usage_accounting import current_physical_attempt_predicate, bind_physical_attempt_context
 
     model, use_local = kwargs["model"], kwargs.get("use_local", False)
+    previous_model = str(ctx.active_model or "")
     role = kwargs["model_role"]
     observed = kwargs.pop("_model_observed_route", None)
     native_reset = bool(observed and observed.pop("_native_reset", False))
@@ -576,10 +666,13 @@ def _reprepare_waiting_main(ctx: _RoundModelCallContext, kwargs: dict):
     # images, then build the newly selected route's physical view below.
     prepared = LLMClient.sanitize_reasoning_on_model_switch(ctx.messages, ctx.active_model, model)
     if native_reset:
-        from ouroboros.llm_messages import reset_native_messages
+        from ouroboros.llm_messages import drop_source_native_messages, reset_native_messages
 
-        prepared, _ = reset_native_messages(
+        prepared, changed = reset_native_messages(
             prepared, observed, source=observed.get("source"), model=observed.get("model"))
+        if not changed:
+            prepared, _ = drop_source_native_messages(
+                prepared, source=str(observed.get("source") or ""))
     ctx.messages[:] = prepared
     ctx.context_fit_plan, ctx.active_context_mode = _loop()._rebind_context_fit_plan(
         ctx.context_fit_plan, ctx.tools, ctx.messages, model=model, use_local=use_local,
@@ -589,6 +682,13 @@ def _reprepare_waiting_main(ctx: _RoundModelCallContext, kwargs: dict):
     ctx.active_model, ctx.active_use_local = model, use_local
     ctx.tools._ctx.active_model = model
     ctx.tools._ctx.active_use_local = use_local
+    trace = getattr(ctx.tools._ctx, "_execution_trace", {})
+    _pending_model_wait_handover(
+        ctx.tools._ctx,
+        from_model=previous_model,
+        to_model=str(model or ""),
+        tool_calls=len(trace.get("tool_calls") or []) if isinstance(trace, dict) else 0,
+    )
     disposition = _loop()._measure_round_main_fit(ctx, automatic_pass_used=False)
     if disposition is not None and disposition.action == "reclaim_once":
         if _fit_key(disposition) not in _loop()._context_reclaim_passes(ctx.tools._ctx):

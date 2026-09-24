@@ -77,7 +77,12 @@ def test_ui_project_completion_pointer_keeps_project_history_scoped(direct_serve
                 # never the answer excerpt (owner Q5=A); the answer stays in the Project.
                 assert "Open the Project for details." in summary_text
                 assert "Release shipped." not in summary_text
-                assert "Open Project ↗" in summary_text
+                # The row points at its Project with the one reference: the Project's name, never a
+                # button of its own and never the raw id.
+                reference = summary.locator('[data-intent="open-project"]')
+                assert reference.count() == 1
+                assert reference.get_attribute("aria-label") == f"Open project {project['name']}"
+                assert "Open Project" not in summary_text
                 assert project["id"] not in summary_text
 
                 annotation = page.locator('#chat-messages .msg-routing-annotation').filter(has_text=target_label)
@@ -87,7 +92,7 @@ def test_ui_project_completion_pointer_keeps_project_history_scoped(direct_serve
                 assert "Project progress: nested delegation is running." not in main_text
                 assert "Project task summary" not in main_text
 
-                summary.locator(".system-message-action").click()
+                reference.click()
                 page.wait_for_selector("#project-panel:not([hidden])", timeout=30_000)
                 assert page.locator("#project-panel-title").inner_text() == project["name"]
                 panel = page.locator(f"#panel-pchat-{project['id']}")
@@ -102,7 +107,7 @@ def test_ui_project_completion_pointer_keeps_project_history_scoped(direct_serve
                 ).first.wait_for(state="visible", timeout=30_000)
                 assert "Project progress: nested delegation is running." in task_card.inner_text()
                 assert panel.locator('.chat-bubble[data-system-type="project_completion_summary"]').count() == 0
-                assert panel.locator(".system-message-action").count() == 0
+                assert panel.locator('.system-message-actions [data-intent="open-project"]').count() == 0
             finally:
                 browser.close()
     except PlaywrightError as exc:
@@ -181,10 +186,14 @@ def test_ui_project_completion_mirror_is_an_ordinary_folded_message(direct_serve
                 # No horizontal overflow of the transcript, the chip yields instead.
                 assert page.locator("#chat-messages").evaluate("n => n.scrollWidth <= n.clientWidth + 1")
 
-                # The ending without an answer is still the System pointer with its action.
+                # The ending without an answer is still the System pointer, and it points at the
+                # Project with the SAME control as the answered ones: a row's voice never picks it.
                 assert "system" in pointer.get_attribute("class").split()
                 assert "Open the Project for details." in pointer.inner_text()
-                assert pointer.locator(".system-message-action").count() == 1
+                shapes = [row.locator('[data-intent="open-project"]').evaluate(
+                    "n => [n.className, n.getAttribute('aria-label'), [...n.children].map(c => c.className).join(' ')]")
+                    for row in (long_row, pointer)]
+                assert shapes[0] == shapes[1]
 
                 # The chip names the Project and opens it.
                 chip = long_row.locator(".chat-quiz-project")

@@ -454,7 +454,8 @@ def needs_local_model_autostart(settings: dict) -> bool:
             config
             and config.enabled
             and any(
-                row.route.kind == "api_model"
+                row.enabled
+                and row.route.kind == "api_model"
                 and row.route.target_id.endswith(" (local)")
                 for row in config.items
             )

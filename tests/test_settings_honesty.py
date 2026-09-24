@@ -176,6 +176,25 @@ def test_consciousness_wake_bounds_apply_without_a_restart(monkeypatch, isolated
     assert not ({"OUROBOROS_BG_WAKEUP_MIN", "OUROBOROS_BG_WAKEUP_MAX"} & set(data.get("restart_keys") or []))
 
 
+def test_unrelated_save_migrates_a_legacy_wakeup_min_to_the_effective_floor(
+    monkeypatch, isolated_settings,
+):
+    """A legacy 30-second raw value must not make an otherwise unrelated
+    Settings save fail HTML min=60 validation; the write carries the same
+    normalized value the runtime already uses, without changing it to 900."""
+    isolated_settings.write_text(json.dumps({
+        "OUROBOROS_BG_WAKEUP_MIN": 30,
+        "OUROBOROS_BG_WAKEUP_MAX": 7200,
+    }), encoding="utf-8")
+    _save(monkeypatch, isolated_settings, {"TOTAL_BUDGET": 123.0})
+    from ouroboros import config as cfg
+
+    persisted = json.loads(isolated_settings.read_text(encoding="utf-8"))
+    assert persisted["OUROBOROS_BG_WAKEUP_MIN"] == 60
+    assert persisted["OUROBOROS_BG_WAKEUP_MAX"] == 7200
+    assert cfg.load_settings()["OUROBOROS_BG_WAKEUP_MIN"] == 60
+
+
 def test_host_service_port_requires_a_restart(monkeypatch, isolated_settings):
     """The host-service port is bound once at server startup."""
     data = _save(monkeypatch, isolated_settings, {"OUROBOROS_HOST_SERVICE_PORT": "18999"})

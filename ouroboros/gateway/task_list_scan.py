@@ -24,6 +24,13 @@ from ouroboros.utils import read_json_dict
 _RAW_TS_MEMO: Dict[tuple, tuple] = {}
 _RESULT_FACT_KEYS = (
     "task_id", "id", "ts", "updated_at", "delegation_role", "parent_task_id",
+    # A project room offers its OWN recent roots, so the selection needs the
+    # project of each row - one small scalar, no extra read. Status and cancel
+    # facts stay out: every row the selection keeps is then loaded WHOLE and
+    # carries them from there, while `cancel_state` lives in the durable
+    # cancel-intent projection, so a memo copy would be a second source nobody
+    # reads.
+    "project_id",
     "root_task_id", "child_drive_root", "headless_child_drive_root",
 )
 

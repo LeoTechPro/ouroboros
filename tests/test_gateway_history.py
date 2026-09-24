@@ -1071,7 +1071,7 @@ def test_chat_history_replays_the_live_subtree_ceiling_for_a_running_root(tmp_pa
 
     seen_roots = []
 
-    def _projection(_drive, *, root_task_id=""):
+    def _projection(_drive, *, root_task_id="", allow_stale=False):
         seen_roots.append(root_task_id)
         if root_task_id == "root-empty":
             return {"attempt_counts": {"metadata_only": 1}, "subscription_sessions": 0}

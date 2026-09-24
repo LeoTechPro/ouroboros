@@ -201,18 +201,27 @@ function routeCatalogItems(route, items = []) {
 /**
  * One suggestion per model: the label names the model and makes no account claim
  * (DESIGN.md §7). Availability, the reading account and its observation time are
- * account facts, so they never travel on a model option.
+ * account facts, so they never travel on a model option. Two row facts do: what an
+ * alias resolves to (`resolved_model`, shown only while every supplying row agrees)
+ * and a row known only from the engine's frozen list (`origin: "hint"` on every
+ * supplying row; absent origin is live). The value stays the row id either way.
  */
 export function catalogModelOptions(items = []) {
     const values = new Map();
     for (const item of items) {
         const value = String(item?.value || item?.id || item);
         const name = String(item?.name || item?.label || '');
+        if (!values.has(value)) values.set(value, { value, label: value, named: false, live: false, resolved: new Set() });
         const current = values.get(value);
-        if (!current) values.set(value, { value, label: name || value, named: Boolean(name) });
-        else if (name && !current.named) Object.assign(current, { label: name, named: true });
+        if (name && !current.named) Object.assign(current, { label: name, named: true });
+        if (item?.origin !== 'hint') current.live = true;
+        const resolved = item?.resolved_model;
+        if (typeof resolved === 'string' && resolved && resolved !== value) current.resolved.add(resolved);
     }
-    return [...values.values()].map(({ value, label }) => ({ value, label }));
+    return [...values.values()].map(({ value, label, live, resolved }) => {
+        const named = resolved.size === 1 ? `${value} → ${[...resolved][0]}` : label;
+        return { value, label: live ? named : `${named} (shipped list)` };
+    });
 }
 
 /** Suggestions carry the model alone; the source select already names the provider. */
@@ -253,6 +262,46 @@ export function mintStableId(prefix, takenIds) {
         if (!taken.has(candidate)) return candidate;
     }
     return `${prefix}_${Date.now().toString(36)}`;
+}
+
+// A roster row is NAMED by a projection of its route, never by a stored label
+// (which rots once the owner re-points the row). JS twin of
+// ouroboros/configured_subagents.py — engine_identity / subagent_handle /
+// roster_handles / validate_unique_engines — held together by one parity table,
+// web/tests/fixtures/subagent_handle_parity.json. Facts are EFFECTIVE, exactly
+// what a task snapshot freezes: `inherited` is the global processing preference
+// a row without its own value runs under, and an omitted session access is full.
+function engineIdentity(row, inherited = '') {
+    const route = row?.route || {};
+    return [
+        String(route.kind || ''), String(route.target_id || '').trim(),
+        String(route.credential_profile_id || '').trim(), String(row?.effort || ''),
+        String(row?.processing_preference || inherited || ''),
+        route.kind === ROUTE_KIND_AGENT_SESSION ? String(row?.access || 'full') : '',
+    ];
+}
+
+/** Route target plus THIS row's facets, each omitted at its baseline (full access, standard processing). */
+export function subagentHandle(row, inherited = '') {
+    const [, target, pin, effort, processing, access] = engineIdentity(row, inherited);
+    return [target, effort, access === 'full' ? '' : access, pin ? `@${pin}` : '',
+        processing === 'standard' ? '' : processing].filter(Boolean).join('/');
+}
+
+/** Stored id -> the label the live roster shows; twins are told apart by their stored key. */
+export function rosterHandles(rows, inherited = '') {
+    const base = (rows || []).map((row) => subagentHandle(row, inherited));
+    return new Map((rows || []).map((row, index) => [
+        String(row?.subagent_id || ''),
+        base.indexOf(base[index]) === base.lastIndexOf(base[index])
+            ? base[index] : `${base[index]}~${String(row?.subagent_id || '')}`,
+    ]));
+}
+
+/** Index of the EARLIER row of the same kind sharing this row's handle, else -1 — a save-time rule; reads stay tolerant. */
+export function sameEngineAs(rows, index, inherited = '') {
+    const key = (row) => `${row?.route?.kind || ''}\n${subagentHandle(row, inherited)}`;
+    return (rows || []).findIndex((row, other) => other < index && key(row) === key(rows[index]));
 }
 
 export function composeSessionTarget(harness, model) {
@@ -372,7 +421,7 @@ function undiscoveredLabel(value, known) {
 export function routeChoiceGroups({
     harnesses = [], modelSources = [], providers = [], currentChoice = '',
     catalogKnown = true, accountsKnown = true, includeSessions = true,
-    includeSubscriptions = true, providerProfiles = {},
+    includeSubscriptions = true, providerProfiles = {}, hasConfiguredAccounts = false,
 } = {}) {
     const sessionValues = (harnesses || [])
         .filter((harness) => harness && harness.id)
@@ -412,7 +461,9 @@ export function routeChoiceGroups({
         ...(includeSubscriptions ? [{ label: 'Subscriptions · models', options: modelValues.length
             ? modelValues
             : [{ value: '', disabled: true, label: catalogKnown && accountsKnown
-                ? 'No model sources listed — connect one in Accounts'
+                ? (hasConfiguredAccounts
+                    ? 'No model sources listed — refresh Model Catalog'
+                    : 'No model sources listed — connect one in Accounts')
                 : catalogKnown ? 'No model sources listed; accounts have not been checked'
                     : 'Model sources have not been read — use Refresh Model Catalog' }] }] : []),
         { label: 'API keys', options: apiValues },

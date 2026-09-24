@@ -46,9 +46,10 @@ def test_cleanup_receipt_is_carried_before_final_delivery_without_rewriting_answ
         presence=False,
     )
     assert event["text"] == text
-    # Two rows on the send event: the base host notice alone, and custody on
-    # its own field (#1006). Single-body transports still read the join below.
-    assert event["terminal_host_notice"] == "Budget stop retained."
+    # One voice: the base host notice stays a field of the RESULT and never rides
+    # the send event; custody travels on its own field (#1006). Single-body
+    # transports still read the stored join below.
+    assert "terminal_host_notice" not in event
     # The leaf's own model rides the replayed row, so the nanny's terminal is
     # not read as a verdict about the role the host played (I9).
     assert "run-one: cancelled on fixture-model" in event["terminal_custody_notice"]

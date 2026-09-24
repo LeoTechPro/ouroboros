@@ -8,8 +8,14 @@ from types import SimpleNamespace
 import pytest
 
 from ouroboros import consolidator as c
-from ouroboros import context_fit
+from ouroboros import context_fit, room_consolidation as rc
 from ouroboros.capability_evidence import CapabilityEvidence
+
+
+LIGHT_OUTPUT_RESERVE = 16_384
+DRAFT_HEADING = rc.DRAFT_SOURCE_HEADING + "\n"
+CORRECTION_HEADING = rc.CORRECTION_SOURCE_HEADING + "\n"
+_RANGE = "2026-01-01 01:00 - 02:00"
 
 
 class _Refusal(RuntimeError):
@@ -74,12 +80,88 @@ def _write_chat(path, count=100, text_size=80, *, start=0):
     return rows
 
 
+def _drafts(prompts):
+    return [prompt for prompt in prompts if DRAFT_HEADING in prompt]
+
+
+def _corrections(prompts):
+    return [prompt for prompt in prompts if CORRECTION_HEADING in prompt]
+
+
 def _source(prompts):
-    return "".join(prompt.split("## Messages to summarize\n", 1)[1][:-1] for prompt in prompts)
+    """Exact source bytes the DRAFT calls received, in order."""
+    return "".join(prompt.split(DRAFT_HEADING, 1)[1][:-1] for prompt in _drafts(prompts))
+
+
+def _corrected_source(prompts):
+    """Exact complete source bytes the CORRECTION calls compared against, in order."""
+    return "".join(prompt.split(CORRECTION_HEADING, 1)[1][:-1] for prompt in _corrections(prompts))
 
 
 def _summary(llm, text="source" * 100, **kwargs):
-    return c._create_block_summary(llm, text, "2026-01-01T01:00", "2026-01-01T02:00", "identity", 1, **kwargs)
+    """Draft and correct one exact source as one Main room of one message (identity resident)."""
+    return rc.summarize_source(
+        c._light_call(llm, None, {}), text, [],
+        lambda part, note: rc.room_draft_prompt(
+            part, room_label="Main", block_range_text=_RANGE, message_count=1,
+            identity_text="identity", continuation_note=note),
+        lambda draft, part, note: rc.correction_prompt(
+            draft, part, room_label="Main", scope="dialogue block " + _RANGE,
+            identity_text="identity", continuation_note=note),
+        **kwargs)
+
+
+def _prompt_tokens(source, *, identity_text="", message_count=1,
+                   first_ts="2026-01-01T01:00", last_ts="2026-01-01T02:00",
+                   continuation_note=""):
+    prompt = rc.room_draft_prompt(
+        source, room_label="Main", block_range_text=rc.block_range(first_ts, last_ts),
+        message_count=message_count, identity_text=identity_text, continuation_note=continuation_note,
+    )
+    return context_fit.estimate_context_prompt_tokens(
+        [{"role": "user", "content": prompt}], None,
+    )
+
+
+def _window_for_split(source, *, identity_text="", message_count=1,
+                      first_ts="2026-01-01T01:00", last_ts="2026-01-01T02:00",
+                      density=1.0, continuation_note="", fraction=0.66):
+    """Build a synthetic route window from the real fixed prompt and source.
+
+    Consolidation's output reserve remains the production 16,384 tokens. The
+    fixture capacity is derived from the current prompt prefix and a fraction
+    of the variable source, so adding attribution guidance cannot make the
+    test accidentally exercise an impossible route.
+    """
+    fixed = _prompt_tokens(
+        "", identity_text=identity_text, message_count=message_count,
+        first_ts=first_ts, last_ts=last_ts, continuation_note=continuation_note,
+    )
+    full = _prompt_tokens(
+        source, identity_text=identity_text, message_count=message_count,
+        first_ts=first_ts, last_ts=last_ts, continuation_note=continuation_note,
+    )
+    assert full > fixed
+    split_capacity = fixed + (full - fixed) * fraction
+    return LIGHT_OUTPUT_RESERVE + ceil(split_capacity * density)
+
+
+def _source_for_split(*, identity_text="", message_count=1,
+                      first_ts="2026-01-01T01:00", last_ts="2026-01-01T02:00",
+                      multiplier=12):
+    """Create variable source whose size follows the current fixed prefix."""
+    unit = "complete entry Ж🙂 "
+    fixed = _prompt_tokens(
+        "", identity_text=identity_text, message_count=message_count,
+        first_ts=first_ts, last_ts=last_ts,
+    )
+    source = unit
+    while _prompt_tokens(
+        source, identity_text=identity_text, message_count=message_count,
+        first_ts=first_ts, last_ts=last_ts,
+    ) < fixed * multiplier:
+        source += source
+    return source
 
 
 @pytest.mark.parametrize("code", ["provider_failed", "invalid_request"])
@@ -101,7 +183,7 @@ def test_oversized_logical_block_splits_complete_source_and_advances_once(tmp_pa
     usage = c.consolidate(chat, blocks, meta, llm)
 
     assert usage["cost"] is None  # refusal did not report cash
-    assert _source(llm.accepted) == c._format_entries_for_block(rows)
+    assert _source(llm.accepted) == c._format_entries_for_block(rows, include_room_labels=True)
     assert chat.read_bytes() == source_bytes
     assert advances == [100]
     saved = json.loads(blocks.read_text())
@@ -123,8 +205,22 @@ def test_oversized_logical_block_splits_complete_source_and_advances_once(tmp_pa
 def test_known_capacity_includes_whole_prompt_density_and_output_reserve(tmp_path, fit):
     chat, blocks, meta = _paths(tmp_path)
     rows = _write_chat(chat, text_size=140)
-    fit.window, fit.density = 18000, 2.5
     identity = "identity at full length " * 20
+    spans = []
+    formatted = c._format_entries_for_block(rows, include_room_labels=True, source_spans=spans)
+    # Account for the continuation attribution that can appear after a split,
+    # as well as the ordinary fixed prefix. This keeps the synthetic route
+    # large enough for both while retaining a variable source budget.
+    from ouroboros.dialogue_provenance import source_continuation_note
+    continuation = source_continuation_note(
+        spans, spans[len(spans) // 2][0] + 1, spans[len(spans) // 2][0] + 2,
+    )
+    fit.density = 2.5
+    fit.window = _window_for_split(
+        formatted, identity_text=identity, message_count=len(rows),
+        first_ts=rows[0]["ts"], last_ts=rows[-1]["ts"], density=fit.density,
+        continuation_note=continuation,
+    )
     llm = _LLM()
 
     result = c.consolidate(chat, blocks, meta, llm, identity)
@@ -135,7 +231,7 @@ def test_known_capacity_includes_whole_prompt_density_and_output_reserve(tmp_pat
         size = ceil(context_fit.estimate_context_prompt_tokens(call["messages"], call["tools"]) * fit.density)
         assert size + call["max_tokens"] <= fit.window
         assert call["model_role"] == "light" and call["max_tokens"] == 16384
-    assert _source(llm.accepted) == c._format_entries_for_block(rows)
+    assert _source(llm.accepted) == c._format_entries_for_block(rows, include_room_labels=True)
     assert result["cost"] == pytest.approx(0.01 * len(llm.calls))
 
 
@@ -185,7 +281,7 @@ def test_route_capacity_changes_split_shape_without_provider_branch(tmp_path, fi
         c.consolidate(chat, blocks, meta, llm)
         assert json.loads(meta.read_text())["last_consolidated_offset"] == 100
         counts.append(len(llm.calls))
-    assert counts[0] == 1 < counts[1]
+    assert counts[0] == 2 < counts[1]  # one draft and one correction, then split parts
 
 
 def test_single_large_entry_is_lossless_even_without_line_boundaries(fit):
@@ -194,7 +290,10 @@ def test_single_large_entry_is_lossless_even_without_line_boundaries(fit):
     llm = _LLM()
     content, _ = _summary(llm, source)
     assert content and len(llm.calls) > 2
-    assert _source(llm.accepted) == source
+    # A correction whose fixed prefix overflowed re-drafts its halves, so the
+    # DRAFT sources may cover a part twice; the CORRECTED sources — what the
+    # published text was checked against — cover the source exactly once.
+    assert _corrected_source(llm.accepted) == source
 
 
 @pytest.mark.parametrize("stale", [False, True])
@@ -202,7 +301,8 @@ def test_unknown_or_stale_capacity_gets_one_ordinary_call(fit, stale):
     fit.window, fit.stale = (1 if stale else None), stale
     llm = _LLM()
     assert _summary(llm)[0]
-    assert len(llm.calls) == 1
+    assert len(llm.calls) == 2  # one unchecked draft, one unchecked correction; no split
+    assert _drafts(llm.accepted) == llm.accepted[:1] and _corrections(llm.accepted) == llm.accepted[1:]
 
 
 @pytest.mark.parametrize("first_success", [False, True])
@@ -285,7 +385,9 @@ def test_confirmed_model_context_refusal_splits_but_unknown_custody_propagates(f
         assert len(llm.calls) == 1
     else:
         content, usage = _summary(llm)
-        assert content and len(llm.calls) == 3 and usage["cost"] is None
+        # The refusal, then each half drafted and corrected against its own bytes.
+        assert content and len(llm.calls) == 5 and usage["cost"] is None
+        assert _source(llm.accepted) == _corrected_source(llm.accepted) == "source" * 100
 
 
 def test_generic_unknown_custody_is_not_a_context_retry_even_through_cause(fit):
@@ -325,13 +427,13 @@ def test_refused_attempt_usage_is_merged_with_successful_parts(fit):
             raise error
     llm = _LLM(effect=refuse_once)
     content, usage = _summary(llm)
-    assert content and len(llm.calls) == 3
-    assert usage["cost"] == pytest.approx(0.05)
-    assert usage["prompt_tokens"] == 27 and usage["total_tokens"] == 37
+    assert content and len(llm.calls) == 5  # refusal + (draft, correction) per half
+    assert usage["cost"] == pytest.approx(0.07)
+    assert usage["prompt_tokens"] == 47 and usage["total_tokens"] == 67
     assert usage["ledger_attempt_ids"] == ["refused-attempt"]
 
 
-def test_rotation_append_and_partial_failure_only_advance_completed_block(tmp_path, fit):
+def test_rotation_append_and_partial_failure_only_advance_completed_chunks(tmp_path, fit):
     chat, blocks, meta = _paths(tmp_path)
     rows = _write_chat(chat, count=200, text_size=0)
     rows[100]["text"] = "large source🙂" * 3000
@@ -348,35 +450,45 @@ def test_rotation_append_and_partial_failure_only_advance_completed_block(tmp_pa
             with chat.open("a") as output:
                 output.write(json.dumps({"ts": "2026-01-02T00:00:00Z", "text": "appended tail"}) + "\n")
             raise _Refusal("failed part", code="invalid_request")
-    fit.window = 18000
+    # Chunk 0 (100 short rows) fits one draft + one correction; chunk 1 carries
+    # the oversized row, so its first draft is call 3 and fails.
+    fit.window = LIGHT_OUTPUT_RESERVE + 6000
     llm = _LLM(effect=rotate_and_fail)
     usage = c.consolidate(chat, blocks, meta, llm)
     assert len(llm.calls) == 3 and usage["cost"] is None
     saved = json.loads(meta.read_text())
+    # Chunk 0 (draft + correction) is a complete unit and stays published; the
+    # failed chunk 1 is withheld and recorded as this run's own error.
     assert saved["last_consolidated_offset"] == 100 and saved["chat_log_signature"] == captured
+    assert saved["last_consolidation_error"]["cursor_offset"] == 100
     assert sum(block["message_count"] for block in json.loads(blocks.read_text())) == 100
     assert c.should_consolidate(meta, chat)
 
     succeeding = _LLM()
     c.consolidate(chat, blocks, meta, succeeding)
-    assert _source(succeeding.accepted) == c._format_entries_for_block(rows[100:]) + c._format_entries_for_block(c._read_chat_entries(chat)[:100])
+    # Corrected coverage is the invariant: a correction whose prefix overflowed
+    # re-drafts its halves, so draft sources may repeat a part.
+    assert _corrected_source(succeeding.accepted) == c._format_entries_for_block(rows[100:], include_room_labels=True) + c._format_entries_for_block(c._read_chat_entries(chat)[:100], include_room_labels=True)
     saved = json.loads(meta.read_text())
     assert saved["last_consolidated_offset"] == 100
     assert saved["chat_log_signature"]["first_line_sha256"] == c._chat_log_signature(chat)["first_line_sha256"]
     assert c._read_chat_entries(chat)[saved["last_consolidated_offset"]:][0]["text"] == "appended tail"
+    assert "last_consolidation_error" not in saved  # the successful retry retired the stale error
 
 
-def test_failed_era_usage_is_accounted_and_original_blocks_survive(tmp_path, fit):
+@pytest.mark.parametrize("failing_call", [3, 4])  # era compression, era correction
+def test_failed_era_usage_is_accounted_and_original_blocks_survive(tmp_path, fit, failing_call):
     chat, blocks, meta = _paths(tmp_path)
     _write_chat(chat, text_size=0)
     originals = [{"range": "2025-01-01", "type": "summary", "message_count": 100, "content": f"old-{i}"} for i in range(10)]
     c.atomic_write_json(blocks, originals)
     def fail_era(llm, _):
-        if len(llm.calls) == 2:
+        if len(llm.calls) == failing_call:
             return {"content": ""}, {"cost": 0.04}
     llm = _LLM(effect=fail_era)
     usage = c.consolidate(chat, blocks, meta, llm)
-    assert usage["cost"] == pytest.approx(0.05)
+    assert len(llm.calls) == failing_call  # the block's draft and correction, then the failed era stage
+    assert usage["cost"] == pytest.approx(0.01 * (failing_call - 1) + 0.04)
     assert json.loads(blocks.read_text())[:10] == originals
     assert json.loads(meta.read_text())["last_consolidated_offset"] == 100
 
@@ -408,7 +520,7 @@ def test_light_account_and_manual_window_share_real_context_resolver(monkeypatch
     assert all(p["options"]["credential_profile_id"] == "light-account" for p in probes)
     assert all(p["provider"] == "claudexor" and p["allow_fetch"] is True for p in probes)
     assert all(context_fit.estimate_context_prompt_tokens(call["messages"]) + 16384 <= 17000 for call in llm.calls)
-    assert _source(llm.accepted) == text
+    assert _corrected_source(llm.accepted) == text
 
 
 def test_local_and_auto_account_are_passed_explicitly(fit, monkeypatch):
@@ -447,7 +559,10 @@ def test_wait_route_override_and_reprepare_remeasure_whole_request(fit, monkeypa
     assert _summary(llm)[0]
     assert llm.calls[0]["model"] == "changed/model"
     assert llm.calls[0]["model_account_override"] == "changed-pin"
-    assert fit.tasks[-1]["model_route"] == {"credentialProfileId": "changed-pin"}
+    # The wait's reprepare re-measured the draft under the observed account;
+    # the correction call that follows starts from the ordinary route again.
+    assert fit.tasks[1]["model_route"] == {"credentialProfileId": "changed-pin"}
+    assert len(llm.calls) == 2 and len(fit.tasks) == 3
 
 
 def test_retry_limit_survives_density_changes_and_source_changes_release_it(tmp_path, fit):
@@ -475,22 +590,25 @@ def test_complete_blocks_are_preserved_if_a_summary_write_fails(tmp_path, fit, m
     assert not meta.exists()  # successful inference is not durable cursor progress
 
 
+@pytest.mark.parametrize("failing_call", [3, 4])  # second block's draft, second block's correction
 @pytest.mark.parametrize("unknown", [False, True])
-def test_partial_block_failure_does_not_start_era_work(tmp_path, fit, unknown):
+def test_partial_block_failure_does_not_start_era_work(tmp_path, fit, unknown, failing_call):
     chat, blocks, meta = _paths(tmp_path)
     _write_chat(chat, count=200, text_size=0)
     originals = [{"range": "2025-01-01", "type": "summary", "message_count": 100, "content": f"old-{i}"} for i in range(10)]
     c.atomic_write_json(blocks, originals)
     def fail_second(llm, _):
-        if len(llm.calls) == 2:
+        if len(llm.calls) == failing_call:
             error = _Refusal("unknown" if unknown else "auth failed", code="invalid_api_key")
             if unknown:
                 error.physical_attempt_capture = SimpleNamespace(state="unresolved")
             raise error
     llm = _LLM(effect=fail_second)
     usage = c.consolidate(chat, blocks, meta, llm)
-    assert len(llm.calls) == 2
+    assert len(llm.calls) == failing_call
     assert json.loads(blocks.read_text())[:10] == originals
+    # The transaction boundary is the logical chunk: the complete first chunk
+    # stays published, the failed second chunk (draft or correction) is withheld.
     assert len(json.loads(blocks.read_text())) == 11
     saved = json.loads(meta.read_text())
     assert saved["last_consolidated_offset"] == 100
@@ -509,7 +627,7 @@ def test_unavailable_capacity_reader_retains_ordinary_call(monkeypatch):
     monkeypatch.setattr(capability_evidence, "probe", unavailable)
     monkeypatch.setattr(context_fit, "_route_calibration_ratio", lambda *_: 1.0)
     llm = _LLM()
-    assert _summary(llm)[0] and len(llm.calls) == 1
+    assert _summary(llm)[0] and len(llm.calls) == 2
 
 
 @pytest.mark.parametrize("preceding_blocks", [0, 1])
@@ -526,20 +644,22 @@ def test_refusal_bound_survives_preceding_logical_blocks(tmp_path, fit, precedin
     raw = chat.read_bytes()
     interruption = ModelWaitInterrupted("deadline", role="light")
 
+    target_draft = 2 * preceding_blocks + 1  # every published block costs a draft and a correction
+
     def first_cycle(llm, prompt):
-        if len(llm.calls) == preceding_blocks + 1:
+        if len(llm.calls) == target_draft:
             error = ClaudexorModelError({"code": code, "message": "Controlled provider refusal",
                 "context": {"httpStatus": 400, "vendorCode": "context_length_exceeded", "parameter": "input"}})
             error.physical_attempt_capture = SimpleNamespace(state="settled")
             raise error
-        if len(llm.calls) > preceding_blocks + 1:
+        if len(llm.calls) > target_draft:
             raise interruption
 
     first = _LLM(effect=first_cycle)
     with pytest.raises(ModelWaitInterrupted) as caught:
         c.consolidate(chat, blocks, meta, first)
     assert caught.value is interruption
-    rejected = first.calls[preceding_blocks]["messages"][0]["content"]
+    rejected = first.calls[target_draft - 1]["messages"][0]["content"]
     saved = json.loads(meta.read_text())
     assert saved["consolidation_retry"]["input_limit"]["input_bytes"] == len(rejected.encode()) - 1
     assert saved.get("last_consolidated_offset", 0) == 0
@@ -547,9 +667,25 @@ def test_refusal_bound_survives_preceding_logical_blocks(tmp_path, fit, precedin
 
     second = _LLM()
     c.consolidate(chat, blocks, meta, second)
-    next_prompt = second.calls[preceding_blocks]["messages"][0]["content"]
+    next_prompt = second.calls[target_draft - 1]["messages"][0]["content"]
     assert len(next_prompt.encode()) < len(rejected.encode())
     assert chat.read_bytes() == raw
     final = json.loads(meta.read_text())
     assert final["last_consolidated_offset"] == count
     assert "consolidation_retry" not in final
+
+
+@pytest.mark.parametrize("shape", ["usage_finish_reason", "anthropic_stop_reason"])
+def test_output_truncation_is_refused_on_every_lane_shape(fit, shape):
+    """A summary cut at the output ceiling is withheld whether the lane reports
+    the cut as usage.response_finish_reason (OpenAI family) or as the message's
+    stop_reason (native Anthropic)."""
+    def cut(llm, _):
+        if shape == "usage_finish_reason":
+            return {"content": "clipped summary"}, {**llm.usage, "response_finish_reason": "length"}
+        return {"content": "clipped summary", "stop_reason": "max_tokens"}, dict(llm.usage)
+    llm = _LLM(effect=cut)
+    content, usage = _summary(llm)
+    assert content == ""
+    assert [error["kind"] for error in usage["_consolidation_errors"]] == ["output_truncated"]
+

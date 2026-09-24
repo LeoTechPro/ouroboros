@@ -305,6 +305,95 @@ def test_schedule_followup_cap_refusal_is_typed_and_disclosed(tmp_path):
     assert _followup(_ctx(tmp_path, task_id="root-2")).startswith("FOLLOWUP_SCHEDULED")
 
 
+def test_schedule_followup_counts_the_cap_inside_the_write_it_is_about_to_make(tmp_path, monkeypatch):
+    """The cap read and the write share ONE hold on the schedule table.
+
+    Two tasks registering at the same instant would otherwise each read the same
+    under-cap count and both land, so the cap would be advisory rather than real.
+    """
+    from supervisor import queue_schedules
+
+    ctx = _ctx(tmp_path)
+    acquisitions: list[str] = []
+    real = queue_schedules.acquire_exclusive_file_lock
+    monkeypatch.setattr(
+        queue_schedules, "acquire_exclusive_file_lock",
+        lambda path, **kw: (acquisitions.append(str(path)), real(path, **kw))[1])
+    assert _followup(ctx).startswith("FOLLOWUP_SCHEDULED")
+    assert len(acquisitions) == 1, acquisitions
+    assert acquisitions[0].endswith("scheduled_tasks.json.lock")
+    # The refused call takes the same single hold and writes nothing.
+    acquisitions.clear()
+    assert _followup(ctx, run_at="2030-02-01T00:00:00+00:00").startswith("FOLLOWUP_SCHEDULED")
+    acquisitions.clear()
+    assert _followup(ctx, run_at="2030-03-01T00:00:00+00:00").startswith("ERROR: FOLLOWUP_CAP_REACHED")
+    assert len(acquisitions) == 1
+    from supervisor.queue import list_scheduled_tasks
+
+    assert len(list_scheduled_tasks(tmp_path / "data")["tasks"]) == 2
+
+
+def test_schedule_followup_reports_a_missed_table_lock_as_a_typed_refusal(tmp_path, monkeypatch):
+    """A lock the transaction could not take is a typed unavailable result in the
+    text ABI, not a generic TOOL_ERROR wrapping a bare TimeoutError; nothing lands."""
+    from supervisor import queue_schedules
+    from supervisor.queue import list_scheduled_tasks
+
+    ctx = _ctx(tmp_path)
+    monkeypatch.setattr(queue_schedules, "acquire_exclusive_file_lock", lambda *_a, **_k: None)
+    text = _followup(ctx)
+    assert text.startswith("⚠️ CAPABILITY_UNAVAILABLE: FOLLOWUP_STORE_UNAVAILABLE")
+    assert "schedule lock" in text
+    assert list_scheduled_tasks(tmp_path / "data")["tasks"] == []
+
+
+def test_schedule_followup_surfaces_a_corrupt_store_as_the_typed_refusal(tmp_path):
+    """The lenient cap read tolerates a corrupt table, the strict upsert refuses
+    it; that refusal must reach the caller typed, not as FOLLOWUP_PERSIST_FAILED."""
+    from supervisor.queue import list_scheduled_tasks
+
+    ctx = _ctx(tmp_path)
+    state = tmp_path / "data" / "state"
+    state.mkdir(parents=True, exist_ok=True)
+    (state / "scheduled_tasks.json").write_text("{not json", encoding="utf-8")
+    text = _followup(ctx)
+    assert text.startswith("⚠️ CAPABILITY_UNAVAILABLE: FOLLOWUP_STORE_UNAVAILABLE")
+    assert "PERSIST_FAILED" not in text
+    assert (state / "scheduled_tasks.json").read_text(encoding="utf-8") == "{not json"
+    assert list_scheduled_tasks(tmp_path / "data")["tasks"] == []
+
+
+def test_schedule_followup_discloses_a_lost_audit_outcome_on_its_success_line(tmp_path, monkeypatch):
+    """The write seam returns what its AUDIT achieved; the success text says so.
+
+    A durable record whose outcome fact never reached logs/events.jsonl is not a
+    clean registration — reporting only "registered" would hide the one thing
+    that makes the change accountable, and the agent would never know to re-check.
+    """
+    from ouroboros import utils as ouro_utils
+
+    ctx = _ctx(tmp_path)
+    clean = _followup(ctx)
+    assert clean.startswith("FOLLOWUP_SCHEDULED") and "AUDIT_INCOMPLETE" not in clean
+
+    calls = {"n": 0}
+    real = ouro_utils.append_jsonl
+
+    def _intent_only(*args, **kwargs):
+        calls["n"] += 1
+        return real(*args, **kwargs) if calls["n"] == 1 else False
+
+    monkeypatch.setattr(ouro_utils, "append_jsonl", _intent_only)
+    disclosed = _followup(_ctx(tmp_path, task_id="root-2"), run_at="2030-02-01T00:00:00+00:00")
+    assert disclosed.startswith("FOLLOWUP_SCHEDULED")
+    assert "AUDIT_INCOMPLETE" in disclosed and "audit=incomplete" in disclosed
+    # Disclosed, never rolled back: an automatic undo would be a second
+    # equally unaudited mutation.
+    from supervisor.queue import list_scheduled_tasks
+
+    assert len(list_scheduled_tasks(tmp_path / "data")["tasks"]) == 2
+
+
 def test_schedule_followup_overlong_text_is_a_typed_refusal_never_truncated(tmp_path):
     """Review fix 7: the objective/context ride VERBATIM into the future task, so an
     over-limit text is a typed FOLLOWUP_TEXT_TOO_LONG refusal naming the limit —
@@ -618,7 +707,10 @@ def test_schedule_followup_registration_surfaces():
     from ouroboros.tools.followup import get_tools
 
     entries = get_tools()
-    assert [e.name for e in entries] == ["schedule_followup"]
+    # Both schedule-table tools live here, so the module's own surfaces are pinned
+    # together; `manage_schedules` keeps its separate authority pins in
+    # tests/test_consciousness_observe_dispatch.py.
+    assert [e.name for e in entries] == ["schedule_followup", "manage_schedules"]
     schema = entries[0].schema["parameters"]
     assert set(schema["required"]) == {"objective"}
     assert {"run_at", "cron"} <= set(schema["properties"])
@@ -638,3 +730,8 @@ def test_schedule_followup_registration_surfaces():
     from ouroboros.tools.registry import ToolRegistry
 
     assert "followup" in ToolRegistry._FROZEN_TOOL_MODULES
+    assert TOOL_POLICY["manage_schedules"] == POLICY_SKIP
+    assert "manage_schedules" in CORE_TOOL_NAMES
+    # Reading the table is research; changing it is refused inside the tool.
+    assert "manage_schedules" in LOCAL_READONLY_SUBAGENT_TOOL_NAMES
+    assert "manage_schedules" not in ACTING_SUBAGENT_TOOL_NAMES

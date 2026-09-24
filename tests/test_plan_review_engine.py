@@ -105,7 +105,7 @@ def harness(tmp_path, monkeypatch):
             task_contract={"objective": "Deliver the thing"},
             event_queue=events,
         )
-        ctx.emit_progress_fn = progress.append
+        ctx.emit_progress_fn = lambda text, **_kw: progress.append(text)  # the real binder accepts kwargs
         ctx.messages = messages
         return ctx
 
@@ -351,6 +351,7 @@ def test_cap_under_advisory_lets_the_agent_proceed_with_disclosure(harness, monk
     _call(ctx)
     second = _call(ctx, spec={**DECK_SPEC, "in_scope": ["a 6-slide deck"]})
     assert "PLAN_REVIEW_CYCLES_EXHAUSTED" in second and "Advisory enforcement" in second
+    assert "host records and" not in second and "your own answer is where they are stated" in second
     from ouroboros.owner_hurry import force_plan_decision, plan_review_disclosure
 
     decision = force_plan_decision(ctx, {}, enforcement="advisory")

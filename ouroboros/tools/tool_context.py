@@ -74,7 +74,9 @@ class ToolContext:
     pending_restart_reason: Optional[str] = None
     last_push_succeeded: bool = False
     last_reviewed_commit_sha: str = ""
-    emit_progress_fn: Callable[[str], None] = field(default=lambda _: None)
+    # The real binder accepts keyword facts (``narration=True`` for a tool that relays
+    # the model's own words); an unbound context must swallow them the same way.
+    emit_progress_fn: Callable[[str], None] = field(default=lambda _text, **_kw: None)
 
     # LLM-driven model/effort switch.
     active_model_override: Optional[str] = None

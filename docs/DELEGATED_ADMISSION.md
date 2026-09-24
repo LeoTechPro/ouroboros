@@ -41,6 +41,19 @@ The harness can execute model-generated commands under the operator's OS
 identity. It is not assumed hostile, but the host cannot review each command
 before it runs.
 
+When a private snapshot exists, the host appends a separate typed execution
+binding after the immutable inherited work order: the snapshot is the writable
+root and the stable project root is a read-only identity until explicit
+integration. Legacy engines that expose only the snapshot as `scope.root`
+receive the same binding using that root. Full native access does not make the
+binding enforceable by itself, so terminal capture records authority-tree drift
+as diagnostic evidence. A ready-no-changes result remains a normal no-change
+capture even when the shared authority tree moved; the evidence names the
+changed paths and keeps authorship unknown. A ready-with-changes result retains
+its private artifact and the existing locked apply check decides whether
+integration is safe. Excluded nested repositories remain outside the snapshot
+inventory and are disclosed as an untracked residual.
+
 A read-only child requests `mode: ask`, `access: readonly` under Claudexor's
 ordinary envelope. The host reads effective access back for both shapes;
 the delegated HOME/boundary checks below apply only to marker-carrying runs.

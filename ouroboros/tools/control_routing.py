@@ -20,6 +20,7 @@ from ouroboros.tools.control_events import (
     _emit_and_wait_for_routing,
     _promotion_pool_disabled_from_snapshot,
 )
+from ouroboros.tool_access_paths import canonical_data_root
 from ouroboros.tools.registry import ToolContext
 from ouroboros.utils import append_jsonl, utc_now_iso
 
@@ -37,7 +38,7 @@ def _predecessor_selector_error(value: Any, tool_name: str) -> str:
     if value is _MISSING_PREDECESSOR_SELECTOR or value is None:
         return (
             f"⚠️ TOOL_ARG_ERROR ({tool_name}): predecessor_task_id is required; "
-            "pass an empty string for fresh work or the host-listed result id to continue it"
+            "pass an empty string for fresh work or the id of a settled result to continue it"
         )
     return ""
 
@@ -95,6 +96,60 @@ def _inherited_project_scope(ctx: ToolContext) -> str:
     return _durable_project_of_request(ctx) or str(getattr(ctx, "project_id", "") or "")
 
 
+def _host_listed_predecessors(metadata: Dict[str, Any]) -> list:
+    """Every result THIS turn's host facts put in front of the model: the Main
+    lane's manifest, the room's own hint list, and the room's pointer row."""
+    rows: list = []
+    for key in ("main_routing_manifest", "project_routing_manifest"):
+        manifest = metadata.get(key)
+        if isinstance(manifest, dict) and isinstance(manifest.get("final_results"), list):
+            rows.extend(row for row in manifest["final_results"] if isinstance(row, dict))
+    previous = metadata.get("project_last_task_result")
+    if isinstance(previous, dict) and previous:
+        rows.append(previous)
+    return rows
+
+
+def _predecessor_door_refusal(result: Dict[str, Any]) -> str:
+    """Why this readable result may NOT be continued, or ``""``.
+
+    A PREDICATE on the result itself - settled, and a result rather than a pending
+    admission - never on where the caller sits, where the work lands or whether it
+    is a root's or a helper's: the pointer is rebuilt from the task id alone, the
+    successor inherits DATA (ceiling, origin and contract come from the caller and
+    admission), and a fresh root in the predecessor's project was always reachable.
+    The host list stays a hint; a foreign landing or a helper is disclosed, never refused.
+    """
+    from ouroboros.routing_wait import is_emitted_admission_stub
+    from ouroboros.task_status import SETTLED_STATUSES
+
+    status = str(result.get("status") or "")
+    if is_emitted_admission_stub(result):
+        return ("the selected predecessor is a promote whose admission is still pending, not a "
+                "result; read get_task_result on it, and name a settled result instead")
+    if status not in SETTLED_STATUSES:
+        return (
+            f"the selected predecessor is still live (status {status or 'unknown'}); "
+            "steer_task continues a live root, and promoting it would start a second one"
+        )
+    return ""
+
+
+def _predecessor_notes(predecessor_id: str, facts: Dict[str, Any], landed: str) -> str:
+    """What the receipt says about the predecessor once, like the second-project note: a
+    helper's result names its root (or parent), a foreign landing names both projects."""
+    if not predecessor_id:
+        return ""
+    home, root, parent = (str(facts.get(k) or "") for k in ("project_id", "root_task_id", "parent_task_id"))
+    lineage = f"its root is {root}" if root else (f"its parent is {parent}" if parent else "its root is unknown")
+    notes = f" Note: predecessor {predecessor_id} is a delegated helper's result; {lineage}." if facts.get("helper") else ""
+    if home != str(landed or ""):
+        where = f"project '{home}'" if home else "the main chat"
+        here = f"project '{landed}'" if landed else "the main chat"
+        notes += f" Note: predecessor {predecessor_id} belongs to {where}; this continuation runs in {here} (your choice)."
+    return notes
+
+
 def _attach_predecessor_authority_from_metadata(
     ctx: ToolContext, evt: Dict[str, Any], predecessor_task_id: str = "",
 ) -> str:
@@ -103,35 +158,39 @@ def _attach_predecessor_authority_from_metadata(
     selected_id = str(predecessor_task_id or "").strip()
     if not selected_id:
         return ""
-    previous = metadata.get("project_last_task_result")
-    manifest = metadata.get("main_routing_manifest")
-    candidates = (
-        manifest.get("final_results")
-        if isinstance(manifest, dict) and isinstance(manifest.get("final_results"), list)
-        else [previous] if isinstance(previous, dict) else []
-    )
-    previous = next((
-        row for row in candidates
-        if isinstance(row, dict) and str(row.get("task_id") or "") == selected_id
+    listed = next((
+        row for row in _host_listed_predecessors(metadata)
+        if str(row.get("task_id") or "") == selected_id
     ), None)
-    if not isinstance(previous, dict):
-        return (
-            "predecessor_task_id is not an addressable result in the host "
-            "routing manifest"
-        )
-    status_root = Path(str(
-        metadata.get("budget_drive_root")
-        or getattr(ctx, "budget_drive_root", "")
-        or ctx.drive_root
-    ))
-    if not load_effective_task_result(status_root, selected_id, materialize_artifacts=False):
+    result = load_effective_task_result(canonical_data_root(ctx), selected_id, materialize_artifacts=False)
+    if not isinstance(result, dict) or not result:
         return "the selected predecessor task result is missing or unreadable"
-    source = previous.get("authority_source") if isinstance(previous, dict) else None
+    refusal = _predecessor_door_refusal(result)
+    if refusal:
+        return refusal
+    if listed is not None:
+        # A row the host showed carries its own host-issued pointer, and only that
+        # one is accepted for it: rebuilding a source for a shown row would make a
+        # tampered manifest row indistinguishable from a host-built one.
+        source = listed.get("authority_source")
+    else:
+        from ouroboros.server_routing_context import _task_result_ground_truth
+
+        source = _task_result_ground_truth(result).get("authority_source")
     from ouroboros.agent_startup_checks import valid_task_result_authority_source
 
     if valid_task_result_authority_source(source, selected_id):
+        from ouroboros.server_routing_context import _is_child_result
+
         evt["predecessor_task_id"] = selected_id
         evt["predecessor_authority_source"] = dict(source)
+        # Render-only facts for the receipt's notes; the caller pops them before
+        # emission, so the event carries nothing the supervisor never reads.
+        evt["predecessor_facts"] = {
+            "project_id": str(result.get("project_id") or ""), "helper": _is_child_result(result),
+            "root_task_id": str(result.get("root_task_id") or ""),
+            "parent_task_id": str(result.get("parent_task_id") or ""),
+        }
     else:
         return "the selected predecessor has no readable authority source"
     return ""
@@ -156,26 +215,26 @@ ISSUER_TASK = "task"
 def _routing_issuer(ctx: ToolContext) -> Dict[str, Any]:
     """WHO speaks through this routing act -- minted by value where the host knows.
 
-    An OWNER TURN has direct owner ingress or a host-stamped ``client_message_id``.
-    Every other context speaks as a TASK, including a pooled root relaying an
-    owner message it just drained. ``last_owner_delivery`` keys the receipt,
-    never the issuer. The 14.09 incident decided this five times from proxies (a routing
-    contract a Swarm root never has, an empty client id read as "agent-issued",
-    a room veto keyed on the chat): the host now states it once, and the model
-    has no argument to claim otherwise.
+    An OWNER TURN is the direct turn the owner door stamped: ``is_direct_chat`` AND
+    ``run_origin``'s ``owner_ingress`` (``origin_message_ref`` / ``origin_suppressed``,
+    written only by owner routing). Every other context speaks as a TASK, including
+    a pooled root relaying an owner message it just drained. ``last_owner_delivery``
+    keys the receipt, never the issuer. The 14.09 incident decided this five times
+    from proxies (a routing contract a Swarm root never has, an empty client id read
+    as "agent-issued", a room veto keyed on the chat): the host now states it once,
+    and the model has no argument to claim otherwise.
 
-    A consciousness wake-up runs on the direct lane too, but nobody typed it: its
-    ``is_direct_chat`` fact does NOT make it an owner turn (PLAN 5.2a) — it
-    speaks as a task. An actual owner-ingress stamp still identifies an owner turn.
+    Neither the lane nor a client id makes an owner turn: a consciousness wake-up,
+    a Presence event (which carries the provider's event id as its client id) and
+    the auto-resume template all run on the direct lane, and nobody typed them; a
+    promoted root inherits the owner's stamp as ancestry but is not a direct turn.
+    All of them speak as a task.
     """
     metadata = getattr(ctx, "task_metadata", None)
     metadata = metadata if isinstance(metadata, dict) else {}
-    from ouroboros.consciousness_authority import is_consciousness_origin
+    from ouroboros.dialogue_provenance import run_origin
 
-    if (
-        (bool(getattr(ctx, "is_direct_chat", False)) and not is_consciousness_origin(metadata))
-        or str(metadata.get("client_message_id") or "").strip()
-    ):
+    if bool(getattr(ctx, "is_direct_chat", False)) and run_origin({"metadata": metadata})["owner_ingress"]:
         return {"kind": ISSUER_OWNER_TURN}
     task_id = str(getattr(ctx, "task_id", "") or "").strip()
     return {
@@ -227,7 +286,7 @@ def _effective_scope_note(ctx: ToolContext, project_id: str) -> str:
     try:
         from ouroboros.projects_registry import get_project
 
-        name = str((get_project(Path(ctx.drive_root), pid) or {}).get("name") or "").strip()
+        name = str((get_project(canonical_data_root(ctx), pid) or {}).get("name") or "").strip()
     except Exception:
         log.debug("promote: effective project name lookup failed", exc_info=True)
     return f" in project '{name}' ({pid})" if name and name != pid else f" in project '{pid}'"
@@ -410,6 +469,7 @@ def _promote_chat_to_task(
             "⚠️ AUTHORITY_SOURCE_UNAVAILABLE (promote_chat_to_task): "
             + predecessor_error
         )
+    predecessor_facts = dict(evt.pop("predecessor_facts", None) or {})
     _attach_client_surface(ctx, evt)
     _attach_unmet_obligation(ctx, evt)
     already_bound = _durable_project_of_request(ctx)
@@ -429,6 +489,7 @@ def _promote_chat_to_task(
             "Use wait_task/get_task_result if its result "
             "is needed in this conversation."
             + _second_project_note(ctx, already_bound, effective_pid)
+            + _predecessor_notes(str(evt.get("predecessor_task_id") or ""), predecessor_facts, effective_pid)
             + _obligation_moved_note(ctx, tid, confirmation.get("force_plan_transfer"))
         )
         return _finish_swarm_handoff(ctx, evt, response, status="scheduled")
@@ -470,7 +531,8 @@ def _promote_chat_to_task(
         f"⚠️ PROMOTE_UNCONFIRMED: task {tid} admission was not confirmed {confirmation_window}; "
         f"the requested destination was {_requested_scope_label(display_name, pid)} and the "
         "effective one is unknown until the admission is reconciled. Do not report this task as "
-        "created and do not retry automatically; keep this task id for reconciliation."
+        f"created and do not retry automatically: call get_task_result({tid}) to read the durable "
+        "outcome before promoting the same work again."
     )
     return _finish_swarm_handoff(
         ctx, evt, response, status="unconfirmed", reason=reason or "confirmation_timeout",
@@ -522,10 +584,12 @@ def _second_project_note(ctx: ToolContext, already_bound: str, effective_pid: st
 
 def _list_projects(ctx: ToolContext, limit: int = 50) -> str:
     """Enumerate the owner's projects (id, name, recency) so the one mind can
-    decide whether a main-chat message belongs to an existing project."""
+    decide whether a main-chat message belongs to an existing project. The registry
+    lives on the CANONICAL data root: a forked execution drive never carries
+    ``state/projects.json``, so reading the task's own drive answered "no projects"."""
     try:
         from ouroboros.projects_registry import projects_summary
-        rows = projects_summary(Path(ctx.drive_root), limit=max(1, min(int(limit or 50), 200)))
+        rows = projects_summary(canonical_data_root(ctx), limit=max(1, min(int(limit or 50), 200)))
     except Exception as exc:
         return f"⚠️ PROJECTS_ERROR: {type(exc).__name__}: {exc}"
     if not rows:
@@ -580,9 +644,10 @@ def _route_to_project(
     )
     if predecessor_error:
         return "⚠️ AUTHORITY_SOURCE_UNAVAILABLE (route_to_project): " + predecessor_error
+    predecessor_facts = dict(predecessor_event.pop("predecessor_facts", None) or {})
     requested_pid = str(project_id or "").strip()
     pid = sanitize_project_id(requested_pid) if requested_pid and explicit_project_id_ok(requested_pid) else ""
-    proj = get_project(Path(ctx.drive_root), pid) if pid else None
+    proj = get_project(canonical_data_root(ctx), pid) if pid else None
     failure = (
         "target_unspecified" if not requested_pid
         else "invalid_project_id" if not pid
@@ -698,6 +763,8 @@ def _route_to_project(
         response = (
             f"✉️ Routed to project '{name}' ({pid}) as task {tid}; admission is durably "
             f"scheduled ({mode}). I'll continue there; this chat stays free for you."
+            + _predecessor_notes(str(evt.get("predecessor_task_id") or ""), predecessor_facts,
+                                 str(receipt.get("effective_project_id") or pid))
             + _obligation_moved_note(ctx, tid, receipt.get("force_plan_transfer"))
         )
         return _finish_swarm_handoff(ctx, evt, response, status="scheduled")

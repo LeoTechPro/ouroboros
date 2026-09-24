@@ -121,7 +121,7 @@ def reconcile_task_runs(drive_root: Any, task_id: str, *,
 
 def reconcile_orphaned_runs(
     drive_root: Any,
-    running_task_ids: Optional[set] = None,
+    running_task_ids: Optional[Any] = None,
     *,
     gateway_factory: Optional[Callable[[], Any]] = None,
     recoverable_task_ids: Optional[set] = None,
@@ -131,19 +131,28 @@ def reconcile_orphaned_runs(
     The owner-is-gone predicate is the SAME one ``process_custody.reap_orphaned_processes``
     already uses (the supervisor's live task set), so a delegated run and a spawned
     process cannot disagree about whether their owner still exists. ``running_task_ids``
-    of None means UNKNOWN and reconciles nothing — never mass-cancel on missing info.
+    is that set, or a zero-arg callable producing it; None means UNKNOWN and reconciles
+    nothing — never mass-cancel on missing info.
     """
     if running_task_ids is None:
         return []
-    spared = set(recoverable_task_ids or ())
-    live_or_reserved = set(running_task_ids) | spared
-    orphans = [c for c in _custody().open_runs(drive_root) if c.task_id and c.task_id not in live_or_reserved]
+    # CANDIDATES FIRST, LIVENESS SECOND, exactly as the process reaper reads its ledger:
+    # replaying the custody log takes seconds, and a candidate exists ⇒ its owner was
+    # registered earlier (admission takes ``_queue_lock`` before any spawn), so an owner
+    # absent from the LATER snapshot is really gone rather than merely not yet admitted.
+    candidates = _custody().open_runs(drive_root)
     # The class ONE STEP EARLIER (P34R.2): an invocation whose POST the daemon may have
     # accepted but whose worker died before record_started has no run row for the sweep
     # above to find — a live mutating run nobody could ever collect. Recovered here on
     # the SAME owner-is-gone predicate; a pending invocation whose owner is ALIVE stays
     # untouched, because that owner holds the retry token and decides.
-    stray = [record for record in _custody().pending_invocations(drive_root)
+    unbound = _custody().pending_invocations(drive_root)
+    live = running_task_ids() if callable(running_task_ids) else running_task_ids
+    if live is None:
+        return []  # the snapshot could not be taken: still UNKNOWN, still touch nothing
+    live_or_reserved = set(live) | set(recoverable_task_ids or ())
+    orphans = [c for c in candidates if c.task_id and c.task_id not in live_or_reserved]
+    stray = [record for record in unbound
              if record["task_id"] and record["task_id"] not in live_or_reserved]
     return _reconcile_each(drive_root, orphans, gateway_factory, pending=stray)
 

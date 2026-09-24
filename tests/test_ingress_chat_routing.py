@@ -207,7 +207,7 @@ def test_derived_project_id_is_scoped_but_never_announced_in_main(tmp_path, monk
 
     A ``--workspace`` run derives ``proj_<hash>``; that id is project-SCOPED for
     lease and memory, but it has no registry row and therefore no thread. The
-    Main completion line offers "Open Project", so announcing a derived id would
+    Main completion line ends with the Project reference, so announcing a derived id would
     hand the owner a door into an empty duplicate of Main.
 
     The assertion is the GATE, not the delivery: the outbox needs a live
@@ -252,7 +252,7 @@ def test_main_is_told_a_project_finished_only_when_the_work_went_there(tmp_path,
     Main must be told it finished — otherwise the start row it already received
     hangs unanswered. A run merely SCOPED to an id that somebody registered later
     never entered that room, so announcing it would hand the owner the empty
-    "Open Project" this sprint exists to remove.
+    door this sprint exists to remove.
     """
     from ouroboros import project_dialogue
     from ouroboros.projects_registry import (

@@ -766,3 +766,25 @@ test('a child card folds its own tool calls live and takes no at-rest evidence r
         assert.doesNotMatch(folded()[0].innerHTML, /5 tool calls/);
     } finally { f.close(); }
 });
+
+test('#931 a typed checkpoint is a real expanded row without stealing narration', () => {
+    const f = fixture();
+    try {
+        f.census(managed());
+        f.emit('chat', { task_id: TASK, role: 'assistant', is_progress: true,
+            narration: true, content: 'Reading the source' });
+        const card = f.card();
+        const title = card.querySelector('[data-live-title]').textContent;
+        f.log({ type: 'task_checkpoint', checkpoint_kind: 'context_view', round: 3 });
+        if (card.dataset.expanded !== '1') {
+            card.querySelector('[data-live-summary-button]').listeners.get('click')[0]({ detail: 0 });
+        }
+        assert.ok(f.rows().some((row) => row.innerHTML.includes('Context inspected')));
+        assert.equal(card.querySelector('[data-live-title]').textContent, title);
+        f.log({ type: 'task_checkpoint', checkpoint_kind: 'context_view', round: 3 });
+        assert.equal(f.rows().filter((row) => row.innerHTML.includes('Context inspected')).length, 1);
+        const count = f.rows().length;
+        f.log({ type: 'worker_starting', worker_id: 0 });
+        assert.equal(f.rows().length, count);
+    } finally { f.close(); }
+});

@@ -294,11 +294,14 @@ def test_retained_purpose_never_rescues_a_stale_identity(tmp_path, monkeypatch):
 def test_both_server_sweeps_preserve_legacy_daemon_records(tmp_path, monkeypatch, surface):
     from ouroboros import server_maintenance
 
-    calls = []
+    import threading
+    from types import SimpleNamespace
+
+    calls, threads = [], []
     monkeypatch.setattr(server_maintenance, "DATA_DIR", tmp_path)
     monkeypatch.setattr(server_maintenance, "_installed_skill_names", lambda: None)
-    monkeypatch.setattr(server_maintenance, "_reconcile_delegated_runs", lambda _: None)
-    monkeypatch.setattr(server_maintenance, "_cursor_refresh_settled_terminals", lambda: None)
+    monkeypatch.setattr(server_maintenance, "_reconcile_delegated_runs", lambda *a, **kw: None)
+    monkeypatch.setattr(server_maintenance, "_cursor_refresh_settled_terminals", lambda *a, **kw: None)
     monkeypatch.setattr(server_maintenance, "_LAST_CANCEL_INTENT_SWEEP", [time.time()])
     monkeypatch.setattr(process_custody, "reap_orphaned_processes", lambda root, **kw: calls.append((root, kw)) or [])
     monkeypatch.setattr("ouroboros.delegate_terminal.backfill_terminal_reconciliations", lambda _: [])
@@ -308,7 +311,16 @@ def test_both_server_sweeps_preserve_legacy_daemon_records(tmp_path, monkeypatch
     if surface == "startup":
         server_maintenance._startup_custody_sweep()
     else:
+        # The 600 s block rides its own daemon thread now (INV-B); join it.
+        def tracked(**kwargs):
+            thread = threading.Thread(**kwargs)
+            threads.append(thread)
+            return thread
+
+        monkeypatch.setattr(server_maintenance, "threading", SimpleNamespace(Thread=tracked))
         server_maintenance._periodic_supervisor_maintenance([0], [time.time()])
+        for thread in threads:
+            thread.join(5)
     assert len(calls) == 1
     assert calls[0][0] == tmp_path
     assert calls[0][1]["retained_purposes"] == {claudexor_daemon.CUSTODY_PURPOSE}

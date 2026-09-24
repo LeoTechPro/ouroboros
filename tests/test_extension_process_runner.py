@@ -113,14 +113,14 @@ def test_child_extension_load_reuses_one_discovered_peer_snapshot(tmp_path, monk
         permissions=[],
     )
     calls = 0
-    real_discover = skill_loader.discover_skills
+    real_discover = skill_loader.discover_skill_identity
 
     def counted_discover(*args, **kwargs):
         nonlocal calls
         calls += 1
         return real_discover(*args, **kwargs)
 
-    monkeypatch.setattr(skill_loader, "discover_skills", counted_discover)
+    monkeypatch.setattr(skill_loader, "discover_skill_identity", counted_discover)
     monkeypatch.setattr("ouroboros.config.load_settings", lambda: {})
 
     runner._load_child_extension(

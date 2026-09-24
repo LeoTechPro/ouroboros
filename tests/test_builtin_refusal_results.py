@@ -744,7 +744,9 @@ def test_exact_start_decorates_the_native_result_without_losing_its_class(
 
     assert result.code == code
     payload = json.loads(result.text)
-    assert payload["selected_subagent_id"] == "session-builder"
+    # The actor is named by the snapshot's own handle (an older snapshot without
+    # a captured access keeps workspace_write); custody keeps the stored key.
+    assert payload["selected_subagent_id"] == "some-route=weak/low/workspace_write"
     assert payload["config_fingerprint"] == "cfg-v1"
     assert payload["work_order_source_request"] == {"schema": 1, "kind": "source_request"}
     assert payload["status"] == ("started" if produced == "started" else "refused")

@@ -546,11 +546,9 @@ def _profile_roots_hint(ctx: ToolContext, operation: str) -> str:
     model turns a dead-end error into a self-correcting retry instead of a
     probe loop over blocked roots (v6.70.0)."""
     try:
-        from ouroboros.tool_access import _POLICY, _effective_policy_profile
+        from ouroboros.tool_access import operation_roots
 
-        policy = _POLICY.get(_effective_policy_profile(active_tool_profile(ctx)), {})
-        visible = sorted(root for root, ops in policy.items() if operation in ops)
-        return f" Roots your profile can {operation}: {', '.join(visible) or '(none)'}."
+        return f" Roots your profile can {operation}: {operation_roots(active_tool_profile(ctx), operation)}."
     except Exception:
         return ""
 
@@ -871,7 +869,7 @@ def _list_files(
         if is_restricted_subagent_profile(ctx):
             if normalized == "system_repo":
                 items = _filter_subagent_secret_repo_listing(items, binding.base_path, ctx=ctx)
-            elif normalized in {"task_drive", "skill_payload", "artifact_store", "user_files"}:
+            elif normalized in {"task_drive", "skill_payload", "artifact_store", "user_files", "deliverables"}:
                 items = _filter_subagent_secret_listing(items, binding.base_path, ctx=ctx)
         return json.dumps(items, ensure_ascii=False, indent=2)
     except _ListingMiss as exc:

@@ -30,7 +30,59 @@ class DirectActivityEntry:
 
     actor: Any = field(default=None, repr=False, compare=False)
 
-    def to_dict(self) -> Dict[str, Any]:
+    def _live_model_wait_projection(self, *, availability: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """Read the direct turn's existing live ``TaskModelWait`` owner.
+
+        Direct turns do not have a queue ``RUNNING`` row to carry the wait
+        projection.  The actor's task-scoped ``ToolContext`` already points at
+        the live owner, so use that authority while it is open instead of
+        replaying a durable result or introducing a second poller/store.
+        """
+        try:
+            actor = self.actor
+            tools = getattr(actor, "tools", None)
+            context = getattr(tools, "_ctx", None)
+            owner = getattr(context, "model_wait_context", None)
+        except Exception:
+            if availability is not None:
+                availability["complete"] = False
+            log.debug("Direct activity owner lookup unavailable: %s", self.activity_id,
+                      exc_info=True)
+            return {}
+        if owner is None or str(getattr(owner, "task_id", "") or "") != self.activity_id:
+            return {}
+        if bool(getattr(owner, "closed", False)):
+            return {}
+        snapshot = getattr(owner, "snapshot", None)
+        if not callable(snapshot):
+            if availability is not None:
+                availability["complete"] = False
+            return {}
+        try:
+            projection = snapshot()
+        except Exception:
+            if availability is not None:
+                availability["complete"] = False
+            log.debug("Direct activity model-wait snapshot unavailable: %s", self.activity_id,
+                      exc_info=True)
+            return {}
+        if not isinstance(projection, dict):
+            if availability is not None:
+                availability["complete"] = False
+            return {}
+        result: Dict[str, Any] = {}
+        waits = projection.get("model_waits")
+        if isinstance(waits, dict) and waits:
+            result["model_waits"] = waits
+        try:
+            attempt = int(getattr(owner, "attempt", 0) or 0)
+        except (TypeError, ValueError):
+            attempt = 0
+        if attempt >= 1:
+            result["task_attempt"] = attempt
+        return result
+
+    def to_dict(self, *, availability: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         row = {
             "activity_id": self.activity_id,
             "chat_id": self.chat_id,
@@ -40,6 +92,15 @@ class DirectActivityEntry:
             "phase": self.phase,
             "started_at": self.started_at,
         }
+        # Keep the historical static shape for an actor that has not entered
+        # its task context yet. Once the direct turn owns a live model wait,
+        # publish the same optional fields as managed/post-task activities.
+        wait_availability: Dict[str, Any] = {}
+        row.update(self._live_model_wait_projection(availability=wait_availability))
+        if wait_availability.get("complete") is False:
+            row["phase"] = "unknown"
+            if availability is not None:
+                availability["complete"] = False
         return row
 
 
@@ -90,10 +151,13 @@ class DirectActivityRegistry:
             log.debug("Unregistered direct activity: %s (chat_id=%s)", aid, entry.chat_id)
         return entry
 
-    def snapshot(self, chat_id: Optional[int] = None) -> List[Dict[str, Any]]:
+    def snapshot(
+        self, chat_id: Optional[int] = None, *, availability: Optional[Dict[str, Any]] = None,
+    ) -> List[Dict[str, Any]]:
         with self._lock:
             entries = list(self._activities.values())
-        return [e.to_dict() for e in entries if chat_id is None or e.chat_id == int(chat_id)]
+        return [e.to_dict(availability=availability) for e in entries
+                if chat_id is None or e.chat_id == int(chat_id)]
 
     def get(self, activity_id: str) -> Optional[DirectActivityEntry]:
         aid = str(activity_id or "").strip()

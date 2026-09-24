@@ -78,6 +78,12 @@ def runtime_environ() -> dict[str, str]:
     """Explicit child environment with this task's next-task settings overlaid."""
     with SETTINGS_ENV_LOCK:
         env = dict(os.environ)
+    # Launcher authority belongs only to the launcher-owned server process. A
+    # child shell/server (including an external-workspace test fixture) must not
+    # inherit it and gain permission to run destructive managed bootstrap
+    # against its own checkout.
+    env.pop("OUROBOROS_MANAGED_BY_LAUNCHER", None)
+    env.pop("OUROBOROS_MANAGED_REPO_DIR", None)
     snapshot = _TASK_SETTINGS.get()
     if snapshot is not None:
         for key in _projected_keys() | snapshot.settings.keys():

@@ -64,7 +64,7 @@ def clock(monkeypatch, tmp_path):
         return dict(receipt)
 
     monkeypatch.setattr(workers, "handle_wake_direct", handle_wake_direct)
-    monkeypatch.setattr(clock_module, "allowance_window", lambda root, now=None: dict(AVAILABLE))
+    monkeypatch.setattr(clock_module, "allowance_window", lambda root, now=None, **_display_read: dict(AVAILABLE))
     monkeypatch.setattr(BackgroundConsciousness, "_running_roots", staticmethod(lambda: 1))
     get_direct_activity_registry().clear()
     clock = BackgroundConsciousness(tmp_path, tmp_path / "repo", lambda: store.get("owner_chat_id"), now=T0)
@@ -165,7 +165,7 @@ def test_a_live_wake_or_owner_turn_defers_the_wake(clock):
 
 def test_allowance_unknown_skips_with_a_typed_status_and_the_floor(clock, monkeypatch):
     monkeypatch.setattr(clock_module, "allowance_window",
-                        lambda root, now=None: {"status": "allowance_unknown", "error": "OSError: ledger"})
+                        lambda root, now=None, **_display_read: {"status": "allowance_unknown", "error": "OSError: ledger"})
     now = T0 + FLOOR + 1
     assert clock.clock.tick(now) == "skipped:allowance_unknown"
     assert clock.clock.next_wake_at == now + FLOOR
@@ -180,13 +180,13 @@ def test_allowance_exhausted_skips_until_the_window_frees(clock, monkeypatch):
     from ouroboros.deadline_utils import parse_deadline_ts
 
     resets_at = "2027-02-01T00:00:00+00:00"
-    monkeypatch.setattr(clock_module, "allowance_window", lambda root, now=None: {
+    monkeypatch.setattr(clock_module, "allowance_window", lambda root, now=None, **_display_read: {
         **AVAILABLE, "status": "exhausted", "accounted_usd": 21.0, "remaining_usd": 0.0, "resets_at": resets_at})
     assert clock.clock.tick(T0 + FLOOR + 1) == "skipped:allowance_exhausted"
     assert clock.clock.next_wake_at == parse_deadline_ts(resets_at).timestamp()
     assert clock.clock.status_snapshot()["last_wake_outcome"] == "skipped:allowance_exhausted"
     # A reset instant already in the past (or none: DAILY_USD=0) still waits at least the floor.
-    monkeypatch.setattr(clock_module, "allowance_window", lambda root, now=None: {
+    monkeypatch.setattr(clock_module, "allowance_window", lambda root, now=None, **_display_read: {
         **AVAILABLE, "status": "exhausted", "resets_at": ""})
     clock.clock._next_wake_at = T0
     assert clock.clock.tick(T0 + 5) == "skipped:allowance_exhausted"
@@ -290,7 +290,7 @@ def test_less_than_one_planned_turn_left_is_exhausted(clock, monkeypatch):
     from ouroboros.task_pacing import COST_PLANNING_MARGIN_USD
 
     thin = dict(AVAILABLE, remaining_usd=COST_PLANNING_MARGIN_USD, accounted_usd=20.0 - COST_PLANNING_MARGIN_USD)
-    monkeypatch.setattr(clock_module, "allowance_window", lambda root, now=None: dict(thin))
+    monkeypatch.setattr(clock_module, "allowance_window", lambda root, now=None, **_display_read: dict(thin))
     assert clock.clock.tick(T0 + FLOOR + 1) == "skipped:allowance_exhausted"
     assert clock.launches == []
     # On an exhausted day every root completion would otherwise pull the clock to "now" and cost a
@@ -526,6 +526,23 @@ def test_status_snapshot_carries_the_alarm_facts(clock):
     assert snapshot["next_wake_at"].startswith("2027-") and snapshot["last_wake_at"] == ""
     assert snapshot["spent_24h_usd"] == 2.5 and snapshot["daily_usd"] == 20.0
     assert snapshot["tasks_running"] == 1 and snapshot["max_tasks"] == 2 and snapshot["live_wake_task_id"] == ""
+
+
+def test_the_status_view_may_ride_a_snapshot_and_a_wake_admission_never_does(clock, monkeypatch):
+    """The status view shows money, so it may lag behind a contended ledger lock; the
+    wake ADMISSION spends it, so it reads exactly. One reader, two callers."""
+    reads: list = []
+
+    def window(root, now=None, **display_read):
+        reads.append(dict(display_read))
+        return dict(AVAILABLE)
+
+    monkeypatch.setattr(clock_module, "allowance_window", window)
+    clock.clock._allowance = (0.0, {})  # nothing cached: the view must read
+    clock.clock.status_snapshot()
+    assert reads == [{"allow_stale": True}]
+    clock.clock._allowance_view(T0, fresh=True)
+    assert reads[-1] == {"allow_stale": False}
 
 
 def test_start_after_a_long_off_period_never_announces_a_past_wake(clock, monkeypatch):

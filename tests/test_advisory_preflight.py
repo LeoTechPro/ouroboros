@@ -340,6 +340,7 @@ class TestHandleAdvisoryPreReviewSurfacesPreflightBlocked:
             adv, "_check_worktree_version_sync_shared",
             lambda *args, **kwargs: "",
         )
+        monkeypatch.setattr(adv, "_release_metadata_preflight", lambda *a, **kw: None)
         monkeypatch.setattr(
             adv, "compute_snapshot_hash", lambda *args, **kwargs: "deadbeef",
         )
@@ -408,6 +409,7 @@ class TestHandleAdvisoryPreReviewSurfacesPreflightBlocked:
         from ouroboros.tools import claude_advisory_review as adv
 
         repo = _make_agent_repo(tmp_path)
+        _init_git_repo(repo)
         _write_release_files(repo, version="5.99.0-rc.1")
         (repo / "uv.lock").write_text(
             '[[package]]\nname = "ouroboros"\nversion = "5.98.0"\n'
@@ -432,6 +434,7 @@ class TestHandleAdvisoryPreReviewSurfacesPreflightBlocked:
         from ouroboros.tools import claude_advisory_review as adv
 
         repo = _make_agent_repo(tmp_path)
+        _init_git_repo(repo)
         _write_release_files(repo, version="5.99.0-rc.1")
         (repo / "web").mkdir()
         (repo / "web" / "package.json").write_text(
@@ -657,6 +660,7 @@ class TestPreflightBlockedPersistence:
             adv, "_check_worktree_version_sync_shared",
             lambda *args, **kwargs: "",
         )
+        monkeypatch.setattr(adv, "_release_metadata_preflight", lambda *a, **kw: None)
         monkeypatch.setattr(
             adv, "compute_snapshot_hash",
             lambda *args, **kwargs: "preflight-test-hash",

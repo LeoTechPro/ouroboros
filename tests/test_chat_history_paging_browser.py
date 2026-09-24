@@ -494,7 +494,7 @@ def test_history_details_selection_replay_and_project_reopen(direct_server_with_
                     other = page.locator(f'{feed} [data-client-message-id="routed-other"]')
                     # The routing receipt's button lives in the shared action row between the note and the
                     # timestamp (never inside the nowrap note line): DESIGN "Quiz card", ARCHITECTURE 03.
-                    assert other.locator('.msg-routing-actions').get_by_role("button", name="Open Project").count() == 1
+                    assert other.locator('.msg-routing-actions [data-intent="open-project"]').count() == 1
                     assert other.locator('.msg-routing-annotation').get_by_role("button").count() == 0
                     assert other.evaluate("""node => {
                         const note = node.querySelector('.msg-routing-annotation'), row = node.querySelector('.msg-routing-actions'),
@@ -527,7 +527,7 @@ def test_history_details_selection_replay_and_project_reopen(direct_server_with_
                     other = page.locator(f'{reopened} [data-client-message-id="routed-other"]')
                     other.scroll_into_view_if_needed()
                     _screenshot(page, tmp_path, f"routing-other-project-{browser_engine}-{width}")
-                    other.get_by_role("button", name="Open Project").click()
+                    other.locator('.msg-routing-actions [data-intent="open-project"]').click()
                     destination_feed = f'#pchat-{destination["id"]}-messages'
                     page.locator(destination_feed).wait_for(state="visible", timeout=30_000)
                     _idle(page, destination_feed)

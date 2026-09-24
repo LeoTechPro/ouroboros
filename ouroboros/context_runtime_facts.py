@@ -161,6 +161,7 @@ def _delegation_capability_fact() -> Optional[Dict[str, Any]]:
     """
     try:
         from ouroboros.reviewer_slot_config import reviewer_slot_last_executions
+        from ouroboros.subagent_history import recorded_handle
         from ouroboros.subagents import subagent_last_delegation
 
         def _observed_label(ts: Any) -> str:
@@ -215,15 +216,20 @@ def _delegation_capability_fact() -> Optional[Dict[str, Any]]:
                 last_fact["requested_profile"] = str(last["requested_profile"])
             if last.get("applied_profile"):
                 last_fact["applied_profile"] = str(last["applied_profile"])
+            # Model-facing actor names are handles computed from each record's
+            # OWN facts; the stored key stays in the durable receipt file.
             if last.get("selected_subagent_id"):
-                last_fact["selected_subagent_id"] = str(last["selected_subagent_id"])
+                last_fact["selected_subagent_id"] = recorded_handle(last)
             for key in ("outcome", "failure_code", "reset_at", "occurred_at", "observed_at"):
                 if key in last:
                     last_fact[key] = last[key]
             delegation["subagent_last_delegation"] = last_fact
             rows = last.get("latest_by_subagent")
             if isinstance(rows, dict) and rows:
-                delegation["subagents_last_executions"] = list(rows.values())
+                delegation["subagents_last_executions"] = [
+                    {**row, "selected_subagent_id": recorded_handle(row)}
+                    for row in rows.values() if isinstance(row, dict)
+                ]
         if len(delegation) == 1:
             return None
         return delegation

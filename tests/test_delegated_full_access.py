@@ -112,6 +112,10 @@ def test_full_start_http_contract_and_real_snapshot_capture(full_run):
     assert 'ACCESS: full native process access is requested' in request['instructions']
     assert 'effective access is established by the run receipt' in request['instructions']
     assert 'private snapshot is not an OS sandbox' in request['instructions']
+    assert result['execution_root'] in request['instructions']
+    assert 'sole writable execution root' in request['instructions']
+    assert target in request['instructions']
+    assert 'read-only identity/reference' in request['instructions']
     assert request['instructions'].count('this line governs native process access') == 1
     assert 'OS-enforced boundary' not in result['note']
     assert facts['trust_posts'] == [{'repoRoot': target, 'allowFullAccess': True}]
@@ -121,6 +125,7 @@ def test_full_start_http_contract_and_real_snapshot_capture(full_run):
     assert not (Path(target) / 'native-result.py').exists()
     row = custody.replay(custody.custody_root(ctx))['full-run']
     assert row.access == 'full' and row.project_persistent and row.snapshot_id == key
+    assert row.execution_binding_fingerprint
     row.settled = True
     custody._CUSTODY['full-run'] = row
     capture = delegate._capture_terminal_patch(ctx, row)
@@ -279,3 +284,27 @@ def test_owner_http_save_projects_full_choice_into_task_start_snapshot(monkeypat
         assert response.status_code == 200
         assert selected['access'] == 'full'
         assert json.loads(start.environ[SUBAGENTS_SETTING])['items'][0]['access'] == 'full'
+
+
+@pytest.mark.parametrize("historical", [False, True])
+def test_retry_preserves_recorded_binding_evidence(full_run, monkeypatch, historical):
+    ctx, target, facts = full_run
+    facts["lost_start"] = True
+    with monkeypatch.context() as prior:
+        if historical:
+            prior.setattr(delegate, "execution_binding_fingerprint", lambda *args: "")
+            prior.setattr(delegate, "apply_execution_binding", lambda instructions, *args: instructions)
+        initial = delegate_payload(delegate._delegate_start(ctx, "Exact original assignment."))
+    invocation = initial["pending_invocation_id"]
+    drive = custody.custody_root(ctx)
+    recorded = custody.invocation_record(drive, invocation)
+    fingerprint = recorded["execution_binding_fingerprint"]
+    assert bool(fingerprint) is not historical
+    original_request = facts["requests"][0]
+    facts["lost_start"] = False
+    result = delegate_payload(delegate._delegate_start(
+        ctx, "Exact original assignment.", retry_of=invocation))
+    assert result["status"] == "started", result
+    assert facts["requests"] == [original_request, original_request]
+    assert custody.invocation_record(drive, invocation)["execution_binding_fingerprint"] == fingerprint
+    assert custody.replay(drive)["full-run"].execution_binding_fingerprint == fingerprint

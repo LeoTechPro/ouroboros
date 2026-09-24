@@ -14,11 +14,11 @@ test('a typed cause is stated in the owner\'s words', () => {
     // concept in front of an owner sentence is the same leak in a politer font.
     assert.equal(
         taskReasonDetail({ reason_code: 'plan_review_advisory' }),
-        'Plan review never closed; the work continued under advisory enforcement',
+        'The plan review was never closed; the work went on with what the reviewers said.',
     );
     assert.equal(
         taskReasonDetail({ reason_code: 'delivery_control_degraded' }),
-        'Delivery finished in a degraded control state',
+        "Ouroboros's final delivery instruction could not be applied, so the answer stands as delivered.",
     );
 });
 
@@ -70,6 +70,10 @@ test('an accepted decision with a sentence still states its cause', () => {
     });
     assert.equal(accepted('previous_revision_accepted'),
         'The reviewers approved an earlier version of this answer; the current version was not re-reviewed.');
+    // Owner 2A (2026-09-21): a blocking install accepts a reviewer-approved answer whose
+    // admission close the supervisor never confirmed, and the row says so.
+    assert.equal(accepted('admission_close_unconfirmed'),
+        'Reviewers approved this answer; the supervisor did not confirm that task admission was closed.');
     assert.equal(accepted('clean_pass'), '');
     assert.equal(accepted(''), '');
 });
@@ -83,7 +87,8 @@ test('every acceptance reason the host can record has a sentence', () => {
     const pkg = new URL('../../ouroboros/', import.meta.url);
     const read = (name) => readFileSync(new URL(name, pkg), 'utf8');
     const decisions = [
-        'loop_acceptance_review.py', 'loop_acceptance.py', 'loop_forced_finalization.py', 'acceptance_settlement.py',
+        'loop_acceptance_review.py', 'loop_acceptance.py', 'loop_delivery.py', 'loop_forced_finalization.py',
+        'acceptance_settlement.py',
     ].map(read).join('\n');
     const outcomes = read('outcomes.py');
     const acceptance = new Set([
@@ -155,7 +160,7 @@ const A4 = {
 test('an unaccepted decision explains the warning in its own words', () => {
     assert.equal(
         taskReasonDetail(A4),
-        'No reviewer verdict was established for this answer.',
+        'The reviewers did not reach a verdict on this answer.',
     );
     assert.doesNotMatch(taskReasonDetail(A4), /final_message/);
     // The stored reviewer rationale belongs to the card body, the task result
@@ -242,7 +247,7 @@ test('a healed custody debt yields the current execution reason on the card', ()
         reason_code: 'delegated_custody_unreconciled',
         delegated_runs_unreconciled: [],
         outcome_axes: { execution: { status: 'degraded', reason_code: 'tool_failure' } },
-    }), 'tool_failure');
+    }), 'A tool this task used failed and nothing recovered it');
 });
 
 test('an open custody debt is still named on the card', () => {
@@ -260,7 +265,7 @@ test('a real debt beside a real execution cause is one card line', () => {
         reason_code: 'delegated_custody_unreconciled',
         delegated_runs_unreconciled: ['run-a1', 'run-b2'],
         outcome_axes: { execution: { status: 'failed', reason_code: 'provider_unavailable' } },
-    }), 'provider_unavailable (Some delegated work was never reconciled.)');
+    }), 'The model provider stopped answering, so the task could not finish · Some delegated work was never reconciled.');
 });
 
 // A LIVE task_done event carries the row's own debt list too
@@ -275,7 +280,7 @@ test('a live event carrying an open debt list names the debt through the list', 
         reason_code: 'delegated_custody_unreconciled',
         delegated_runs_unreconciled: ['run-a1'],
         outcome_axes: { execution: { status: 'ok', reason_code: 'tool_failure' } },
-    }), 'tool_failure (Some delegated work was never reconciled.)');
+    }), 'A tool this task used failed and nothing recovered it · Some delegated work was never reconciled.');
 });
 
 test('a record carrying no debt list states nothing about the debt', () => {
@@ -283,7 +288,7 @@ test('a record carrying no debt list states nothing about the debt', () => {
         status: 'failed',
         reason_code: 'delegated_custody_unreconciled',
         outcome_axes: { execution: { status: 'failed', reason_code: 'provider_unavailable' } },
-    }), 'provider_unavailable');
+    }), 'The model provider stopped answering, so the task could not finish');
     assert.equal(taskReasonDetail({
         status: 'completed',
         reason_code: 'delegated_custody_unreconciled',
@@ -310,4 +315,86 @@ test('a healed debt with no execution cause states nothing on the card', () => {
         delegated_runs_unreconciled: [],
         outcome_axes: { execution: { status: 'ok' } },
     }), '');
+});
+
+// The plan review's outcome CLASS at delivery (outcome_axes.execution.plan_review) picks the
+// sentence for an open plan review; the stamped code stays `plan_review_advisory` on the
+// record. A record naming no class keeps the general sentence; an unknown class word is
+// never turned into a wrong sentence.
+
+const openPlan = (plan_review, extra = {}) => ({
+    status: 'completed', reason_code: 'plan_review_advisory', terminal_plan_review_open: true,
+    outcome_axes: { execution: { status: 'degraded', reason_code: 'plan_review_advisory', ...(plan_review ? { plan_review } : {}) } },
+    ...extra,
+});
+
+test('the plan review class picks the owner sentence for an open plan review', () => {
+    assert.equal(taskReasonDetail(openPlan('unanswered')),
+        'Only some of the plan reviewers answered; the work went on with their notes.');
+    assert.equal(taskReasonDetail(openPlan('none_answered')),
+        'None of the plan reviewers answered; the work went on without their notes.');
+    assert.equal(taskReasonDetail(openPlan('answered_open')),
+        'The plan reviewers answered, but the review was never closed; the work went on with their notes.');
+    // Legacy rows without a class, and a class nobody has a sentence for, keep the general sentence.
+    assert.equal(taskReasonDetail(openPlan('')),
+        'The plan review was never closed; the work went on with what the reviewers said.');
+    assert.equal(taskReasonDetail(openPlan('some_future_class')),
+        'The plan review was never closed; the work went on with what the reviewers said.');
+    // The class is a plan-review fact: another execution reason is never reworded by it, and the
+    // class states the standing limitation beside that reason (it rides the live event and the
+    // replayed row where the result-only flag does not); a record with neither stays silent.
+    assert.equal(taskReasonDetail({
+        status: 'completed', reason_code: 'budget_exhausted',
+        outcome_axes: { execution: { status: 'degraded', reason_code: 'budget_exhausted', plan_review: 'unanswered' } },
+    }), 'The task ran out of budget before it could finish cleanly · Only some of the plan reviewers answered; the work went on with their notes.');
+    assert.equal(taskReasonDetail({
+        status: 'completed', reason_code: 'budget_exhausted',
+        outcome_axes: { execution: { status: 'degraded', reason_code: 'budget_exhausted' } },
+    }), 'The task ran out of budget before it could finish cleanly');
+});
+
+test('a held task states why it was held and never that the work went on', () => {
+    const held = (source, reason) => taskReasonDetail({
+        status: 'completed', reason_code: 'final_message',
+        outcome_axes: { execution: { status: 'ok' }, review: { status: 'skipped' },
+            objective: { status: 'fail', source, reason, outcome_tier: 'blocked_with_evidence' } },
+    });
+    assert.equal(held('plan_review_quorum_unreachable', 'plan_review_quorum_unreachable'),
+        'Too few plan reviewers could answer, so the work was held.');
+    assert.equal(held('plan_review_cycles_exhausted', 'review_cycles_exhausted'),
+        'The task used up its review rounds before the answer was signed off.');
+    assert.equal(held('plan_review_author_stop', 'author_stop'),
+        'Ouroboros stopped with unfinished work; no review approval was granted.');
+    for (const line of [held('plan_review_quorum_unreachable', 'plan_review_quorum_unreachable')]) {
+        assert.doesNotMatch(line, /went on/);
+    }
+    // A Failed card held by anything else keeps stating nothing on a neutral final_message.
+    assert.equal(held('task_acceptance_review', 'review_fail'), '');
+});
+
+test('standing limitations are stated beside the primary cause, each once', () => {
+    const deferred = {
+        status: 'completed', reason_code: 'child_results_deferred', terminal_plan_review_open: true,
+        outcome_axes: { execution: { status: 'degraded', reason_code: 'child_results_deferred' },
+            objective: { status: 'best_effort', source: 'child_result_disposition', deferred_count: 2 } },
+    };
+    assert.equal(taskReasonDetail(deferred),
+        'Some sub-task results were deferred instead of being folded into this answer · The plan review was still open when this answer was delivered');
+    // The open plan review is worded by its class when the record names one; the plan clause is second.
+    assert.equal(taskReasonDetail({ ...deferred, outcome_axes: { ...deferred.outcome_axes,
+        execution: { ...deferred.outcome_axes.execution, plan_review: 'unanswered' } } }),
+    'Some sub-task results were deferred instead of being folded into this answer · Only some of the plan reviewers answered; the work went on with their notes.');
+    // A clause that is not last drops its own full stop; equivalent clauses state themselves once.
+    assert.equal(taskReasonDetail(openPlan('unanswered', { delegated_runs_unreconciled: ['run-a1'] })),
+        'Only some of the plan reviewers answered; the work went on with their notes.');
+    assert.equal(taskReasonDetail({ ...openPlan('unanswered'), reason_code: 'delegated_custody_unreconciled',
+        delegated_runs_unreconciled: ['run-a1'] }),
+    'Only some of the plan reviewers answered; the work went on with their notes · Some delegated work was never reconciled.');
+    // Without the flag or a deferred count the primary cause stands alone; an owner stop
+    // contributes no primary cause but still carries its limitation.
+    assert.equal(taskReasonDetail({ ...deferred, terminal_plan_review_open: false,
+        outcome_axes: { execution: deferred.outcome_axes.execution } }),
+    'Some sub-task results were deferred instead of being folded into this answer');
+    assert.equal(taskReasonDetail({ ...deferred, reason_code: 'owner_requested_finalization' }),
+        'Some sub-task results were deferred instead of being folded into this answer · The plan review was still open when this answer was delivered');
 });

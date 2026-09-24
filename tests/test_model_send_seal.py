@@ -553,6 +553,7 @@ def test_sweep_skips_every_conclusion_on_an_unreadable_ledger(data_root):
     (data_root / ua.LEDGER_REL).write_text("not-json\n{}\n", encoding="utf-8")
     report = seal_mod.reconcile_model_send_seals(data_root)
     assert report == {
+        "status": "unknown", "manifests_checked": 0,
         "seals": 0, "sealed_attempts": 0,
         "orphan_seals": 0, "unlogged_attempts": 0,
         "facts_written": 0, "truncated": False,
@@ -570,4 +571,6 @@ def test_sweep_rides_the_startup_family(data_root, monkeypatch):
     )
     # Neighbour sweep steps degrade fail-soft on this synthetic root.
     maintenance._startup_custody_sweep()
-    assert calls == [data_root]
+    # Historical reconciliation moved out of the synchronous custody sweep;
+    # the supervisor launches its session child after readiness.
+    assert calls == []

@@ -40,6 +40,7 @@ def restart_current_process(
     # an env pin: the next owner save must still apply on the following restart.
     env["OUROBOROS_SERVER_PORT"] = str(port)
     env.pop("OUROBOROS_MANAGED_BY_LAUNCHER", None)
+    env.pop("OUROBOROS_MANAGED_REPO_DIR", None)
     if owner_initiated:
         # The ratchet pin is exported so a CHILD inherits the parent's baseline
         # and cannot widen its own scope. Carried across an owner restart it also
@@ -112,6 +113,8 @@ def execute_panic_stop(
     recycled descriptor ports never authorize signalling an unrelated process.
     """
     log.critical("PANIC STOP initiated.")
+    from ouroboros.startup_historical_audit import audit
+    audit.stop()  # latch first; never wait for spawn/publication/exit or audit locks
     try:
         consciousness.stop()
     except Exception:

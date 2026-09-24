@@ -269,11 +269,11 @@ def test_migration_disable_reason_reaches_the_gate_diagnostic(roster_env):
     )
 
 
-def test_settings_save_validates_actor_refs_against_the_incoming_roster(roster_env, tmp_path, monkeypatch):
-    """S4 atomicity: one save may add a roster row AND reference it (validated
-    against the incoming roster, not the stale env); a roster-only save that
-    removes a still-referenced actor is refused instead of stranding every
-    strict review surface post-save."""
+@pytest.fixture()
+def settings_save(monkeypatch):
+    """A hermetic `POST /api/settings`: the returned `(post, saved)` pair drives
+    the real save handler over an in-memory settings document, so the roster and
+    reviewer-slot validation under test is the production one."""
     import asyncio
     import json as _json
 
@@ -281,7 +281,7 @@ def test_settings_save_validates_actor_refs_against_the_incoming_roster(roster_e
 
     import ouroboros.gateway.settings as gws
 
-    saved = {}
+    saved: dict = {}
 
     def _fake_load():
         from ouroboros.config import SETTINGS_DEFAULTS
@@ -298,10 +298,11 @@ def test_settings_save_validates_actor_refs_against_the_incoming_roster(roster_e
 
     monkeypatch.setattr(gws, "load_settings", _fake_load)
     monkeypatch.setattr(gws, "_owner_write_settings", _fake_write)
-    # This tests atomic roster validation, not the public model-catalog warning lookup.
+    # These tests cover atomic roster validation, not the public model-catalog
+    # warning lookup.
     monkeypatch.setattr(gws, "_unrecognised_review_models", lambda models: [])
-    # A successful save exports settings into os.environ; keep this test
-    # hermetic (the exported reviewer slots would leak into later tests).
+    # A successful save exports settings into os.environ; keep this hermetic
+    # (the exported reviewer slots would leak into later tests).
     monkeypatch.setattr(gws, "_apply_settings_to_env", lambda *a, **k: None)
 
     def _post(body):
@@ -312,6 +313,17 @@ def test_settings_save_validates_actor_refs_against_the_incoming_roster(roster_e
                            "query_string": b"", "app": None}, receive=_receive)
         return asyncio.run(gws.api_settings_post(request))
 
+    return _post, saved
+
+
+def test_settings_save_validates_actor_refs_against_the_incoming_roster(roster_env, settings_save):
+    """S4 atomicity: one save may add a roster row AND reference it (validated
+    against the incoming roster, not the stale env); a roster-only save that
+    removes a still-referenced actor is refused instead of stranding every
+    strict review surface post-save."""
+    import json as _json
+
+    _post, saved = settings_save
     roster_env.delenv("OUROBOROS_SUBAGENTS", raising=False)
     new_roster = _json.dumps({"enabled": True, "items": [{
         "subagent_id": "fresh-critic", "name": "Fresh", "recommended_use": "x",
@@ -331,3 +343,98 @@ def test_settings_save_validates_actor_refs_against_the_incoming_roster(roster_e
         "route": {"kind": "api_model", "target_id": "openai/gpt-5.5"}, "effort": "low"}]})
     resp2 = _post({"OUROBOROS_SUBAGENTS": empty_roster})
     assert resp2.status_code == 400, resp2.body[:300]
+
+
+def test_a_reference_to_an_owner_disabled_roster_row_refuses_typed(roster_env):
+    """The roster's per-row switch binds reviewer references exactly as it binds
+    delegation: the parser is the one authority, so the refusal is the same
+    fail-closed ValueError every consumer already treats as malformed — never a
+    silent fallback to another model or route."""
+    roster = json.loads(json.dumps(_ROSTER))
+    roster["items"][0]["enabled"] = False
+    roster_env.setenv("OUROBOROS_SUBAGENTS", json.dumps(roster))
+    roster_env.setenv(REVIEWER_SLOTS_ENV, _payload(
+        [{"slot_id": "t1", "subagent_id": "api-critic"}]))
+
+    with pytest.raises(ValueError) as refused:
+        load_reviewer_slot_config()
+    message = str(refused.value)
+    assert "api-critic" in message
+    assert "subagent_disabled" in message
+    assert "switched off" in message
+
+    # An enabled sibling reference still resolves: only the switched-off row is
+    # withdrawn, and the surviving positive path stays open.
+    roster_env.setenv(REVIEWER_SLOTS_ENV, _payload(
+        [{"slot_id": "t1", "subagent_id": "session-critic"}]))
+    config = load_reviewer_slot_config()
+    assert config.triad[0].subagent_id == "session-critic"
+
+
+def test_the_advisory_reference_is_bound_by_the_same_row_switch(roster_env):
+    roster = json.loads(json.dumps(_ROSTER))
+    roster["items"][1]["enabled"] = False
+    roster_env.setenv("OUROBOROS_SUBAGENTS", json.dumps(roster))
+    raw = json.dumps({
+        "triad": [{"slot_id": "t1", "subagent_id": "api-critic"}],
+        "scope": [{"slot_id": "s1", "route": {"kind": "api_chat", "target_id": "openai/gpt-5.6-terra"}}],
+        "advisory": {"enabled": True, "subagent_id": "session-critic"},
+    })
+    with pytest.raises(ValueError, match="subagent_disabled"):
+        parse_reviewer_slots(raw)
+
+
+def test_switching_off_a_still_referenced_actor_is_refused_with_an_actionable_400(
+    roster_env, settings_save,
+):
+    """The common-Save contract for the row switch: turning off a row a reviewer
+    still references refuses the WHOLE save (the draft stays in the browser,
+    nothing is persisted) and says exactly which reference and what to do —
+    never a silent clear of the reviewer, never a reroute."""
+    import json as _json
+
+    _post, saved = settings_save
+    roster_env.delenv("OUROBOROS_SUBAGENTS", raising=False)
+    roster = {"enabled": True, "items": [
+        {"subagent_id": "api-critic", "recommended_use": "x",
+         "route": {"kind": "api_model", "target_id": "openai/gpt-5.5"}, "effort": "low"},
+        {"subagent_id": "spare-critic", "recommended_use": "y",
+         "route": {"kind": "api_model", "target_id": "openai/gpt-5.6"}, "effort": "low"},
+    ]}
+    slots = _json.dumps({
+        "triad": [{"slot_id": "t1", "subagent_id": "api-critic"}],
+        "scope": [{"slot_id": "s1", "route": {"kind": "api_chat", "target_id": "openai/m"}}],
+        "advisory": {"enabled": False},
+    })
+    assert _post({
+        "OUROBOROS_SUBAGENTS": _json.dumps(roster),
+        "OUROBOROS_REVIEWER_SLOTS": slots,
+    }).status_code == 200
+    persisted_before = saved["OUROBOROS_SUBAGENTS"]
+
+    switched_off = _json.loads(_json.dumps(roster))
+    switched_off["items"][0]["enabled"] = False
+    refused = _post({"OUROBOROS_SUBAGENTS": _json.dumps(switched_off)})
+    assert refused.status_code == 400
+    detail = refused.body.decode()
+    assert "api-critic" in detail and "switched off" in detail
+    assert "Choose an enabled subagent_id" in detail
+    # Nothing landed: the owner's other draft edits are theirs to keep or fix.
+    assert saved["OUROBOROS_SUBAGENTS"] == persisted_before
+
+    # The same save may switch the row off AND reassign the reviewer: validated
+    # against the roster THIS save produces, so the atomic edit still works.
+    reassigned = _json.dumps({
+        "triad": [{"slot_id": "t1", "subagent_id": "spare-critic"}],
+        "scope": [{"slot_id": "s1", "route": {"kind": "api_chat", "target_id": "openai/m"}}],
+        "advisory": {"enabled": False},
+    })
+    accepted = _post({
+        "OUROBOROS_SUBAGENTS": _json.dumps(switched_off),
+        "OUROBOROS_REVIEWER_SLOTS": reassigned,
+    })
+    assert accepted.status_code == 200, accepted.body[:300]
+    stored = _json.loads(saved["OUROBOROS_SUBAGENTS"])
+    assert stored["items"][0]["enabled"] is False
+    assert "enabled" not in stored["items"][1]
+    assert _json.loads(saved["OUROBOROS_REVIEWER_SLOTS"])["triad"][0]["subagent_id"] == "spare-critic"

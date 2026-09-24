@@ -1114,11 +1114,18 @@ def test_sm1_stub_bumps_the_release_carriers_through_the_sync_ssot(tmp_path):
     bumped = carriers["VERSION"].strip()
     assert scenarios.version_is_bumped(seed, bumped) and f"| {bumped} |" in carriers["README.md"]
     root = tmp_path / "carriers"
+    root.mkdir()
+    # Release admission reads Git scope, so materialize carriers in a disposable
+    # repository rather than a bare directory.
+    subprocess.run(["git", "init", "-q"], cwd=str(root), check=True)
     for rel in sorted(CARRIER_SPAN_PATHS):
         if (REPO_ROOT / rel).is_file():
             (root / rel).parent.mkdir(parents=True, exist_ok=True)
             (root / rel).write_text(carriers.get(rel) or (REPO_ROOT / rel).read_text(encoding="utf-8"), encoding="utf-8")
     assert release_metadata_preflight(root, scenarios.SM1_COMMIT_MESSAGE, ["VERSION"]) is None
+    assert scenarios.release_carriers_desync_at(root, _commit(root, "coherent release")) == ""
+    (root / "pyproject.toml").write_text('[project]\nversion = "0.0.0"\n', encoding="utf-8")
+    assert "pyproject.toml" in scenarios.release_carriers_desync_at(root, _commit(root, "broken carrier"))
     assert scenarios.sm1_next_version("7.0.0-rc.14") == "7.0.0-rc.15" and scenarios.sm1_next_version("7.0.0") == "7.0.1"
     # A seed cloned from an older ref carries the newer tags: the stub skips taken versions.
     assert scenarios.sm1_next_version("7.0.0-rc.14", {"v7.0.0-rc.15", "v7.0.0-rc.16"}) == "7.0.0-rc.17"

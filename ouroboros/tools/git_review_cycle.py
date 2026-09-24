@@ -687,16 +687,16 @@ def _run_reviewed_stage_cycle(
     # Free-cycle identity runs before advisory freshness and any paid dispatch.
     author_source = getattr(ctx, "_author_commit_source", None)
     gate_outcome = None if author_source is not None else _git()._free_cycle_gate(
-        ctx, commit_message, commit_start,
-        pre_fingerprint=pre_fingerprint, review_rebuttal=review_rebuttal,
-        goal=goal, scope=scope,
+        ctx, commit_message, commit_start, pre_fingerprint=pre_fingerprint,
+        review_rebuttal=review_rebuttal, goal=goal, scope=scope,
     )
     advisory_replay: Optional[Dict[str, Any]] = None
     if author_source is not None:
         from ouroboros.tools.commit_gate import bind_author_commit_candidate
         preflight = bind_author_commit_candidate(ctx, commit_message, pre_fingerprint)
         if preflight:
-            return {"status": "blocked", "message": preflight, "block_reason": "preflight"}
+            from ouroboros.commit_admission import preflight_evidence_unavailable
+            return {"status": "blocked", "message": preflight, "block_reason": "infra_failure" if preflight_evidence_unavailable(preflight) else "preflight"}
         advisory_replay = {"advisory_replay": "Explicit current-author continuation; original reviewer facts retained.", "replay_reason": "author_finish"}
         skip_advisory_pre_review = True
     if gate_outcome is not None:

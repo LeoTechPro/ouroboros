@@ -57,8 +57,8 @@ BUDGET_ROOT_FENCES: Dict[str, Dict[str, Any]] = {}
 # FENCED under the queue lock, because a schedule event already draining would be
 # admitted after any number of cascade sweeps. Bounded in memory (newest kept) —
 # a cancelled tree is terminal, so an evicted entry names a tree that settled long
-# ago; the registry is per-process by design (a restart has no live descendants to
-# admit, and terminal task results are the durable truth).
+# ago; the registry is per-process because a restart re-derives it: restore cancels
+# the PENDING children of every interrupted root, and terminal results do the rest.
 CANCELLED_ROOT_FENCES: Dict[str, str] = {}
 _CANCELLED_ROOT_FENCE_CAP = 4096
 _CANCELLED_ROOT_FENCE_GRACE_SEC = 300.0

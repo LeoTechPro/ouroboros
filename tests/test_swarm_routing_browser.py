@@ -144,7 +144,7 @@ def test_swarm_admission_precedes_model_and_survives_replay_and_reload(
                     page.goto(server.base_url, wait_until="domcontentloaded")
                     page.wait_for_function("() => window.__testSockets?.[0]?.readyState === WebSocket.OPEN")
                     if project:
-                        # The same existing navigation event is used by Open Project
+                        # The same existing navigation event is used by the Project reference
                         # annotations and the side navigation, including mobile.
                         page.evaluate("project => window.dispatchEvent(new CustomEvent('ouro:open-project', {detail:{project}}))", project)
                         page.wait_for_selector('#project-panel:not([hidden])')

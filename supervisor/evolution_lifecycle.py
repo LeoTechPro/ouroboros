@@ -177,8 +177,8 @@ def enqueue_evolution_task_if_needed() -> None:
             role="system", system_type="evolution_notice")
         return
 
-    try:
-        remaining = q.budget_remaining(st, strict=True)
+    try:  # on the supervisor loop: ride the snapshot, decide the reserve refusal on the exact read
+        remaining = q.budget_remaining(st, strict=True, allow_stale=True, refuse_below=q.EVOLUTION_BUDGET_RESERVE)
     except Exception:
         log.error("Evolution scheduling deferred: cost accounting unavailable", exc_info=True)
         q.append_jsonl(q.DRIVE_ROOT / "logs" / "events.jsonl", {

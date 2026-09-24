@@ -187,3 +187,27 @@ def test_every_status_tone_the_card_emits_has_a_shared_rule_in_both_documents() 
     assert '.settings-inline-status[data-tone="neutral"]' in _read(ROOT / "web" / "ui.css")
     for document in ("index.html", "onboarding_template.html"):
         assert 'href="/static/ui.css"' in _read(ROOT / "web" / document), document
+
+
+def test_the_per_row_switch_is_one_shared_checkbox_saved_by_the_common_save() -> None:
+    """docs/DESIGN.md §3 "Controls and editable choices" + "List editors": the
+    per-row owner switch is the shared `.ui-checkbox` primitive with its own
+    accessible name and hit target, it leads the card head BEFORE the title, and
+    it is held as a draft that the section's ONE Save writes — no instant-save
+    request, and no dimming of the card it switches off."""
+    editor = _read(MODULES / "subagents_settings.js")
+    head = editor[editor.index('class="available-subagent-head"'):
+                  editor.index("available-subagent-purpose")]
+    assert head.index('data-subagent-field="enabled"') < head.index("available-subagent-heading")
+    assert 'class="available-subagent-enable"' in head
+    assert 'class="ui-checkbox" type="checkbox" data-subagent-field="enabled"' in head
+    assert 'aria-label="Subagent ${ordinal} enabled for new work"' in head
+    # One writer: the editor never posts by itself, and `false` is the only
+    # value it stores (an enabled row keeps its existing canonical bytes).
+    assert "apiClient" not in editor and "fetch(" not in editor
+    assert "row?.enabled === false ? { enabled: false } : {}" in editor
+    for shell in ("settings.css", "onboarding.css"):
+        sheet = _read(ROOT / "web" / shell)
+        assert ".available-subagent-enable {" in sheet, shell
+        assert "opacity" not in sheet[sheet.index(".available-subagent-enable {"):
+                                      sheet.index(".available-subagent-enable {") + 240], shell

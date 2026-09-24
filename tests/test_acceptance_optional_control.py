@@ -225,7 +225,9 @@ def test_feedback_ready_before_parking_preserves_answer_protocol(tmp_path, monke
     candidate = loop._replace_delivery_candidate(tools, ctx, trace, ANSWER, control="candidate")
     tools._ctx._task_acceptance_pending = "paid-binding"
     monkeypatch.setattr("ouroboros.acceptance_settlement.awaited_panel_has_settled", lambda *_: early == "settled")
-    monkeypatch.setattr("ouroboros.loop_transport._owner_signal_pending", lambda *_: early == "queued_wake")
+    # The stub takes the seam's keyword (owner_authority_only): the observation capture
+    # no longer swallows a stub's TypeError behind a blanket except.
+    monkeypatch.setattr("ouroboros.loop_transport._owner_signal_pending", lambda *_a, **_k: early == "queued_wake")
     monkeypatch.setattr("ouroboros.owner_wait.wait_after_tools", lambda *_a, **_k: pytest.fail("settled feedback must not park"))
     wait_for_acceptance_feedback(tools, ctx, trace, [], set())
     assert candidate.control_episode_seen
@@ -256,6 +258,8 @@ def test_return_order_preserves_feedback_identity_and_new_subjects(full_loop, mo
     revised = ANSWER + " Budget: $12."
     _order_acceptance_feedback(f, monkeypatch, ANSWER, order)
     if next_action == "held_effect" and order == "ready":
+        # The new subject's own admission fence is REFUSED (no token). That buys no model
+        # round any more: its panel runs on the disclosed rail and the final seal asks again.
         begins = []
         def begin(**_kwargs):
             begins.append(True)
@@ -280,21 +284,19 @@ def test_return_order_preserves_feedback_identity_and_new_subjects(full_loop, mo
                 assert any(source == {"task_id": f.run_args["task_id"], "run_index": index,
                                       "binding_hash": offered["binding_hash"]}
                            for message in messages for source in message.get("review_feedback", []))
-            if next_action == "effect":
+            if next_action == "effect" or (next_action == "held_effect" and order == "ready"):
                 return {"content": "", "tool_calls": [call("write_file", {
                     "root": "task_drive", "path": "new-effect.txt", "content": "Additional evidence.",
                 }, "effect")]}, 0.0
             if next_action == "nominate":
                 return {"content": "", "tool_calls": [call("task_acceptance_review", {"claim": revised}, "second")]}, 0.0
-        if f.model_step == 3 and next_action == "held_effect":
-            if order == "ready":
-                assert "supervisor could not atomically close" in str(messages)
-            else:
-                assert f.waits  # The real pending-panel wait held the rewritten answer.
+        if f.model_step == 3 and next_action == "held_effect" and order == "pending":
+            assert f.waits  # The real pending-panel wait held the rewritten answer.
             return {"content": "", "tool_calls": [call("write_file", {
                 "root": "task_drive", "path": "new-effect.txt", "content": "Additional evidence.",
             }, "held-effect")]}, 0.0
         if (f.model_step == 2 or (f.model_step == 3 and next_action == "effect")
+                or (f.model_step == 3 and next_action == "held_effect" and order == "ready")
                 or (f.model_step == 4 and next_action == "held_effect")):
             subject = {"owner_source_sha256": f.ctx._acceptance_observation["owner_source_sha256"]}
             if next_action == "criterion":
@@ -317,6 +319,13 @@ def test_return_order_preserves_feedback_identity_and_new_subjects(full_loop, mo
     if next_action in {"effect", "held_effect"}:
         effect = f.ctx.drive_root / "task_drives" / f.run_args["task_id"] / "new-effect.txt"
         assert effect.read_text(encoding="utf-8") == "Additional evidence."
+    if next_action == "held_effect" and order == "ready":
+        # The refused fence bought no round: the new subject was reviewed at once on the
+        # disclosed rail (the fourth round is the ordinary post-PASS control round, as for
+        # `effect`), and the answered re-seal closed admission as usual.
+        assert f.model_step == 4 and "TASK ACCEPTANCE WAIT" not in str(f.model_inputs)
+        assert len(begins) == 3  # the nomination's, the refused one, the answered re-seal
+        assert trace["acceptance_decision"]["reason"] == "clean_pass"
     if next_action == "rewrite":
         decision = trace["acceptance_decision"]
         assert decision["reason"] == "previous_revision_accepted"

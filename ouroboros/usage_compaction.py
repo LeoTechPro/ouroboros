@@ -939,6 +939,39 @@ def compact_usage_ledger_locked(
     return receipt
 
 
+def _durable_growth_floor(root: pathlib.Path) -> Optional[int]:
+    """The size the last committed pass READ, taken from the ledger itself.
+
+    A pass swaps the file, so the moment one process folds, every other
+    process's inode-keyed memo stops matching and re-enters a full pass on its
+    next reservation — and a process that has just started has no memo at all
+    while the residue keeps the file above the trigger for good. The guard
+    therefore cannot live in process memory: it is a property of the ledger,
+    and the pass already stamps it into line 1 as ``source_size_bytes``, so
+    every process reads the same number. Lock-free, one ``readline``: appends
+    never touch line 1 and the swap is atomic, so the row is complete
+    whichever generation answers.
+
+    ``None`` means this ledger states no floor — no stamp, a leading row that
+    cannot be read (the caller's own read reports that, and masking it here
+    would hide it), or a recorded size that is not a positive count. The
+    per-process memo then stays the only guard, exactly as before.
+
+    Disclosed cost: the stamp names the PRE-pass size, so after a high-gain
+    fold the next pass waits until the file outgrows what the last one read.
+    """
+    try:
+        header = _live_baseline_header(root)
+    except (UsageLedgerCorrupt, OSError):
+        return None
+    if not header:
+        return None
+    size = header.get("source_size_bytes")
+    if not isinstance(size, int) or isinstance(size, bool) or size <= 0:
+        return None
+    return size
+
+
 def maybe_compact_usage_ledger_locked(
     root: pathlib.Path | str,
     *,
@@ -947,18 +980,21 @@ def maybe_compact_usage_ledger_locked(
     """Opportunistic trigger on the monetary write path (under the held lock).
 
     ``os.stat`` fast-path below ``config.USAGE_LEDGER_COMPACT_BYTES``; above
-    it, a per-process growth guard throttles re-attempts after ANY pass, not
-    only an unprofitable one. A success used to clear the memo, which left the
-    threshold as the only brake: the unfoldable residue (group rows, retained
-    idempotent and review-attributed rows) never shrinks, so once it reaches
-    the trigger every reservation ran a full rewrite of the authority under
-    the held lock and copied the whole live file into a new archive segment
-    for a gain of a few kilobytes. Remembering the COMPACTED size instead
-    makes the memo mean "the ledger size when this process last ran a pass",
-    so the next one waits for ``USAGE_LEDGER_COMPACT_RETRY_GROWTH_BYTES`` of
-    real growth whatever the last outcome was. Every failure is contained:
-    this never raises into the caller's reservation (a corrupt ledger still
-    fails in the normal read)."""
+    it, TWO growth guards, and a pass runs only past both. The unfoldable
+    residue (group rows, retained idempotent and review-attributed rows, and
+    terminal rows younger than the fold horizon) never shrinks below the
+    trigger, so without a brake every reservation would rewrite the whole
+    authority under the held lock and copy the live file into a new archive
+    segment for a gain of a few kilobytes.
+
+    The durable one is the floor this ledger carries (``_durable_growth_floor``):
+    it is what makes the brake hold ACROSS processes, which a memo cannot.
+    The per-process memo records the size this process's last pass left behind,
+    whatever its outcome, and throttles a pass that aborted — an abort changes
+    no bytes, so the stamp still names the window that let it in.
+
+    Every failure is contained: this never raises into the caller's
+    reservation (a corrupt ledger still fails in the normal read)."""
     try:
         root = pathlib.Path(_drive_root(root))
     except Exception:
@@ -972,13 +1008,17 @@ def maybe_compact_usage_ledger_locked(
 
     if stat.st_size < int(config.USAGE_LEDGER_COMPACT_BYTES):
         return False
+    retry_growth = int(config.USAGE_LEDGER_COMPACT_RETRY_GROWTH_BYTES)
     key = str(root.resolve(strict=False))
     with _COMPACT_ATTEMPTS_LOCK:
         prior = _COMPACT_ATTEMPTS.get(key)
     if prior is not None and prior[:2] == (stat.st_ino, stat.st_dev) and (
-        stat.st_size < prior[2] + int(config.USAGE_LEDGER_COMPACT_RETRY_GROWTH_BYTES)
+        stat.st_size < prior[2] + retry_growth
     ):
-        return False
+        return False  # this process already ran a pass on these bytes
+    floor = _durable_growth_floor(root)
+    if floor is not None and stat.st_size < floor + retry_growth:
+        return False  # somebody's pass read this ledger; it has not regrown since
     receipt: Optional[Dict[str, Any]] = None
     try:
         receipt = compact_usage_ledger_locked(root, heartbeat=heartbeat)

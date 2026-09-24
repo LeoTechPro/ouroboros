@@ -219,9 +219,7 @@ def unsettled_start_ids(
     """
 
     mine = str(task_id or "")
-    snapshot = list(rows) if rows is not None else list(
-        custody._iter_rows(custody.event_log_path(drive_root))
-    )
+    snapshot = list(rows) if rows is not None else list(custody.custody_rows(drive_root))
     runs = custody.replay(drive_root, rows=snapshot)
     return {
         "open_run_ids": [

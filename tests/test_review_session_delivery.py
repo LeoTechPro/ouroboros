@@ -51,6 +51,34 @@ def test_failed_session_state_is_an_error_actor_not_a_verdict(tmp_path, fake_rou
     assert "ended failed" in actor["error"]
 
 
+def test_an_untyped_engine_failure_keeps_its_reported_words_as_a_record_field(tmp_path, fake_route):
+    """An engine failure with `code: null` still says WHY in `safeMessage`. The host's
+    `run_failed` is only the run's terminal STATE; the words ride beside it as the
+    `reported_cause` field instead of surviving only inside the `error` prose."""
+    words = "Selected model is at capacity. Please try a different model."
+    detail = _terminal_detail("", state="failed")
+    detail["summary"]["failure"] = {"phase": "harness", "category": "harness_error",
+                                    "code": None, "safeMessage": words}
+    fake_route.detail = detail
+    result = run_review_request(_agent_request(), slots=[_agent_slot()],
+                                drive_root=tmp_path, llm=FakeLLM())
+    actor = result.actors[0]
+    assert (actor["status"], actor["failure_code"], actor["reported_cause"]) == (
+        "error", "run_failed", words)
+    # Other direction: a failure the engine said nothing about, and a delivered review,
+    # carry no words.
+    fake_route.detail = _terminal_detail("partial…", state="failed")
+    custody._CUSTODY.clear()
+    silent = run_review_request(_agent_request(), slots=[_agent_slot()],
+                                drive_root=tmp_path / "silent", llm=FakeLLM()).actors[0]
+    assert (silent["failure_code"], silent["reported_cause"]) == ("run_failed", "")
+    fake_route.detail = _terminal_detail("[]", conformance="passed")
+    custody._CUSTODY.clear()
+    delivered = run_review_request(_agent_request(), slots=[_agent_slot()],
+                                   drive_root=tmp_path / "ok", llm=FakeLLM()).actors[0]
+    assert (delivered["status"], delivered["reported_cause"]) == ("ok", "")
+
+
 def test_applied_access_is_the_receipt_alone_never_the_request_echoed_back(tmp_path, fake_route):
     """`applied_access` promises APPLIED facts, verbatim from the run's own telemetry
     receipt. The daemon computes `access` as `effectiveAccess ?? the client's own parsed
@@ -638,8 +666,8 @@ def test_session_is_never_restarted_for_format_repair(tmp_path, fake_route, monk
 
 def test_a_pool_exhausted_terminal_is_typed_like_a_spent_window(tmp_path, fake_route):
     """Cross-repo forward-compat (B1): a newer engine reports a spent credential POOL
-    with its own RunFailureCode. Same timer-healing semantics, same exception class —
-    with the ORIGINAL code preserved, never relabelled. An unknown code stays the
+    with its own RunFailureCode. A DATED pool gets the same timer-healing semantics and
+    exception class — with the ORIGINAL code preserved, never relabelled. An unknown code stays the
     generic typed refusal (fail-open: old engines emit code:null and behave as today)."""
     from ouroboros.gateways.claudexor import (
         ClaudexorSubscriptionWindowExhausted, ClaudexorUnavailable)

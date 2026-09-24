@@ -479,21 +479,48 @@ exactly the per-row branch taken `weight` times with the sums pre-added.
   because they report a lost race the next pass simply repeats rather than a
   cause an operator has to diagnose. A structurally corrupt ledger still fails
   in the normal read path with the normal error.
-- Thrash guard: a per-process memo of the last attempted (inode, size); after
-  ANY pass — unprofitable (nothing foldable / no shrink / verify-abort) or
-  committed — the next pass runs only once the file grows by
-  `…_RETRY_GROWTH_BYTES` beyond the size that pass left, or the file is
-  replaced by someone else. A success arms the memo with the COMPACTED size
-  and the new inode, because the threshold alone is no brake: the unfoldable
-  residue (group rows, retained idempotent and review-attributed rows) only
-  grows, so once it reaches the trigger every reservation would run a full
-  rewrite of the authority under the held lock and copy the whole live file
-  into a new archive segment for a gain of a few kilobytes. Profitability is
-  not the question the guard asks; a pass is worth its cost only after real
+- Thrash guard, in two parts, and a pass runs only past both. The threshold
+  alone is no brake: the unfoldable residue (group rows, retained idempotent
+  and review-attributed rows, terminal rows younger than the fold horizon)
+  only grows, so once it reaches the trigger every reservation would run a
+  full rewrite of the authority under the held lock and copy the whole live
+  file into a new archive segment for a gain of a few kilobytes. Profitability
+  is not the question the guard asks; a pass is worth its cost only after real
   growth.
+  - **The floor is the ledger's own, so it holds across processes.** The
+    header the last committed pass stamped into line 1 records
+    `source_size_bytes`, the size that pass READ, and no pass runs until the
+    live file reaches it plus `…_RETRY_GROWTH_BYTES`. Read lock-free by
+    `_live_baseline_header` (one `readline`; appends never touch line 1 and
+    the swap is atomic), so every process answers from the same number. This
+    is what a per-process memo cannot do: a committed pass REPLACES the file,
+    so at that instant every other process's memo stops matching and re-enters
+    a pass, and a freshly started process has no memo at all while the residue
+    holds the file above the trigger for good. Measured on the owner's live
+    install before this floor: 100 passes archiving 2.37 GB in three days for
+    4.88 MB of live-file gain, 93 of 99 consecutive passes entered after less
+    than 1 MB of growth. **Disclosed cost:** the stamp names the PRE-pass
+    size, so after a high-gain fold the next pass waits until the file
+    outgrows what the last one read — deliberately conservative, and the 20 MB
+    tripwire below is what watches it. No floor is claimed when the ledger
+    states none: no stamp (nothing has folded here yet), a leading row that
+    cannot be read at all (the caller's own read reports that corruption — the
+    guard neither raises it early nor stands in for the pass), or a recorded
+    size that is not a positive count.
+  - **The per-process memo remains, for the pass that changed nothing.** It
+    holds the last attempted (inode, size) and arms after ANY pass —
+    unprofitable (nothing foldable / no shrink / verify-abort) or committed,
+    where it takes the COMPACTED size and the new inode. An abort leaves the
+    bytes untouched, so the ledger's own floor still names the window that let
+    that pass in; only the memo can throttle the retry. It is also the whole
+    guard on a ledger that states no floor.
 - `USAGE_LEDGER_WARN_BYTES` (20 MB) stays as the regression tripwire above the
-  mechanism, exactly like the rotation-bounded log warns: it now fires only if
-  compaction is broken or the unfoldable residue itself reaches 20 MB.
+  mechanism, exactly like the rotation-bounded log warns: it fires if
+  compaction is broken, if the unfoldable residue itself reaches 20 MB, or if
+  the floor above is still holding a ledger that has not outgrown what its
+  last pass read. The startup note on `state/usage_attempts.jsonl`
+  (`agent_startup_checks._hot_store_thresholds`) names all three, because the
+  last one is declined before the pass and so leaves no typed event.
 
 ## 10. History readers: model-send reconciliation and audits
 
@@ -730,7 +757,11 @@ tests/fixtures_usage_compaction.py)
 6. **Idempotency survives**: subscription/external replays after compaction
    dedup (no double charge) and still conflict-check; legacy import stays
    correct with and without its watermark.
-7. **Trigger policy**: no compaction below threshold; thrash guard holds;
+7. **Trigger policy**: no compaction below threshold; the growth guard holds
+   ACROSS processes — the floor a pass stamps into the ledger throttles every
+   other process and every freshly started one, and the per-process memo still
+   throttles a pass that aborted, a ledger that states no floor, and one whose
+   leading row cannot be read (which stays the normal read's error to report);
    verify-abort leaves the ledger untouched; the pass is entered with the
    monetary lock demonstrably HELD *and* with that lock's heartbeat wired
    through — the parameter is required, so a caller that drops it raises

@@ -36,9 +36,9 @@ def _terminal(tmp_path, *, current, task_id="parent1"):
     text, usage, trace = loop._handle_provider_unavailable(ctx, error_kind="provider_outcome_unknown",
         wait_cause="transport_unavailable", waited_sec=125.0)
     assert text == RAW
-    assert "waited and redialed for 2.1 min" in usage["terminal_provider_notice"]
-    assert "no terminal provider outcome" in usage["terminal_provider_notice"]
-    assert "no further retry or paid fallback was sent" in usage["terminal_provider_notice"]
+    assert "spent 2.1 min in the provider wait" in usage["terminal_provider_notice"]
+    assert "no confirmed provider outcome" in usage["terminal_provider_notice"]
+    assert "waited and redialed" not in usage["terminal_provider_notice"]
     return text, usage, trace
 
 
@@ -78,7 +78,7 @@ def test_pipeline_delivery_and_rebuild_keep_raw_bytes_and_known_wait_custody(tmp
 
 @pytest.mark.parametrize("outcome", ["message", "deferred", "silent", "tool_delivered"])
 @pytest.mark.parametrize("current", [False, True])
-def test_actual_presence_render_and_cached_read_keep_failure_notice_over_pending_outcome(tmp_path, monkeypatch, outcome, current):
+def test_actual_presence_and_cached_read_keep_authored_speech_and_owner_notice_separate(tmp_path, monkeypatch, outcome, current):
     monkeypatch.setattr(pipeline, "_run_post_task_processing_async", lambda *_a, **_k: None)
     repo, data = tmp_path / "repo", tmp_path / "data"
     repo.mkdir()
@@ -106,8 +106,7 @@ def test_actual_presence_render_and_cached_read_keep_failure_notice_over_pending
     stored = load_task_result(data, first.task_id)
     assert stored["result"] == RAW
     assert "no terminal provider outcome" in stored["terminal_provider_notice"]
-    assert first.text.startswith(RAW + "\n\n[Host status]")
-    assert first.text.count("[Host status]") == 1
+    assert first.text == (RAW if current else "")
     assert stored["metadata"]["presence_result_text"] == first.text
     assert first.work_ref == "next-task"
 

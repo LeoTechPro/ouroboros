@@ -1111,7 +1111,7 @@ def test_runtime_identity_deletion_uses_the_selected_mode(tmp_path, monkeypatch,
     if mode == "cyber_pro":
         assert "exit_code=0" in result and not identity.exists(), result
     else:
-        assert "WORKSPACE_SHELL_BLOCKED" in result
+        assert "IDENTITY_DELETE_BLOCKED" in result, result  # owner 5A: the bare word no longer fences a root; the identity guard refuses
         assert identity.read_text() == "identity\n"
 
 

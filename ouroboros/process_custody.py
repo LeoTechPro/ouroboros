@@ -735,12 +735,16 @@ def quiesce_custodied_services(
 def reap_orphaned_processes(
     drive_root: pathlib.Path,
     *,
-    running_task_ids: Optional[set] = None,
+    running_task_ids: Optional[Any] = None,
     live_owner_skills: Optional[set] = None,
     enforce_companion_reap: bool = False,
     retained_purposes: Optional[set[str]] = None,
 ) -> List[int]:
     """Kill ledgered processes whose owning generation/task is gone.
+
+    ``running_task_ids`` is the live-owner set, or a zero-arg callable that
+    produces it — read AFTER the ledger, never before (see below). ``None``
+    still means UNKNOWN: no task-owner decision is taken at all.
 
     Rules:
       - dead pid / fingerprint mismatch → prune the entry, never kill;
@@ -780,6 +784,12 @@ def reap_orphaned_processes(
     _, entries, previous = _read_ledger_records(drive_root, strict=False)
     if not entries:
         return []
+    # CANDIDATES FIRST, LIVENESS SECOND. A candidate exists ⇒ its owner was registered
+    # earlier (admission takes ``_queue_lock`` before any spawn), so an owner absent
+    # from this LATER snapshot is really gone — while a set read BEFORE the ledger
+    # reaps a task admitted during the read (the sweep runs off the loop thread).
+    if callable(running_task_ids):
+        running_task_ids = running_task_ids()
     retained_roots = {
         int(entry["pid"]) for entry in entries
         if ((entry.get("scope") == "daemon" and not str(entry.get("purpose") or "").startswith("companion:"))

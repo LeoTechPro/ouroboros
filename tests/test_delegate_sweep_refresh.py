@@ -133,9 +133,10 @@ def test_boot_backfill_fixes_row_settled_in_a_previous_generation(tmp_path):
     assert custody == {
         "unreconciled": [], "trigger": "boot_backfill", "audit_status": "ok",
         "open_run_ids": [], "pending_invocation_ids": [], "undisposed_patch_run_ids": [],
-        "terminal_runs": [{"run_id": "run-1", "state": "succeeded", "model": "",
-                           "profile_id": "", "selected_subagent_id": ""}],
+        # The stored actor key stays in the durable audit row, never in this model-facing handoff.
+        "terminal_runs": [{"run_id": "run-1", "state": "succeeded", "model": "", "profile_id": ""}],
     }
+    assert "selected_subagent_id" in envelope["terminal_runs"][0]
 
 
 def test_truncated_custody_disclosure_names_both_retry_lineage_rows(tmp_path):
@@ -684,3 +685,35 @@ def test_cursor_defers_running_task_without_starving_later_settlements(tmp_path)
         (tmp_path / "state/delegate_terminal_refresh_cursor.json").read_text()
     )
     assert cursor["deferred"] == {}
+
+
+def test_cursor_refresh_defers_a_task_whose_owner_is_still_live(tmp_path):
+    """The cursor pass reads the SAME live-owner source as the two custody sweeps
+    (INV-B): a task whose result is terminal while its worker still bills — the
+    post-task synthesis window — is deferred, not rewritten under the live owner.
+    Candidates first, liveness second: the batch comes from the log, the live set
+    is read afterwards. Both directions, one file."""
+    import json
+
+    _emit_started(tmp_path, "run-live", "t-still-billing")
+    write_task_result(
+        tmp_path, "t-still-billing", STATUS_FAILED,
+        actual_substrate="harness_attempted",
+        delegated_runs_started=1, delegated_runs_settled=0,
+        delegated_runs_succeeded=0, delegated_runs_failed=0,
+        delegated_runs_source_unresolved=0,
+    )
+    _emit_settled(tmp_path, "run-live", "t-still-billing")
+
+    assert delegate_terminal.refresh_recently_settled_terminals(
+        tmp_path, live_task_ids=lambda: {"t-still-billing"}) == 0
+    assert load_task_result(tmp_path, "t-still-billing")["actual_substrate"] == "harness_attempted"
+    cursor = json.loads(
+        (tmp_path / "state/delegate_terminal_refresh_cursor.json").read_text(encoding="utf-8")
+    )
+    assert list(cursor["deferred"]) == ["t-still-billing"]
+
+    # Quiet direction: once the owner is gone the deferred task heals from the map.
+    assert delegate_terminal.refresh_recently_settled_terminals(
+        tmp_path, live_task_ids=lambda: set()) == 1
+    assert load_task_result(tmp_path, "t-still-billing")["actual_substrate"] == "harness_used"

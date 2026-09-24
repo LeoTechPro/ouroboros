@@ -44,6 +44,7 @@ from ouroboros.configured_subagents import (
     ConfiguredSubagents,
     configured_subagents_dict,
     normalize_configured_subagents,
+    roster_save_error,
 )
 
 from ouroboros.gateway.owner_settings import (
@@ -647,7 +648,8 @@ def _prepared_settings(
     # existing pure owner-reader so merely rendering an unsaved draft can never
     # persist unrelated compatibility state.
     old_settings = dict(base_settings) if base_settings is not None else load_settings()
-    prepared, error = prepare_onboarding_settings(body, old_settings)
+    error = roster_save_error(body.get(SUBAGENTS_SETTING), old_settings, body)  # twins: only a roster change is judged
+    prepared, error = ({}, error) if error else prepare_onboarding_settings(body, old_settings)
     if error:
         return old_settings, {}, str(error)
     normalized, _changed, _keys = apply_runtime_provider_defaults(prepared)

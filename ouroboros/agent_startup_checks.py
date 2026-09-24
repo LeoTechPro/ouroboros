@@ -751,8 +751,10 @@ def _hot_store_thresholds() -> Tuple[Tuple[str, int, str], ...]:
             "(~0.5s hold at 20MB — see usage_ledger.py); size-triggered "
             "compaction (usage_compaction.py, CPL4-C6) should hold the file "
             "far below this — growth can mean broken compaction, a large "
-            "unfoldable residue, a policy abort, or refusal on the name tier "
-            "(no kernel locks). Check usage_ledger_compaction_refused or "
+            "unfoldable residue, a policy abort, refusal on the name tier "
+            "(no kernel locks), or a file that has not yet outgrown the floor "
+            "its last committed pass stamped into the ledger header (declined "
+            "before the pass, so no event). Check usage_ledger_compaction_refused or "
             "usage_ledger_compaction_skipped in events.jsonl; the two snapshot-race "
             "exits before archive/swap only log warnings, without a typed event.",
         ),
@@ -847,11 +849,12 @@ def hot_store_growth_notes(env: Any) -> list:
         notes.append(
             "WARNING: HOT STORE GROWTH — the events chain (logs/events.jsonl + "
             f"archive/events_*.jsonl) totals {events_chain_size / 1_000_000:.1f} MB "
-            f"(threshold {EVENTS_ARCHIVE_SCAN_WARN_BYTES // 1_000_000} MB). Custody "
-            "replay scans this chain on ownership questions. Legacy segments retain "
-            "inline delegated request bodies; new start rows reference the observability "
-            "store, without shrinking existing history. Investigate chain "
-            "indexing/compaction; archives are durable history and are never deleted."
+            f"(threshold {EVENTS_ARCHIVE_SCAN_WARN_BYTES // 1_000_000} MB). Each process's "
+            "first custody read folds this whole chain into its row memo (later reads fold "
+            "only appended bytes); forensic and retirement scans still walk it. Legacy "
+            "segments retain inline delegated request bodies; new start rows reference the "
+            "observability store, without shrinking existing history. Investigate a durable "
+            "compact custody projection; archives are durable history and are never deleted."
         )
     from ouroboros.context_budget import RETAINED_EXECUTION_DRIVES_WARN_COUNT
     from ouroboros.headless import HEADLESS_TASKS_DIR, TASK_DRIVES_DIR

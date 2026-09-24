@@ -2,6 +2,15 @@
   "purpose": "One status-word family across the browser and the host. Every case is a terminal-or-not task record read by log_events.js (taskDoneIsTerminal + taskTerminalPhase + taskPresentation) and by ouroboros.project_dialogue (outcome_phase + OUTCOME_PHASE_HEADLINE + _completion_verdict). Every typed cause with an owner sentence carries a case here, so the two TASK_CAUSE_PHRASES twins cannot drift apart unnoticed. A new axis, reason or acceptance status is added to both sides in the same commit, with a row here.",
   "cases": [
     {
+      "name": "unrecovered model handover shows a readable warning",
+      "record": {
+        "status": "completed", "reason_code": "authoring_handover_incomplete",
+        "outcome_axes": {"execution": {"status": "degraded"}, "objective": {"status": "not_evaluated"}}
+      },
+      "phase": "warn", "headline": "Done with warnings",
+      "acceptance_clause": "The replacement model stopped before resuming tool work."
+    },
+    {
       "name": "definite pre-branch publication failure stays Failed beside degraded review",
       "record": {
         "status": "completed",
@@ -111,7 +120,7 @@
       },
       "phase": "warn",
       "headline": "Done with warnings",
-      "acceptance_clause": "No reviewer verdict was established for this answer."
+      "acceptance_clause": "The reviewers did not reach a verdict on this answer."
     },
     {
       "name": "an accepted decision leaves the execution reason standing",
@@ -174,7 +183,7 @@
       },
       "phase": "error",
       "headline": "Failed",
-      "acceptance_clause": "provider_unavailable (Some delegated work was never reconciled.)"
+      "acceptance_clause": "The model provider stopped answering, so the task could not finish · Some delegated work was never reconciled."
     },
     {
       "name": "a healed custody debt names the current execution cause alone",
@@ -186,7 +195,7 @@
       },
       "phase": "error",
       "headline": "Failed",
-      "acceptance_clause": "provider_unavailable."
+      "acceptance_clause": "The model provider stopped answering, so the task could not finish."
     },
     {
       "name": "a record carrying no debt list states nothing about the debt",
@@ -197,42 +206,42 @@
       },
       "phase": "error",
       "headline": "Failed",
-      "acceptance_clause": "provider_unavailable."
+      "acceptance_clause": "The model provider stopped answering, so the task could not finish."
     },
     {
       "name": "acceptance reason author_finish says its own sentence",
       "record": {"status": "completed", "outcome_axes": {"execution": {"status": "ok"}, "review": {"status": "degraded", "acceptance_decision": {"status": "finalized_unaccepted", "reason": "author_finish"}}}},
       "phase": "warn",
       "headline": "Done with warnings",
-      "acceptance_clause": "The answer was delivered on Main's own judgement; the reviewers had not signed it off."
+      "acceptance_clause": "Ouroboros delivered this answer on its own judgement; the reviewers had not signed it off."
     },
     {
       "name": "acceptance reason review_degraded says its own sentence",
       "record": {"status": "completed", "outcome_axes": {"execution": {"status": "ok"}, "review": {"status": "degraded", "acceptance_decision": {"status": "finalized_unaccepted", "reason": "review_degraded"}}}},
       "phase": "warn",
       "headline": "Done with warnings",
-      "acceptance_clause": "No reviewer verdict was established for this answer."
+      "acceptance_clause": "The reviewers did not reach a verdict on this answer."
     },
     {
       "name": "acceptance reason infra_failure says its own sentence",
       "record": {"status": "completed", "outcome_axes": {"execution": {"status": "ok"}, "review": {"status": "degraded", "acceptance_decision": {"status": "finalized_unaccepted", "reason": "infra_failure"}}}},
       "phase": "warn",
       "headline": "Done with warnings",
-      "acceptance_clause": "A review infrastructure failure prevented a settled verdict."
+      "acceptance_clause": "The review could not run because of an infrastructure failure, so there is no verdict."
     },
     {
       "name": "acceptance reason dialogue_terminal says its own sentence",
       "record": {"status": "completed", "outcome_axes": {"execution": {"status": "ok"}, "review": {"status": "degraded", "acceptance_decision": {"status": "finalized_unaccepted", "reason": "dialogue_terminal"}}}},
       "phase": "warn",
       "headline": "Done with warnings",
-      "acceptance_clause": "The reviewers and Main could not agree, and both positions were kept."
+      "acceptance_clause": "The reviewers and Ouroboros could not agree, and both positions were kept."
     },
     {
       "name": "acceptance reason improvement_capsule says its own sentence",
       "record": {"status": "completed", "outcome_axes": {"execution": {"status": "ok"}, "review": {"status": "degraded", "acceptance_decision": {"status": "finalized_unaccepted", "reason": "improvement_capsule"}}}},
       "phase": "warn",
       "headline": "Done with warnings",
-      "acceptance_clause": "The reviewers asked for one more pass and Main was given their notes."
+      "acceptance_clause": "The reviewers asked for one more pass and Ouroboros was given their notes."
     },
     {
       "name": "acceptance reason fence_reopen_failed says its own sentence",
@@ -393,7 +402,7 @@
       "record": {"status": "completed", "reason_code": "delivery_control_degraded", "outcome_axes": {"execution": {"status": "degraded"}}},
       "phase": "warn",
       "headline": "Done with warnings",
-      "acceptance_clause": "Delivery finished in a degraded control state."
+      "acceptance_clause": "Ouroboros's final delivery instruction could not be applied, so the answer stands as delivered."
     },
     {
       "name": "execution reason host_child_status_suffix says its own sentence",
@@ -407,14 +416,49 @@
       "record": {"status": "completed", "reason_code": "invalid_delivery_control_after_repair", "outcome_axes": {"execution": {"status": "degraded"}}},
       "phase": "warn",
       "headline": "Done with warnings",
-      "acceptance_clause": "The delivery control object was still malformed after repair."
+      "acceptance_clause": "Ouroboros's final delivery instruction could not be read even after repair, so the answer stands as delivered."
     },
     {
       "name": "execution reason plan_review_advisory says its own sentence",
       "record": {"status": "completed", "reason_code": "plan_review_advisory", "outcome_axes": {"execution": {"status": "degraded"}}},
       "phase": "warn",
       "headline": "Done with warnings",
-      "acceptance_clause": "Plan review never closed; the work continued under advisory enforcement."
+      "acceptance_clause": "The plan review was never closed; the work went on with what the reviewers said."
+    },
+    {
+      "name": "a plan review that was only awaited is Done and states that fact",
+      "record": {"status": "completed", "reason_code": "final_message", "outcome_axes": {"execution": {"status": "ok", "reason_code": "final_message", "plan_review": "awaiting"}, "review": {"status": "skipped"}}},
+      "phase": "done",
+      "headline": "Done",
+      "acceptance_clause": "Not every plan reviewer had answered when the task ended."
+    },
+    {
+      "name": "an awaited plan review on a card that is amber for another reason states no cause",
+      "record": {"status": "completed", "reason_code": "final_message", "outcome_axes": {"execution": {"status": "ok", "reason_code": "final_message", "plan_review": "awaiting"}, "objective": {"status": "not_evaluated", "warning": "residual_tool_errors_without_review"}, "review": {"status": "skipped"}}},
+      "phase": "warn",
+      "headline": "Done with warnings",
+      "acceptance_clause": ""
+    },
+    {
+      "name": "an awaited plan review on a card that is red for another reason states no cause",
+      "record": {"status": "completed", "reason_code": "final_message", "outcome_axes": {"execution": {"status": "ok", "reason_code": "final_message", "plan_review": "awaiting"}, "artifacts": {"status": "missing"}, "review": {"status": "skipped"}}},
+      "phase": "error",
+      "headline": "Failed",
+      "acceptance_clause": ""
+    },
+    {
+      "name": "an acceptance panel that was only awaited is Done under the author's own finish",
+      "record": {"status": "completed", "reason_code": "final_message", "outcome_axes": {"execution": {"status": "ok"}, "objective": {"status": "pass", "source": "author_acceptance", "reason": "author_finish"}, "review": {"status": "awaiting", "eligibility": "review_in_flight", "acceptance_decision": {"status": "finalized_unaccepted", "reason": "author_finish", "enforcement": "advisory", "author_action": "finish", "author_disposition": {"disposition": "accepted", "rationale": "Main submitted this complete response for delivery.", "subject_hash": "s1", "reviewer_signal": "", "enforcement": "advisory", "recorded_at": "2026-09-20T00:00:00+00:00", "source": "author_final_response"}}}}},
+      "phase": "done",
+      "headline": "Done",
+      "acceptance_clause": "Ouroboros delivered this answer on its own judgement; the reviewers had not signed it off."
+    },
+    {
+      "name": "an awaited acceptance panel with no author decision is still not a warning",
+      "record": {"status": "completed", "reason_code": "final_message", "outcome_axes": {"execution": {"status": "ok"}, "review": {"status": "awaiting"}}},
+      "phase": "done",
+      "headline": "Done",
+      "acceptance_clause": ""
     },
     {
       "name": "an open delegated-custody debt says its own sentence",
@@ -443,6 +487,13 @@
       "phase": "done",
       "headline": "Done",
       "acceptance_clause": "The reviewers approved an earlier version of this answer; the current version was not re-reviewed."
+    },
+    {
+      "name": "reviewers approved, the supervisor never confirmed the admission close: Done, and the row says so (owner 2A)",
+      "record": {"status": "completed", "reason_code": "final_message", "outcome_axes": {"execution": {"status": "ok"}, "review": {"status": "pass", "acceptance_decision": {"status": "accepted", "reason": "admission_close_unconfirmed", "enforcement": "blocking"}}, "objective": {"status": "pass", "source": "task_acceptance_review", "review_status": "pass", "outcome_tier": "solved"}}},
+      "phase": "done",
+      "headline": "Done",
+      "acceptance_clause": "Reviewers approved this answer; the supervisor did not confirm that task admission was closed."
     },
     {
       "name": "current informed Advisory author finish preserves raw critic fail",
@@ -478,7 +529,7 @@
       },
       "phase": "done",
       "headline": "Done",
-      "acceptance_clause": "The answer was delivered on Main's own judgement; the reviewers had not signed it off."
+      "acceptance_clause": "Ouroboros delivered this answer on its own judgement; the reviewers had not signed it off."
     },
     {
       "name": "current informed Advisory author finish preserves raw critic degraded",
@@ -514,10 +565,10 @@
       },
       "phase": "done",
       "headline": "Done",
-      "acceptance_clause": "The answer was delivered on Main's own judgement; the reviewers had not signed it off."
+      "acceptance_clause": "Ouroboros delivered this answer on its own judgement; the reviewers had not signed it off."
     },
     {
-      "name": "Blocking saved plan cap remains unfinished through host normalization",
+      "name": "Blocking saved plan cap remains unfinished through host normalization, and the card says why it was held (a held task never reads as work that went on)",
       "record": {
         "status": "completed",
         "reason_code": "final_message",
@@ -538,10 +589,10 @@
       },
       "phase": "error",
       "headline": "Failed",
-      "acceptance_clause": ""
+      "acceptance_clause": "The task used up its review rounds before the answer was signed off."
     },
     {
-      "name": "Blocking saved plan author stop remains unfinished through host normalization",
+      "name": "Blocking saved plan author stop remains unfinished through host normalization, and the card says why it was held (a held task never reads as work that went on)",
       "record": {
         "status": "completed",
         "reason_code": "final_message",
@@ -562,7 +613,112 @@
       },
       "phase": "error",
       "headline": "Failed",
-      "acceptance_clause": ""
+      "acceptance_clause": "Ouroboros stopped with unfinished work; no review approval was granted."
+    },
+    {
+      "name": "a blocking plan review whose reviewers were too few holds the work, and the card says so",
+      "record": {"status": "completed", "reason_code": "final_message", "outcome_axes": {"execution": {"status": "ok"}, "objective": {"status": "fail", "source": "plan_review_quorum_unreachable", "reason": "plan_review_quorum_unreachable", "outcome_tier": "blocked_with_evidence"}, "review": {"status": "skipped"}}},
+      "phase": "error",
+      "headline": "Failed",
+      "acceptance_clause": "Too few plan reviewers could answer, so the work was held."
+    },
+    {
+      "name": "a held task that also recorded the open-review flag and a class states only why it was held",
+      "record": {"status": "completed", "reason_code": "final_message", "terminal_plan_review_open": true, "outcome_axes": {"execution": {"status": "ok", "plan_review": "none_answered"}, "objective": {"status": "fail", "source": "plan_review_quorum_unreachable", "reason": "plan_review_quorum_unreachable", "outcome_tier": "blocked_with_evidence"}, "review": {"status": "skipped"}}},
+      "phase": "error",
+      "headline": "Failed",
+      "acceptance_clause": "Too few plan reviewers could answer, so the work was held."
+    },
+    {
+      "name": "only some of the plan reviewers answered: Done with warnings, and the card says so",
+      "record": {"status": "completed", "reason_code": "plan_review_advisory", "terminal_plan_review_open": true, "outcome_axes": {"execution": {"status": "degraded", "reason_code": "plan_review_advisory", "plan_review": "unanswered"}}},
+      "phase": "warn",
+      "headline": "Done with warnings",
+      "acceptance_clause": "Only some of the plan reviewers answered; the work went on with their notes."
+    },
+    {
+      "name": "none of the plan reviewers answered: Done with warnings, and the card says so",
+      "record": {"status": "completed", "reason_code": "plan_review_advisory", "terminal_plan_review_open": true, "outcome_axes": {"execution": {"status": "degraded", "reason_code": "plan_review_advisory", "plan_review": "none_answered"}}},
+      "phase": "warn",
+      "headline": "Done with warnings",
+      "acceptance_clause": "None of the plan reviewers answered; the work went on without their notes."
+    },
+    {
+      "name": "every plan reviewer answered but the review was never closed: Done with warnings, and the card says so",
+      "record": {"status": "completed", "reason_code": "plan_review_advisory", "terminal_plan_review_open": true, "outcome_axes": {"execution": {"status": "degraded", "reason_code": "plan_review_advisory", "plan_review": "answered_open"}}},
+      "phase": "warn",
+      "headline": "Done with warnings",
+      "acceptance_clause": "The plan reviewers answered, but the review was never closed; the work went on with their notes."
+    },
+    {
+      "name": "the advisory reason states the open plan review once",
+      "record": {"status": "completed", "reason_code": "plan_review_advisory", "terminal_plan_review_open": true, "outcome_axes": {"execution": {"status": "degraded"}}},
+      "phase": "warn",
+      "headline": "Done with warnings",
+      "acceptance_clause": "The plan review was never closed; the work went on with what the reviewers said."
+    },
+    {
+      "name": "an open plan review is stated beside the deferred children that ended the task",
+      "record": {"status": "completed", "reason_code": "child_results_deferred", "terminal_plan_review_open": true, "outcome_axes": {"execution": {"status": "degraded", "reason_code": "child_results_deferred"}, "objective": {"status": "best_effort", "source": "child_result_disposition", "deferred_count": 2}}},
+      "phase": "warn",
+      "headline": "Done with warnings",
+      "acceptance_clause": "Some sub-task results were deferred instead of being folded into this answer · The plan review was still open when this answer was delivered."
+    },
+    {
+      "name": "an unanswered plan review is worded by its class and stated second, beside the deferred children that ended the task",
+      "record": {"status": "completed", "reason_code": "child_results_deferred", "terminal_plan_review_open": true, "outcome_axes": {"execution": {"status": "degraded", "reason_code": "child_results_deferred", "plan_review": "unanswered"}, "objective": {"status": "best_effort", "source": "child_result_disposition", "deferred_count": 2}}},
+      "phase": "warn",
+      "headline": "Done with warnings",
+      "acceptance_clause": "Some sub-task results were deferred instead of being folded into this answer · Only some of the plan reviewers answered; the work went on with their notes."
+    },
+    {
+      "name": "an acceptance limitation never hides the deferred children",
+      "record": {"status": "completed", "reason_code": "child_results_deferred", "terminal_plan_review_open": true, "outcome_axes": {"execution": {"status": "degraded", "reason_code": "child_results_deferred"}, "objective": {"status": "best_effort", "source": "child_result_disposition", "deferred_count": 1}, "review": {"status": "degraded", "acceptance_decision": {"status": "finalized_unaccepted", "reason": "review_skipped_deadline_reserve"}}}},
+      "phase": "warn",
+      "headline": "Done with warnings",
+      "acceptance_clause": "There was not enough time left to review the answer · Some sub-task results were deferred instead of being folded into this answer · The plan review was still open when this answer was delivered."
+    },
+    {
+      "name": "deferred sub-task results speak in the owner's words",
+      "record": {"status": "completed", "reason_code": "child_results_deferred", "outcome_axes": {"execution": {"status": "degraded", "reason_code": "child_results_deferred"}, "objective": {"status": "best_effort", "source": "child_result_disposition", "deferred_count": 3}}},
+      "phase": "warn",
+      "headline": "Done with warnings",
+      "acceptance_clause": "Some sub-task results were deferred instead of being folded into this answer."
+    },
+    {
+      "name": "an unrecovered tool failure speaks in the owner's words",
+      "record": {"status": "completed", "reason_code": "tool_failure", "outcome_axes": {"execution": {"status": "degraded", "reason_code": "tool_failure"}}},
+      "phase": "warn",
+      "headline": "Done with warnings",
+      "acceptance_clause": "A tool this task used failed and nothing recovered it."
+    },
+    {
+      "name": "an internal error is a failure the owner can read",
+      "record": {"status": "failed", "reason_code": "task_exception", "outcome_axes": {"execution": {"status": "infra_failed", "reason_code": "task_exception"}}},
+      "phase": "error",
+      "headline": "Failed",
+      "acceptance_clause": "The task stopped on an internal error."
+    },
+    {
+      "name": "a local acceptance-preparation failure states the host's own cause, not a reviewer's",
+      "record": {"status": "completed", "outcome_axes": {"execution": {"status": "ok"}, "review": {"status": "degraded", "acceptance_decision": {"status": "finalized_unaccepted", "reason": "acceptance_preparation_failed", "acceptance_incident": {"incident_id": "acceptance-preparation:1f2e3d4c", "status": "failed", "stage": "preparation", "attempts": 1, "source_known": true, "failure_kind": "UnicodeDecodeError"}}}}},
+      "phase": "warn",
+      "headline": "Done with warnings",
+      "acceptance_clause": "Ouroboros could not assemble the evidence for this answer's review, so this preparation attempt dispatched no new reviewers; the work itself is kept."
+    },
+    {
+      "name": "a local acceptance failure and the rail that ended the task are BOTH stated",
+      "record": {"status": "completed", "reason_code": "budget_exhausted", "outcome_axes": {"execution": {"status": "degraded", "reason_code": "budget_exhausted"}, "review": {"status": "degraded", "acceptance_decision": {"status": "finalized_unaccepted", "reason": "acceptance_preparation_failed", "acceptance_incident": {"incident_id": "acceptance-preparation:1f2e3d4c", "status": "failed", "stage": "preparation", "attempts": 1, "source_known": true, "failure_kind": "UnicodeDecodeError"}}}}},
+      "phase": "warn",
+      "headline": "Done with warnings",
+      "acceptance_clause": "Ouroboros could not assemble the evidence for this answer's review, so this preparation attempt dispatched no new reviewers; the work itself is kept · The task ran out of budget before it could finish cleanly."
+    },
+    {
+      "name": "a RESOLVED acceptance incident states nothing beside the answer",
+      "record": {"status": "completed", "outcome_axes": {"execution": {"status": "ok"}, "review": {"status": "degraded", "acceptance_decision": {"status": "finalized_unaccepted", "reason": "author_finish", "acceptance_incident": {"incident_id": "acceptance-preparation:1f2e3d4c", "status": "resolved", "stage": "preparation", "attempts": 1}}}}},
+      "phase": "warn",
+      "headline": "Done with warnings",
+      "acceptance_clause": "Ouroboros delivered this answer on its own judgement; the reviewers had not signed it off."
     }
   ]
 }

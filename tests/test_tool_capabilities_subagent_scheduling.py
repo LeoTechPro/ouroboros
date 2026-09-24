@@ -161,7 +161,8 @@ def test_local_readonly_subagent_initial_schemas_are_allowlisted(tmp_path):
     for tool_name in ("read_file", "list_files", "search_code"):
         root_enum = schemas[tool_name]["parameters"]["properties"]["root"]["enum"]
         assert "user_files" not in root_enum
-    assert set(schemas["search_code"]["parameters"]["properties"]["root"]["enum"]) == {"active_workspace", "system_repo", "skill_payload"}
+    # Owner T4=A (#1105): the Deliverables root is readable/searchable by a read-only child.
+    assert set(schemas["search_code"]["parameters"]["properties"]["root"]["enum"]) == {"active_workspace", "system_repo", "skill_payload", "deliverables"}
     action_schema = schemas["browser_action"]["parameters"]["properties"]["action"]
     assert "evaluate" not in action_schema["enum"]
     assert "send_photo" not in schemas["browse_page"]["description"]

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import os
@@ -275,6 +276,8 @@ def budget_remaining(
     *,
     strict: bool = False,
     projection: Optional[Dict[str, Any]] = None,
+    allow_stale: bool = False,
+    refuse_below: float = 0.0,
 ) -> float:
     """Return ledger-derived remaining budget in USD.
 
@@ -282,16 +285,15 @@ def budget_remaining(
     unavailable monetary ledger fails closed while a configured limit is in
     force, so the supervisor cannot dispatch against stale counters.
 
-    ``projection`` is an optional pre-computed global usage projection (same
-    ``global_limit_usd`` and drive root as this function would use itself) so a
-    caller that already replayed the ledger — e.g. ``/api/state`` — does not
-    trigger a second replay. It is accepted only when its ``limit_usd`` equals
-    the limit this function reads itself (``round(max(0.0, total), 6)``, the
-    exact value ``usage_projection`` stamps); a mismatch — e.g. a settings
-    hot-reload between the caller's computation and this call, or a caller
-    passing a projection built for a different limit — falls through to
-    self-computation. Default ``None`` preserves the exact prior behavior,
-    including the strict fail-closed path.
+    ``projection`` is an optional pre-computed global usage projection (same limit and drive
+    root) so a caller that already replayed the ledger — e.g. ``/api/state`` — does not replay
+    it again. It is accepted only when its ``limit_usd`` equals the limit this function reads
+    itself (what ``usage_projection`` stamps); a mismatch falls through to the read below.
+
+    ``allow_stale`` is for a loop-thread pre-check that must not wait on money: it rides the
+    last validated snapshot against the LIVE limit. A snapshot may only ADMIT (every paid
+    attempt still passes ``reserve_attempt``): an answer at or below ``refuse_below`` and a cold
+    memo are decided on the exact locked read; a passed ``projection`` is display, never re-read.
     """
     total = float(TOTAL_BUDGET_LIMIT or 0.0)
     if total <= 0:
@@ -301,9 +303,14 @@ def budget_remaining(
     try:
         if projection is None:
             from ouroboros.usage_accounting import ensure_legacy_imported, usage_projection
+            from ouroboros.usage_ledger import UsageLockUnavailable
 
             ensure_legacy_imported(DRIVE_ROOT)
-            projection = usage_projection(DRIVE_ROOT, global_limit_usd=total)
+            with contextlib.suppress(*((UsageLockUnavailable,) if allow_stale else ())):
+                projection = usage_projection(DRIVE_ROOT, global_limit_usd=total, allow_stale=allow_stale)
+            if projection is None or (
+                    allow_stale and float(projection.get("remaining_known_usd") or 0.0) <= refuse_below):
+                projection = usage_projection(DRIVE_ROOT, global_limit_usd=total)
         return float(projection.get("remaining_known_usd") or 0.0)
     except Exception:
         log.exception("Budget ledger unavailable; refusing new model dispatch")
@@ -518,9 +525,11 @@ def update_budget_from_usage(usage: Dict[str, Any]) -> bool:
     # Ledger I/O is deliberately OUTSIDE STATE_LOCK: the lock stays
     # short-lived, and the validated-snapshot marker below preserves the old
     # serialization invariant without holding STATE_LOCK across a long read.
+    # A DISPLAY read (``allow_stale``: this runs on the supervisor loop per ``llm_usage``
+    # event): a lagging snapshot carries its own lower marker, so it never regresses money.
     try:
         ensure_legacy_imported(DRIVE_ROOT)
-        breakdown = usage_breakdown(DRIVE_ROOT)
+        breakdown = usage_breakdown(DRIVE_ROOT, allow_stale=True)
         total_limit = float(TOTAL_BUDGET_LIMIT or 0.0)
         projection_snapshot = breakdown.pop("_usage_projection", None)
         if total_limit > 0 and isinstance(projection_snapshot, dict):
@@ -531,7 +540,7 @@ def update_budget_from_usage(usage: Dict[str, Any]) -> bool:
                 projection["by_root"] = roots
         else:
             projection = (
-                usage_projection(DRIVE_ROOT, global_limit_usd=total_limit)
+                usage_projection(DRIVE_ROOT, global_limit_usd=total_limit, allow_stale=True)
                 if total_limit > 0
                 else {key: breakdown.get(key) for key in (
                 "settled_usd", "confirmed_usd", "estimated_usd", "reserved_usd",
@@ -556,9 +565,6 @@ def update_budget_from_usage(usage: Dict[str, Any]) -> bool:
     try:
         st = _load_state_unlocked()
         previous_marker = st.get("usage_ledger_high_water_seq")
-        marker_known = (
-            ledger_high_water_marker is not None
-        )
         previous_known = (
             isinstance(previous_marker, (list, tuple))
             and len(previous_marker) == 2
@@ -566,8 +572,7 @@ def update_budget_from_usage(usage: Dict[str, Any]) -> bool:
                     for value in previous_marker)
         )
         previous_marker_present = "usage_ledger_high_water_seq" in st
-        marker_to_write: Optional[tuple[int, int]] = None
-        if not marker_known or (previous_marker_present and not previous_known):
+        if ledger_high_water_marker is None or (previous_marker_present and not previous_known):
             # An unreadable/missing marker is unknown, never zero. Keep the
             # existing projection untouched: writing money without ordering
             # evidence could reintroduce the stale-snapshot regression.
@@ -575,44 +580,39 @@ def update_budget_from_usage(usage: Dict[str, Any]) -> bool:
                 "legacy budget projection FRESHNESS MARKER UNKNOWN: preserving prior projection"
             )
             return False
-        elif previous_known:
-            current_marker = ledger_high_water_marker
+        if previous_known:
             saved_marker = (int(previous_marker[0]), int(previous_marker[1]))
-            if current_marker < saved_marker:
+            if ledger_high_water_marker < saved_marker:
                 # ANY lower marker is refused, epoch or seq: a delayed writer
                 # holding a pre-compaction snapshot must never overwrite money
                 # a newer snapshot already saved. Equal/higher markers keep the
                 # normal positive update path below.
                 log.warning(
                     "legacy budget projection STALE SNAPSHOT REJECTED: ledger marker %s < saved %s",
-                    current_marker,
+                    ledger_high_water_marker,
                     saved_marker,
                 )
                 return False
-            marker_to_write = current_marker
-        else:
-            marker_to_write = ledger_high_water_marker
 
-        if marker_to_write is not None:
-            st["spent_usd"] = _to_float(breakdown.get("accounted_usd"))
-            st["spent_calls"] = _to_int(breakdown.get("physical_calls"))
-            st["spent_tokens_prompt"] = _to_int(breakdown.get("prompt_tokens"))
-            st["spent_tokens_completion"] = _to_int(breakdown.get("completion_tokens"))
-            st["spent_tokens_cached"] = _to_int(breakdown.get("cached_tokens"))
-            st["usage_accounting"] = projection
-            st["openrouter_ledger_settled_usd"] = openrouter_ledger_settled
-            # Historical key retained for state.json compatibility; its value
-            # is now the ordered ``[compaction_epoch, seq]`` pair.
-            st["usage_ledger_high_water_seq"] = list(marker_to_write)
-            previous_check_call = _to_int(st.get("openrouter_last_check_call"), -1)
-            should_check_ground_truth = bool(
-                st["spent_calls"] > 0
-                and st["spent_calls"] % 50 == 0
-                and st["spent_calls"] != previous_check_call
-            )
-            if should_check_ground_truth:
-                st["openrouter_last_check_call"] = st["spent_calls"]
-            _save_state_unlocked(st)
+        st["spent_usd"] = _to_float(breakdown.get("accounted_usd"))
+        st["spent_calls"] = _to_int(breakdown.get("physical_calls"))
+        st["spent_tokens_prompt"] = _to_int(breakdown.get("prompt_tokens"))
+        st["spent_tokens_completion"] = _to_int(breakdown.get("completion_tokens"))
+        st["spent_tokens_cached"] = _to_int(breakdown.get("cached_tokens"))
+        st["usage_accounting"] = projection
+        st["openrouter_ledger_settled_usd"] = openrouter_ledger_settled
+        # Historical key retained for state.json compatibility; its value
+        # is now the ordered ``[compaction_epoch, seq]`` pair.
+        st["usage_ledger_high_water_seq"] = list(ledger_high_water_marker)
+        previous_check_call = _to_int(st.get("openrouter_last_check_call"), -1)
+        should_check_ground_truth = bool(
+            st["spent_calls"] > 0
+            and st["spent_calls"] % 50 == 0
+            and st["spent_calls"] != previous_check_call
+        )
+        if should_check_ground_truth:
+            st["openrouter_last_check_call"] = st["spent_calls"]
+        _save_state_unlocked(st)
     finally:
         release_file_lock(STATE_LOCK_PATH, lock_fd)
 
@@ -711,7 +711,7 @@ def budget_breakdown(st: Dict[str, Any]) -> Dict[str, float]:
         from ouroboros.usage_accounting import ensure_legacy_imported, usage_breakdown
 
         ensure_legacy_imported(DRIVE_ROOT)
-        ledger = usage_breakdown(DRIVE_ROOT)
+        ledger = usage_breakdown(DRIVE_ROOT, allow_stale=True)
         for category, bucket in dict(ledger.get("by_category") or {}).items():
             breakdown[str(category)] = float(bucket.get("accounted_usd") or 0.0)
         unattributed = dict(ledger.get("unattributed") or {}).get("category") or {}
@@ -730,7 +730,7 @@ def model_breakdown(st: Dict[str, Any]) -> Dict[str, Dict[str, float]]:
         from ouroboros.usage_accounting import ensure_legacy_imported, usage_breakdown
 
         ensure_legacy_imported(DRIVE_ROOT)
-        ledger = usage_breakdown(DRIVE_ROOT)
+        ledger = usage_breakdown(DRIVE_ROOT, allow_stale=True)
         buckets = dict(ledger.get("by_model") or {})
         unattributed = dict(ledger.get("unattributed") or {}).get("model") or {}
         if int(unattributed.get("physical_calls") or 0) or float(unattributed.get("accounted_usd") or 0.0):
@@ -786,10 +786,15 @@ def reconstruct_task_cost(
             "cost_final": True, "reserved_usd": 0.0,
             "unresolved_upper_bound_usd": 0.0, "unknown_unmetered": 0,
             "non_final_rows": 0,
+            # No task was named, so no ledger bucket was summed: there is nothing
+            # for a carrier to explain (#498), and None says exactly that.
+            "cost_presentation": None,
         }
     else:
         try:
-            from ouroboros.cost_projection import honest_accounted_amount
+            from ouroboros.cost_projection import (
+                COST_SCOPE_OWN, build_cost_presentation, honest_accounted_amount,
+            )
             from ouroboros.usage_accounting import ensure_legacy_imported, usage_breakdown
 
             authority_root = pathlib.Path(drive_root) if drive_root is not None else DRIVE_ROOT
@@ -821,12 +826,15 @@ def reconstruct_task_cost(
                 # The disclosed CAUSE of cost_final=false, carried with the flag.
                 "non_final_rows": int(bucket.get("non_final_rows") or 0),
                 "ledger_integrity_degraded": bool(bucket.get("integrity_degraded")),
+                # #498: the same bucket's own explanation of its own amount.
+                "cost_presentation": build_cost_presentation(bucket, scope=COST_SCOPE_OWN),
             }
         except Exception:
             log.error("Failed to reconstruct ledger task cost for %s", task_id, exc_info=True)
             projection = {
                 "cost_accounting_status": "unavailable", "cost_final": False,
                 "cost_accounting_error": "ledger_unavailable",
+                "cost_presentation": None,
                 "accounted_upper_bound_usd": None, "total_rounds": None,
                 "prompt_tokens": None, "completion_tokens": None,
                 "reserved_usd": None, "unresolved_upper_bound_usd": None,
@@ -897,9 +905,9 @@ def status_text(workers_dict: Dict[int, Any], pending_list: list,
         from ouroboros.usage_accounting import ensure_legacy_imported, usage_breakdown, usage_projection
 
         ensure_legacy_imported(DRIVE_ROOT)
-        ledger_breakdown = usage_breakdown(DRIVE_ROOT)
+        ledger_breakdown = usage_breakdown(DRIVE_ROOT, allow_stale=True)  # /status renders on the loop
         ledger_projection = (
-            usage_projection(DRIVE_ROOT, global_limit_usd=TOTAL_BUDGET_LIMIT)
+            usage_projection(DRIVE_ROOT, global_limit_usd=TOTAL_BUDGET_LIMIT, allow_stale=True)
             if TOTAL_BUDGET_LIMIT > 0
             else ledger_breakdown
         )

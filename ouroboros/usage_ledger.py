@@ -42,7 +42,7 @@ _TERMINAL = frozenset({"settled", "unresolved", "released"})
 
 __all__ = (
     "LEDGER_REL", "LOCK_REL", "QUARANTINE_REL", "UsageAccountingError", "UsageLedgerCorrupt",
-    "is_abandoned_settlement",
+    "UsageLockUnavailable", "is_abandoned_settlement",
 )
 
 
@@ -52,6 +52,16 @@ class UsageAccountingError(RuntimeError):
 
 class UsageLedgerCorrupt(UsageAccountingError):
     """Raised when durable history is structurally invalid."""
+
+
+class UsageLockUnavailable(UsageAccountingError):
+    """A named monetary lock was not acquired: the caller's timeout ran out, or
+    the platform refused the lock outright.
+
+    Distinct from corruption and validation failures: a display reader catches
+    exactly this to serve its last validated snapshot, while every monetary
+    caller keeps failing closed on it like on any other accounting error.
+    """
 
 
 def is_abandoned_settlement(row: Dict[str, Any]) -> bool:
@@ -219,7 +229,7 @@ def _named_lock(
         refuse_name_tier_errnos=frozenset({errno.ENOLCK}),
     )
     if fd is None:
-        raise UsageAccountingError(f"usage accounting lock unavailable: {path}")
+        raise UsageLockUnavailable(f"usage accounting lock unavailable: {path}")
     try:
         yield lambda: refresh_exclusive_file_lock(path, fd)
     finally:
@@ -227,12 +237,14 @@ def _named_lock(
 
 
 @contextlib.contextmanager
-def _locked(root: pathlib.Path) -> Iterator[Callable[[], bool]]:
+def _locked(root: pathlib.Path, *, timeout_sec: float = 45.0) -> Iterator[Callable[[], bool]]:
     # Operator fix 2026-07-23: 4.0s starves under a grown ledger (reserve_attempt
     # re-reads the whole usage_attempts.jsonl under this lock — ~0.5s hold at 20MB),
     # failing healthy tasks with UsageAccountingError at >=10 concurrent workers.
-    # Waiting longer is always correct here; the transaction itself stays atomic.
-    with _named_lock(root, LOCK_REL.name, timeout_sec=45.0, stale_sec=90.0) as heartbeat:
+    # Waiting longer is always correct for money; the transaction itself stays atomic.
+    # Only the rows memo's display path passes a shorter ``timeout_sec``: there a
+    # contended lock degrades one render, it never stalls the thread that asked.
+    with _named_lock(root, LOCK_REL.name, timeout_sec=timeout_sec, stale_sec=90.0) as heartbeat:
         yield heartbeat
 
 

@@ -146,6 +146,9 @@ _POLICY: dict[str, dict[str, set[str]]] = {
         # (data/skills/...); grants/secrets live in data/state/skills, which
         # stays invisible to this profile.
         "skill_payload": {"read", "list", "search"},
+        # Owner T4=A (#1105): the owner-visible Deliverables container is readable
+        # by a read-only child; `subagent_projects` stays top-level only.
+        "deliverables": {"read", "list", "search"},
     },
     # Top-level preset names remain observable, but workspace focus never narrows
     # the ordinary principal. Independent path/credential/child/runtime guards

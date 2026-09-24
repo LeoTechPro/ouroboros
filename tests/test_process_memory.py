@@ -387,8 +387,8 @@ class TestHelperFunctions:
         assert result is None
         assert captured["cost_usd"] is None
 
-    def test_generate_reflection_uses_nontrivial_prompt_for_clean_trace(self):
-        """generate_reflection picks the non-error prompt for a clean, high-round trace."""
+    def test_generate_reflection_frames_a_clean_trace_in_the_one_prompt(self):
+        """A clean, high-round trace is framed by the one prompt: no asserted non-triviality, no interrogation."""
         from ouroboros.reflection import generate_reflection
 
         captured = {}
@@ -413,15 +413,16 @@ class TestHelperFunctions:
         )
 
         prompt = captured["prompt"]
-        # Non-error prompt markers must be present
-        assert "high round count or high cost" in prompt, "Expected nontrivial prompt framing"
-        assert "Where was the friction?" in prompt, "Expected friction question"
-        # Error-only prompt text must NOT appear
-        assert "The task had errors" not in prompt, "Error-only prompt must not be used for clean trace"
+        # One open frame for every run: no asserted "non-trivial" premise, no interrogation,
+        # and no error-only wording for a clean trace — the facts carry the difference.
+        assert "No lesson and no change are valid conclusions." in prompt
+        assert "high round count or high cost" not in prompt and "What was the goal?" not in prompt
+        assert "The task had errors" not in prompt, "a clean trace carries no error framing"
+        assert "(no error details captured)" in prompt
         assert entry["reflection"] == "Friction was in repeated advisory runs."
 
-    def test_generate_reflection_uses_error_prompt_for_error_trace(self):
-        """generate_reflection picks the error prompt when trace contains blocking markers."""
+    def test_generate_reflection_frames_an_error_trace_in_the_one_prompt(self):
+        """A trace with blocking markers is framed by the same one prompt, root cause first."""
         from ouroboros.reflection import generate_reflection
 
         captured = {}
@@ -446,7 +447,10 @@ class TestHelperFunctions:
             usage_dict={"rounds": 5, "cost": 1.0},
         )
         prompt = captured["prompt"]
-        assert "The task had errors or blocking events" in prompt
+        # The same frame as a clean run; the blocked call is a fact under Error details.
+        assert "No lesson and no change are valid conclusions." in prompt
+        assert "REVIEW_BLOCKED: tests_affected" in prompt and "(no error details captured)" not in prompt
+        assert "The task had errors or blocking events" not in prompt
         assert "high round count or high cost" not in prompt
 
     def test_generate_reflection_includes_review_evidence(self):
@@ -895,8 +899,9 @@ def test_a_failed_child_alone_triggers_the_roots_reflection(tmp_path, monkeypatc
     assert entry is not None, "a failed child is the root's own error evidence"
     assert entry["child_failure_classes"] == ["failed"]
     assert "reflection" in calls[0]
-    assert "The task had errors or blocking events." in prompts[0]
+    # The child's failure is the root's own error fact; the frame does not change.
     assert "Child failure classes: failed" in prompts[0]
+    assert "No lesson and no change are valid conclusions." in prompts[0]
     assert "completed without hard errors" not in prompts[0]
     # The register was admitted on that child class, on the canonical drive.
     assert "pattern_register_update" in calls, "the register was admitted on the child class"
@@ -907,5 +912,61 @@ def test_a_failed_child_alone_triggers_the_roots_reflection(tmp_path, monkeypatc
 
     entry = _run("root-long-cancel", "cancelled", {"execution": {"status": "cancelled"}}, rounds=20)
     assert entry is not None and entry["child_failure_classes"] == []
-    assert "completed without hard errors" in prompts[0]
+    assert "Child failure classes" not in prompts[0] and "(no error details captured)" in prompts[0]
     assert "pattern_register_update" not in calls
+
+
+def test_reflection_evidence_names_who_ran_each_child_as_facts(tmp_path):
+    """Children do not reflect, so the root's reflection is the only place an
+    engine's conduct can be learned from - and its evidence rows used to say
+    nothing about WHO ran a child. Facts only, from each child's OWN stored
+    record: the frozen snapshot names the engine (never the live roster), the
+    served model is stated for an API child alone, and a duration needs a
+    terminal stamp that follows the start."""
+    import json
+    from types import SimpleNamespace
+
+    from ouroboros import post_task_synthesis
+    from ouroboros.subagent_runtime import select_subagent_snapshot
+    from ouroboros.task_results import write_task_result
+
+    settings = {"OUROBOROS_SUBAGENTS": json.dumps({"enabled": True, "items": [
+        {"subagent_id": "primary-builder", "recommended_use": "Builds.", "effort": "xhigh",
+         "route": {"kind": "agent_session", "target_id": "codex=gpt-6-astra"}},
+        {"subagent_id": "fast-scout", "recommended_use": "Scouts.", "effort": "low",
+         "route": {"kind": "api_model", "target_id": "x-ai/grok-4.6"}},
+    ]})}
+    session, _ = select_subagent_snapshot(settings, subagent_id="primary-builder")
+    api, _ = select_subagent_snapshot(settings, subagent_id="fast-scout")
+    common = {"parent_task_id": "root", "root_task_id": "root", "delegation_role": "subagent"}
+    write_task_result(tmp_path, "root", "completed", result="done", root_task_id="root",
+                      parent_task_id="", delegation_role="root")
+    write_task_result(tmp_path, "kid-session", "completed", result="built", configured_subagent=session,
+                      started_at="2026-09-20T10:00:00+00:00", ts="2026-09-20T10:04:30+00:00",
+                      model_execution={"used_model": "nanny/host-model", "source": "usable_solve_response"},
+                      **common)
+    write_task_result(tmp_path, "kid-api", "completed", result="scouted", configured_subagent=api,
+                      started_at="2026-09-20T10:00:00+00:00", ts="2026-09-20T09:59:00+00:00",
+                      model_execution={"used_model": "x-ai/grok-4.6", "source": "usable_solve_response"},
+                      **common)
+    write_task_result(tmp_path, "kid-plain", "completed", result="no snapshot", **common)
+
+    text, children = post_task_synthesis._child_task_evidence(
+        SimpleNamespace(drive_root=tmp_path), {"id": "root"})
+    by_id = {row["task_id"]: row for row in children}
+
+    assert by_id["kid-session"]["engine"] == {
+        "subagent_id": "codex=gpt-6-astra/xhigh", "kind": "agent_session",
+        "target": "codex=gpt-6-astra", "effort": "xhigh", "access": "full",
+    }
+    assert by_id["kid-session"]["duration_sec"] == 270.0
+    assert "used_model" not in by_id["kid-session"], "a nanny's rounds are not the leaf's served model"
+    assert by_id["kid-api"]["engine"] == {
+        "subagent_id": "x-ai/grok-4.6/low", "kind": "api_model", "target": "x-ai/grok-4.6", "effort": "low",
+    }
+    assert by_id["kid-api"]["used_model"] == "x-ai/grok-4.6"
+    assert "duration_sec" not in by_id["kid-api"], "a stamp that does not follow the start yields no duration"
+    assert by_id["kid-api"]["started_at"] == "2026-09-20T10:00:00+00:00"
+    for absent in ("engine", "used_model", "started_at", "duration_sec"):
+        assert absent not in by_id["kid-plain"], "a record without the facts states none"
+    assert "primary-builder" not in text and "fast-scout" not in text, "stored keys are not evidence"

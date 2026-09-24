@@ -10,6 +10,7 @@ from typing import Any, Dict, List
 from ouroboros.tools.registry import ToolContext, ToolEntry
 from ouroboros.outcomes import normalize_outcome_axes
 from ouroboros.task_status import effective_task_result
+from ouroboros.dialogue_provenance import is_presence_task
 
 
 _MAX_TASKS = 20
@@ -74,6 +75,11 @@ def _task_record(
         record["task_contract"] = data.get("task_contract")
     if isinstance(data.get("artifact_bundle"), dict):
         record["artifact_bundle"] = data.get("artifact_bundle")
+    if isinstance(data.get("focus"), dict):
+        from ouroboros.focus import compact_focus
+        focus = compact_focus(data.get("focus"))
+        if focus is not None:
+            record["focus"] = focus
     ledger = data.get("verification_ledger") if isinstance(data.get("verification_ledger"), dict) else {}
     if ledger:
         # An omitted-to-artifact stub carries no entries; its summary is the
@@ -162,6 +168,7 @@ def _handle_recent_tasks(
 
     drive_root = canonical_data_root(ctx)
     task_dir = drive_root / "task_results"
+    restricted = _restricted_actor(ctx)
     task_limit = _coerce_limit(limit)
     try:
         skip = max(0, int(offset or 0))
@@ -192,6 +199,10 @@ def _handle_recent_tasks(
                 include_traces=bool(include_traces),
             )
             if record is not None:
+                if restricted:
+                    # A restricted actor gets no cross-focus catalogue (see
+                    # _handle_live_roots); a root's authored focus is part of it.
+                    record.pop("focus", None)
                 tasks.append(record)
             elif error is not None:
                 unreadable_tasks.append(error)
@@ -249,6 +260,31 @@ def _handle_recent_tasks(
     return json.dumps(base, ensure_ascii=False, indent=2)
 
 
+def _restricted_actor(ctx: ToolContext) -> bool:
+    """Children and Presence turns hold no live cross-focus catalogue."""
+    metadata = getattr(ctx, "task_metadata", {})
+    metadata = metadata if isinstance(metadata, dict) else {}
+    return bool(str(metadata.get("parent_task_id") or "").strip()
+            or str(metadata.get("delegation_role") or "") == "subagent"
+            or is_presence_task({"metadata": metadata}))
+
+
+def _handle_live_roots(ctx: ToolContext, limit: int = 20, offset: int = 0, snapshot: str = "", **_kwargs: Any) -> str:
+    """Page the existing host live-root projection without scanning task results."""
+    if _restricted_actor(ctx):
+        # ``ok: false`` is what the registry's result adapter reads as a typed
+        # refusal; a bare ``error`` object would be recorded as a successful call.
+        return json.dumps({"ok": False, "host_code": "TOOL_FORBIDDEN",
+                           "error": {"code": "TOOL_FORBIDDEN", "message": "restricted actors have no live cross-focus catalogue"}},
+                          ensure_ascii=False)
+    from ouroboros.peer_roster import live_root_catalogue
+    from ouroboros.tool_access import canonical_data_root
+    page = live_root_catalogue(canonical_data_root(ctx), limit=limit, offset=offset, snapshot=snapshot)
+    if page.get("error"):
+        page = {"ok": False, "host_code": str(page["error"].get("code") or "LIVE_ROOTS_ERROR"), **page}
+    return json.dumps(page, ensure_ascii=False, indent=2)
+
+
 def get_tools() -> List[ToolEntry]:
     return [
         ToolEntry("recent_tasks", {
@@ -289,4 +325,17 @@ def get_tools() -> List[ToolEntry]:
                 "required": [],
             },
         }, _handle_recent_tasks),
+        ToolEntry("live_roots", {
+            "name": "live_roots",
+            "description": "Read the full paginated host-listed live-root catalogue, grouped by project in the same projection used for exact-live messaging.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "limit": {"type": "integer", "default": 20, "description": "Page size (1-100)."},
+                    "offset": {"type": "integer", "default": 0},
+                    "snapshot": {"type": "string", "default": ""},
+                },
+                "required": [],
+            },
+        }, _handle_live_roots),
     ]

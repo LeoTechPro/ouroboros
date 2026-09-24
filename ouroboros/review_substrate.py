@@ -745,6 +745,7 @@ class ReviewCoordinator:
                 transport_status=_transport_error_status(exc),
                 failure_code=failure_code,
                 reset_at=str(getattr(exc, "reset_at", "") or ""),
+                reported_cause=str(getattr(exc, "reported_cause", "") or ""),
                 http_status=http_status if isinstance(http_status, int) and http_status else None,
                 usage=failure_custody,
                 prompt_ref=prompt_ref,

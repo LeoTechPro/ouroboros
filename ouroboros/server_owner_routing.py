@@ -571,8 +571,8 @@ def _route_owner_message(bridge: Any, ctx: Any, incoming: Dict[str, Any]) -> Non
 
         if not owner_conversation_admitted(chat_id):
             return
-        try:
-            remaining = budget_remaining(load_state(), strict=True)
+        try:  # bridge intake runs on the supervisor loop: same pre-check contract as assignment
+            remaining = budget_remaining(load_state(), strict=True, allow_stale=True)
         except Exception:
             ctx.send_with_budget(chat_id, "⚠️ Cost accounting is unavailable. Task was not dispatched; retry after ledger recovery.", role="system", system_type="task_admission_notice")
             return

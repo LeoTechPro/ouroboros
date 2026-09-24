@@ -399,6 +399,15 @@ def test_tool_policy_values_are_valid():
     assert bad == {}, f"Invalid policy values: {bad}"
 
 
+def test_cross_focus_projection_tools_have_explicit_skip_policy():
+    """Awareness projections use their existing host guards and never add a
+    model safety round or an unexpected provider call."""
+    from ouroboros.safety import TOOL_POLICY, POLICY_SKIP
+
+    assert TOOL_POLICY["live_roots"] == POLICY_SKIP
+    assert TOOL_POLICY["update_focus"] == POLICY_SKIP
+
+
 # ---------------------------------------------------------------------------
 # Secret redaction + non-JSON argument safety
 # ---------------------------------------------------------------------------

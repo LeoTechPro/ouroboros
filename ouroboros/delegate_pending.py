@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import pathlib
 from typing import Any, Dict, List, Optional
 
@@ -15,7 +16,7 @@ def pending_invocations(
 
     found: Dict[str, Dict[str, Any]] = {}
     state: Dict[str, str] = {}
-    source = rows if rows is not None else c._iter_rows(c.event_log_path(drive_root))
+    source = rows if rows is not None else c.custody_rows(drive_root)
     for row in source:
         invocation_id = str(row.get("invocation_id") or "")
         if not invocation_id:
@@ -30,6 +31,7 @@ def pending_invocations(
                 "operation_id": str(row.get("operation_id") or ""),
                 "request": row.get("request") if isinstance(row.get("request"), dict) else None,
                 "request_ref": row.get("request_ref"),
+                "request_locator": row.get("request_locator"),
                 "route": str(row.get("route") or ""),
                 "project_id": str(row.get("project_id") or ""),
                 "project_owned": bool(row.get("project_owned")),
@@ -48,14 +50,15 @@ def pending_invocations(
                 "baseline_sha": str(row.get("baseline_sha") or ""),
                 "target_root": str(row.get("target_root") or ""),
                 "authority_source": str(row.get("authority_source") or ""),
-                "resource_ref": row.get("resource_ref") if isinstance(row.get("resource_ref"), dict) else {},
+                # Copies: the source rows may be the shared, read-only custody memo.
+                "resource_ref": copy.deepcopy(row.get("resource_ref")) if isinstance(row.get("resource_ref"), dict) else {},
                 "selected_subagent_id": str(row.get("selected_subagent_id") or ""),
                 "config_fingerprint": str(row.get("config_fingerprint") or ""),
                 "work_order_fingerprint": str(row.get("work_order_fingerprint") or ""),
                 "work_order_coverage": str(row.get("work_order_coverage") or ""),
                 "authority_fingerprint": str(row.get("authority_fingerprint") or ""),
                 "work_order_source_request": (
-                    row.get("work_order_source_request")
+                    copy.deepcopy(row.get("work_order_source_request"))
                     if isinstance(row.get("work_order_source_request"), dict) else {}
                 ),
             }
@@ -74,8 +77,9 @@ def pending_invocations(
         # Resolve only survivors, not every historical start on each sweep.
         body = request_body(drive_root, record)
         ref = record.pop("request_ref")
+        locator = record.pop("request_locator")
         # An unreadable stored body does not discharge the pending start.
-        if body or ref is not None:
+        if body or ref is not None or locator is not None:
             record["request"] = body
             pending.append(record)
     return pending
@@ -90,6 +94,14 @@ def request_body(drive_root: Any, row: Dict[str, Any]) -> Optional[Dict[str, Any
     inline = row.get("request")
     if isinstance(inline, dict) and inline:
         return inline
+    locator = row.get("request_locator")
+    if locator is not None:
+        # A memo row carries the legacy inline body's location, not the body.
+        from ouroboros.delegate_custody_memo import read_locator_request
+
+        located = read_locator_request(drive_root, locator, invocation_id=str(row.get("invocation_id") or ""))
+        if located is not None:
+            return located
     ref = row.get("request_ref")
     if not isinstance(ref, dict) or not ref:
         return None

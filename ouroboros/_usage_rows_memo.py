@@ -25,10 +25,15 @@ import copy
 import logging
 import pathlib
 import threading
+import time
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, Tuple
+from typing import Any, Callable, Dict, Optional, Tuple
 
-from ouroboros.usage_ledger import QUARANTINE_REL, LedgerResumeState
+from ouroboros.runtime_limits import (
+    USAGE_DISPLAY_LOCK_TIMEOUT_SEC,
+    USAGE_DISPLAY_REVALIDATE_AFTER_SEC,
+)
+from ouroboros.usage_ledger import QUARANTINE_REL, LedgerResumeState, UsageLockUnavailable
 
 log = logging.getLogger(__name__)
 
@@ -71,10 +76,29 @@ class _LedgerRowsMemo:
 # to invalidate.
 _ROWS_MEMO: Dict[str, _LedgerRowsMemo] = {}
 _ROWS_MEMO_LOCK = threading.Lock()
+# Display readers only (``allow_stale``): the monotonic instant before which a
+# root that just lost the lock race is served from its memo without another
+# attempt. Guarded by ``_ROWS_MEMO_LOCK``; the exact path never reads it.
+_STALE_BACKOFF: Dict[str, float] = {}
+
+
+def _stale_memo_rows(key: str) -> "Optional[Tuple[list, bool, _LedgerRowsMemo, int]]":
+    """The last validated snapshot for ``key`` without the ledger lock, or None when cold.
+
+    Copied under ``_ROWS_MEMO_LOCK``, the lock an advancing reader applies its
+    batch under, so the copy is a ledger position that was really validated —
+    never half of an append — paired with the generation that renders it."""
+    with _ROWS_MEMO_LOCK:
+        memo = _ROWS_MEMO.get(key)
+        if memo is None:
+            return None
+        return list(memo.final_rows.values()), memo.resume.st_ino != -2, memo, memo.generation
 
 
 def _memoized_final_rows(
     root: pathlib.Path,
+    *,
+    allow_stale: bool = False,
 ) -> Tuple[list, bool, "_LedgerRowsMemo", int]:
     """Validated final rows for display projections, resumed incrementally.
 
@@ -96,51 +120,89 @@ def _memoized_final_rows(
     keep re-checking the torn tail. ``memo``/``generation`` let
     ``_render_cached`` publish a render computed OUTSIDE the lock only if the
     rows have not moved since.
+
+    ``allow_stale`` is the DISPLAY-reader contract, for a thread that must not
+    wait on money (the supervisor loop, a gateway request): the lock is tried
+    for ``USAGE_DISPLAY_LOCK_TIMEOUT_SEC`` only, and a contended lock serves the
+    last validated snapshot instead of raising — the same tuple, whose rows
+    carry their own ledger position (``_marker_from_final``), which is how the
+    one consumer that can act on a lagging answer, the ``state.json`` writer,
+    refuses to regress. Losing the race arms ``USAGE_DISPLAY_REVALIDATE_AFTER_SEC``
+    during which the lock is not tried at all. A cold memo has nothing validated
+    to serve and still raises ``UsageLockUnavailable``: unknown, never zero. No
+    monetary decision may pass ``allow_stale``; ``reserve_attempt`` never reads
+    this memo at all.
     """
     ua = _ua()
     key = str(pathlib.Path(root).resolve(strict=False))
-    with ua._locked(root):
+    if not allow_stale:
+        with ua._locked(root):
+            return _advance_memo_locked(ua, root, key)
+    with _ROWS_MEMO_LOCK:
+        backing_off = time.monotonic() < _STALE_BACKOFF.get(key, 0.0)
+    stale = _stale_memo_rows(key) if backing_off else None
+    if stale is not None:
+        return stale
+    try:
+        with ua._locked(root, timeout_sec=USAGE_DISPLAY_LOCK_TIMEOUT_SEC):
+            fresh = _advance_memo_locked(ua, root, key)
+    except UsageLockUnavailable:
         with _ROWS_MEMO_LOCK:
-            memo = _ROWS_MEMO.get(key)
-        advanced = ua._read_new_records_locked(root, memo.resume) if memo is not None else None
-        if advanced is None:
-            records = ua._read_records_locked(root)
-            memo = _LedgerRowsMemo(
-                resume=ua._ledger_resume_state(root, records),
-                final_rows=ua._final_rows(records),
-                generation=(memo.generation + 1) if memo is not None else 0,
-            )
-        else:
-            new_records, new_resume = advanced
-            if new_records:
+            _STALE_BACKOFF[key] = time.monotonic() + USAGE_DISPLAY_REVALIDATE_AFTER_SEC
+        stale = _stale_memo_rows(key)
+        if stale is None:
+            raise
+        return stale
+    with _ROWS_MEMO_LOCK:
+        _STALE_BACKOFF.pop(key, None)
+    return fresh
+
+
+def _advance_memo_locked(ua: Any, root: pathlib.Path, key: str) -> Tuple[list, bool, "_LedgerRowsMemo", int]:
+    """Refold or advance ``key``'s memo; the caller holds the ledger lock."""
+    with _ROWS_MEMO_LOCK:
+        memo = _ROWS_MEMO.get(key)
+    advanced = ua._read_new_records_locked(root, memo.resume) if memo is not None else None
+    if advanced is None:
+        records = ua._read_records_locked(root)
+        memo = _LedgerRowsMemo(
+            resume=ua._ledger_resume_state(root, records),
+            final_rows=ua._final_rows(records),
+            generation=(memo.generation + 1) if memo is not None else 0,
+        )
+    else:
+        new_records, new_resume = advanced
+        if new_records:
+            # The batch, the generation bump and the renders clear MUST happen
+            # under _ROWS_MEMO_LOCK. The publisher in _render_cached checks the
+            # generation and writes under that lock only (it never holds the
+            # ledger lock), so without it the check-then-publish pair could
+            # interleave with this clear — a stale render published right
+            # after the clear would then serve pre-append data to every warm
+            # reader until the next append. And a display reader copies the
+            # rows under that lock alone (``_stale_memo_rows``), so the batch
+            # lands whole or not at all for it. Lock order stays "ledger lock
+            # → memo lock"; both of those take the memo lock alone, so no
+            # deadlock. The refold branch needs no such section: it swaps in a
+            # NEW memo object and the publisher's `is memo` identity check
+            # already rejects publications against a replaced object.
+            with _ROWS_MEMO_LOCK:
                 for row in new_records:
                     memo.final_rows[str(row["attempt_id"])] = row
-                # The generation bump and the renders clear MUST happen under
-                # _ROWS_MEMO_LOCK: the publisher in _render_cached checks the
-                # generation and writes under that lock only (it never holds
-                # the ledger lock), so without it the check-then-publish pair
-                # could interleave with this clear — a stale render published
-                # right after the clear would then serve pre-append data to
-                # every warm reader until the next append. Lock order stays
-                # "ledger lock → memo lock" (same as above/below); the
-                # publisher takes the memo lock alone, so no deadlock. The
-                # refold branch needs no such section: it swaps in a NEW memo
-                # object and the publisher's `is memo` identity check already
-                # rejects publications against a replaced object.
-                with _ROWS_MEMO_LOCK:
-                    memo.generation += 1
-                    memo.renders.clear()
-            memo.resume = new_resume
-        with _ROWS_MEMO_LOCK:
-            _ROWS_MEMO[key] = memo
-        cacheable = memo.resume.st_ino != -2
-        return list(memo.final_rows.values()), cacheable, memo, memo.generation
-
+                memo.generation += 1
+                memo.renders.clear()
+        memo.resume = new_resume
+    with _ROWS_MEMO_LOCK:
+        _ROWS_MEMO[key] = memo
+    cacheable = memo.resume.st_ino != -2
+    return list(memo.final_rows.values()), cacheable, memo, memo.generation
 
 def _render_cached(
     root: pathlib.Path,
     cache_key: Tuple[Any, ...],
     render: Callable[[list, bool], Dict[str, Any]],
+    *,
+    allow_stale: bool = False,
 ) -> Dict[str, Any]:
     """Serve one display render through the memo's fingerprint-keyed cache.
 
@@ -155,8 +217,9 @@ def _render_cached(
     between read and publish means the render is returned to this caller but
     never cached. Both directions hand out deep copies: the cached object is
     shared between requests, and callers (``_with_limit``/``_with_integrity``,
-    gateway handlers) mutate nested buckets in place."""
-    rows, cacheable, memo, generation = _memoized_final_rows(root)
+    gateway handlers) mutate nested buckets in place. ``allow_stale`` forwards
+    the display-reader contract of ``_memoized_final_rows`` unchanged."""
+    rows, cacheable, memo, generation = _memoized_final_rows(root, allow_stale=allow_stale)
     integrity_degraded = (root / QUARANTINE_REL).is_file()
     full_key = (*cache_key, integrity_degraded)
     if cacheable:

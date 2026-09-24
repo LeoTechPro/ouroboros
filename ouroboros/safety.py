@@ -44,6 +44,7 @@ TOOL_POLICY: Dict[str, str] = {
     "vcs_diff": POLICY_SKIP,
     "chat_history": POLICY_SKIP,
     "recent_tasks": POLICY_SKIP,
+    "live_roots": POLICY_SKIP,
     "knowledge_read": POLICY_SKIP,
     "knowledge_list": POLICY_SKIP,
     "journal_read": POLICY_SKIP,
@@ -73,6 +74,7 @@ TOOL_POLICY: Dict[str, str] = {
     "peek_task": POLICY_SKIP,
     "wait_task": POLICY_SKIP,
     "wait_tasks": POLICY_SKIP,
+    "await_messages": POLICY_SKIP,
     "list_projects": POLICY_SKIP,
     "switch_model": POLICY_SKIP,
     "service_status": POLICY_SKIP,
@@ -88,6 +90,7 @@ TOOL_POLICY: Dict[str, str] = {
     "knowledge_write": POLICY_SKIP,
     "journal_write": POLICY_SKIP,
     "workpad_write": POLICY_SKIP,
+    "update_focus": POLICY_SKIP,
     # Bounded tree-scoped coordination. Tagged child-result dispositions are validated
     # and persisted only by join_ledger; neither branch has an external/repo effect.
     "tree_note": POLICY_SKIP,
@@ -106,6 +109,9 @@ TOOL_POLICY: Dict[str, str] = {
 
     # Control / messaging / internal side effects.
     "schedule_subagent": POLICY_SKIP,
+    # Owner-governed schedule inspection/mutation is narrow, reasoned and audited;
+    # it never edits task payloads or cancels an admitted task.
+    "manage_schedules": POLICY_SKIP,
     # One-shot deferred follow-up through the existing supervisor scheduler: the
     # future task re-enters normal admission/safety, so registration itself has
     # no reach beyond what the task already has (same reasoning as schedule_subagent).
@@ -120,6 +126,12 @@ TOOL_POLICY: Dict[str, str] = {
     # carries no authority the task lacks (same reasoning as the verbs above).
     "delegate_answer": POLICY_SKIP,
     "cancel_task": POLICY_SKIP,
+    # The other half of the same nanny authority (#1196, owner Q9): selecting ONE
+    # of this task's OWN budget-paused descendants to continue under its same id.
+    # The tool only REQUESTS; the supervisor re-checks lineage, the root's live
+    # owner Resume grant, money, Stop/cancel, deadline and lifetime through the
+    # seam the owner's own Resume uses, so it adds no reach the task lacks.
+    "resume_child_task": POLICY_SKIP,
     # Parent's explicit decision to abandon a child result: stamps parent_decision +
     # records the reason on the tree ledger; tree-scoped, no external effect (like cancel_task).
     "discard_child_result": POLICY_SKIP,

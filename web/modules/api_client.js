@@ -33,7 +33,12 @@ export async function fetchJson(url, init = {}, options = {}) {
     let data = null;
     try {
         data = await response.json();
-    } catch {
+    } catch (error) {
+        // A body read cut by the caller's own cancellation is a cancellation,
+        // not a reply: swallowing it here once turned a navigation-aborted
+        // Widgets list into a resolved "error object" that a consumer read as
+        // an EMPTY authoritative list and stopped kept-running frames on.
+        if (error?.name === 'AbortError' || init?.signal?.aborted) throw error;
         data = { error: `non-json response (HTTP ${response.status})` };
     }
     if (!response.ok || (options.rejectOkFalse && data && data.ok === false)) {
@@ -210,7 +215,7 @@ export const apiClient = {
     state: () => fetchJson('/api/state', { cache: 'no-store' }),
     settings: () => fetchJson('/api/settings', { cache: 'no-store' }),
     /** @returns {Promise<import('./api_types.js').UiPreferencesResponse>} */
-    uiPreferences: () => fetchJson('/api/ui/preferences', { cache: 'no-store' }),
+    uiPreferences: (init = {}) => fetchJson('/api/ui/preferences', { cache: 'no-store', ...init }),
     saveUiPreferences: (payload) => jsonPost('/api/ui/preferences', payload),
     saveSettings: (payload) => fetchJson('/api/settings', {
         method: 'POST',
@@ -254,7 +259,7 @@ export const apiClient = {
      * payload `revision`.
      * @returns {Promise<import('./api_types.js').WidgetsResponse>}
      */
-    widgets: () => fetchJson('/api/widgets', { cache: 'no-store' }),
+    widgets: (init = {}) => fetchJson('/api/widgets', { cache: 'no-store', ...init }),
     skillPublishPreflight,
     createTask,
     skillLifecycleQueue: () => fetchJson('/api/skills/lifecycle-queue', { cache: 'no-store' }),

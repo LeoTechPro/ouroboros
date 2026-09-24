@@ -71,7 +71,15 @@ def test_widgets_page_reads_cheap_list_and_reconciles_by_signature():
     reconcile; it never restores the former blanket Refresh/reset behavior."""
     source = _widgets_js()
     helpers = _read("web/modules/widget_list.js")
-    assert "apiClient.widgets()" in source
+    # The cheap-list read itself lives in the list helper (with its deadline and
+    # its abort controller); the page reaches it only through that seam.
+    assert "apiClient.widgets({ signal })" not in source
+    assert "client.widgets({ signal })" in helpers
+    assert "export function requestWidgetListPayload" in helpers
+    assert "export function requestWidgetCards" in helpers
+    assert "export function widgetListRequests" in helpers
+    assert "requestWidgetListPayload(apiClient, controller)" in source
+    assert "listRequests.abortAll();" in source
     assert "apiClient.extensions()" not in source
     assert "live.ui_tabs" not in source
     assert "live?.ui_tabs" not in source
@@ -559,7 +567,7 @@ def test_widgets_card_order_is_owner_ui_preference():
     assert "previousLiveCard" not in source
     assert ".widgets-card-drag" in css
     assert ".widgets-card.drag-over" in css
-    assert "uiPreferences: () => fetchJson('/api/ui/preferences'" in api_client
+    assert "uiPreferences: (init = {}) => fetchJson('/api/ui/preferences'" in api_client
     assert "saveUiPreferences: (payload) => jsonPost('/api/ui/preferences', payload)" in api_client
 
 

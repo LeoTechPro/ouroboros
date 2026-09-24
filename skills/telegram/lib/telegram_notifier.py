@@ -20,6 +20,8 @@ from .telegram_state import (
     _read_json_file,
     _state_file,
 )
+from ouroboros.contracts.chat_id_policy import WEB_UI_CHAT_ID, is_project_chat_id
+from ouroboros.project_dialogue import OUTCOME_PHASE_HEADLINE
 
 
 def _notify_enabled(settings: Dict[str, Any], key: str) -> bool:
@@ -146,14 +148,45 @@ def _summary_ids_in_tail(api, limit: int = 200) -> list:
     return list(summaries.items())
 
 
-# The host's task-summary phase vocabulary (project_dialogue.OUTCOME_PHASE_HEADLINE)
-# rendered as this transport's completion word and icon. Unknown/legacy phases
-# fall back to the axes rule below.
+# The host's task-phase vocabulary is the SOURCE here, not a copy: this transport
+# lowercases the same words the task card prints, so a new phase or a reworded status
+# can never mean one thing on the card and another on a phone. ``working`` is excluded
+# on purpose — a pre-finalization row is not a finish, and its absence is what makes the
+# legacy axes fallback below fire.
 _PHASE_WORDS = {
-    "en": {"done": "done", "warn": "done with warnings", "error": "failed", "cancelled": "cancelled"},
-    "ru": {"done": "готова", "warn": "готова с предупреждениями", "error": "ошибка", "cancelled": "отменена"},
+    "en": {phase: word.lower() for phase, word in OUTCOME_PHASE_HEADLINE.items()
+           if phase != "working"},
+    "ru": {"done": "готова", "warn": "готова с предупреждениями",
+           "error": "ошибка", "cancelled": "отменена"},
 }
 _PHASE_ICONS = {"done": "✅", "warn": "⚠️", "error": "❌", "cancelled": "🚫"}
+
+# A finish that is not clean always reaches the owner's phone. Telegram's text bridge is
+# the one owner surface with no task card, so the typed phase and its reason ARE the
+# honesty floor there (owner decision Q8). The opt-in toggle only ADDS the clean
+# finishes; it is not a switch for this floor, and it is not a second producer — one
+# lane and one ledger, so a non-clean task is announced once, never twice.
+_NON_CLEAN_PHASES = frozenset({"warn", "error", "cancelled"})
+# Only a ROOT outcome, and only in a room the owner actually talks in. ``summary_kind``
+# is the typed root fact the host stamps, without which a twelve-child swarm pushes
+# twelve lines; the chat id keeps the hidden partition (Skill Review and headless
+# admissions, HIDDEN_CHAT_ID = 0) and synthetic A2A rooms off the phone. A legacy row
+# that predates either field never triggers this floor.
+_ROOT_SUMMARY_KIND = "terminal_root_projection"
+
+
+def _announce_summary(row: Dict[str, Any], *, notify_all: bool) -> bool:
+    """Does this settled task-summary row deserve a push?"""
+    if notify_all:
+        return True
+    if (str(row.get("summary_kind") or "") != _ROOT_SUMMARY_KIND
+            or str(row.get("outcome_phase") or "") not in _NON_CLEAN_PHASES):
+        return False
+    try:
+        chat_id = int(row.get("chat_id") or 0)
+    except (TypeError, ValueError):
+        return False
+    return chat_id == WEB_UI_CHAT_ID or is_project_chat_id(chat_id)
 
 
 async def _check_tasks_notify(
@@ -161,8 +194,7 @@ async def _check_tasks_notify(
     *, trust_env: bool = False,
 ) -> Tuple[Optional[BaseException], bool]:
     """Returns (last transient send failure if any, whether a send was delivered)."""
-    if not _notify_enabled(settings, "TELEGRAM_NOTIFY_TASKS"):
-        return None, False
+    notify_all = _notify_enabled(settings, "TELEGRAM_NOTIFY_TASKS")
     summaries = _summary_ids_in_tail(api)
     if "notified_task_ids" not in state:
         # First run with task notifications on → treat the existing backlog as seen
@@ -175,6 +207,12 @@ async def _check_tasks_notify(
     seen_set = set(seen)
     for tid, e in summaries:
         if tid in seen_set:
+            continue
+        if not _announce_summary(e, notify_all=notify_all):
+            # Not worth a push, but it IS seen: a later toggle flip must not blast a
+            # backlog this lane was never going to announce.
+            seen.append(tid)
+            seen_set.add(tid)
             continue
         parts = []
         rounds = e.get("rounds")
@@ -205,6 +243,12 @@ async def _check_tasks_notify(
                 parts.append(outcome)
         tail = (" · " + " · ".join(parts)) if parts else ""
         msg = (f"{icon} Задача {tid[:8]} {word}{tail}" if lang == "ru" else f"{icon} Task {tid[:8]} {word}{tail}")
+        # The card's reason line, exactly as the host composed it for this task's
+        # durable row — never a second sentence written here, and never a second
+        # rendering of the cause table.
+        reason = str(e.get("reason_detail") or "").strip()
+        if reason:
+            msg += "\n" + reason
         send_outcome, exc = await _push_notification(api, chat_id, msg, trust_env=trust_env)
         if send_outcome == "transient":
             # Stop the batch on the first transient failure: every further
@@ -231,13 +275,12 @@ def _make_notifier(api, *, trust_env: bool = False):
         while True:
             settings = _load_settings(api)
             chat_id = _pinned_chat_id(settings)
-            want = _notify_enabled(settings, "TELEGRAM_NOTIFY_TASKS") or _notify_enabled(
-                settings,
-                "TELEGRAM_NOTIFY_BUDGET",
-            )
             transient: Optional[BaseException] = None
             delivered = False
-            if chat_id and want:
+            # The tasks lane is no longer opt-in (it carries the non-clean floor), and
+            # the budget lane self-gates on its own toggle, so a pinned owner chat is
+            # the only precondition left.
+            if chat_id:
                 lang = str(settings.get("TELEGRAM_LANGUAGE") or "en").strip().lower()
                 state = _load_notif_state(api)
                 transient, delivered = await _check_budget_notify(

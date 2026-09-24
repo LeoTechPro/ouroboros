@@ -71,6 +71,53 @@ def test_facade_inventory_is_byte_identical(facades):
     _assert_identical(inv.FACADE_OUT, facades[0])
 
 
+def test_ui_control_text_inventory_is_byte_identical():
+    _assert_identical(inv.UI_CONTROLS_OUT, inv.build_ui_control_inventory()[0])
+
+
+def test_ui_control_scan_lists_fixed_text_and_only_counts_the_rest():
+    from scripts.ui_control_inventory import scan_controls
+
+    rows, interpolated = scan_controls(
+        """
+        <button class="btn btn-default btn-sm" type="button">Retry</button>
+        <button class="chat-attach-btn" aria-label="Attach file"><svg viewBox="0 0 1 1"></svg></button>
+        <button class="btn ${tone}" type="button"><span>Save &amp; close</span></button>
+        <button class="btn">${escapeHtml(label)}</button>
+        <button class="icon-only"><svg></svg></button>
+        <button class="btn btn-default" type="button"
+            ${rows.length >= MAX_ROWS ? 'disabled' : ''}>Add subagent</button>
+        const go = document.createElement('button');
+        go.className = 'btn btn-xs btn-default';
+        go.textContent = 'Turn into project';
+        const dynamic = document.createElement('button');
+        dynamic.textContent = labelFor(row);
+        """
+    )
+    # Fixed text is listed with its classes; an icon-only control is named by its fixed
+    # accessible name; an interpolated class is shown as a gap, never guessed.
+    assert rows == [
+        ("Retry", "btn btn-default btn-sm"),
+        ("[icon] Attach file", "chat-attach-btn"),
+        ("Save & close", "btn …"),
+        # A comparison inside a templated attribute is not the end of the tag.
+        ("Add subagent", "btn btn-default"),
+        ("Turn into project", "btn btn-xs btn-default"),
+    ]
+    # Run-time text, a nameless icon and a computed label are counted, not invented.
+    assert interpolated == 3
+
+
+def test_ui_control_inventory_keeps_siblings_adjacent_and_names_the_one_raiser():
+    rendered = inv.build_ui_control_inventory()[0]
+    table = [line for line in rendered.splitlines() if line.startswith("| ") and not line.startswith("| text")]
+    refresh = [index for index, line in enumerate(table) if line.startswith("| Refresh |")]
+    # The point of the sort: every control that says the same thing is one contiguous block.
+    assert len(refresh) >= 2 and refresh == list(range(refresh[0], refresh[0] + len(refresh)))
+    # An owner intent with a door is raised by exactly one module.
+    assert "| `ouro:open-project` | modules/project_reference.js |" in rendered
+
+
 # ---------------------------------------------------------------------------
 # Resolution invariants
 # ---------------------------------------------------------------------------

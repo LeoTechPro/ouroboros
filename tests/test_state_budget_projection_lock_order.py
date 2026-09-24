@@ -89,7 +89,7 @@ def test_older_budget_snapshot_cannot_regress_state(tmp_path, monkeypatch):
     release_first = threading.Event()
     calls = []
 
-    def breakdown(_root):
+    def breakdown(_root, **_display_read):
         calls.append(len(calls) + 1)
         if len(calls) == 1:
             first_started.set()
@@ -198,9 +198,9 @@ def test_reordered_writers_across_real_compaction_reject_lower_epoch(tmp_path, m
     real_breakdown = accounting.usage_breakdown
     calls = 0
 
-    def delayed_breakdown(root):
+    def delayed_breakdown(root, **display_read):
         nonlocal calls
-        snapshot = real_breakdown(root)
+        snapshot = real_breakdown(root, **display_read)
         calls += 1
         if calls == 1:
             started.set()

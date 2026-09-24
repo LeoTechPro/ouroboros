@@ -56,6 +56,24 @@ def drop_source_native_messages(messages: list, *, source: str) -> tuple[list, l
     return prepared, changed
 
 
+def reset_native_payload(payload: dict, route: dict, *, source: str, model: str, turn_state: Any = None):
+    """Apply an authorized no-start reset to both continuation surfaces."""
+    messages, changed = reset_native_messages(
+        payload["messages"], route, source=source, model=model)
+    if not changed:
+        messages, changed = drop_source_native_messages(payload["messages"], source=source)
+    slot = payload.get("nativeContinuation")
+    if not changed and not isinstance(slot, dict):
+        return None
+    updated = {**payload, "messages": messages}
+    surface = ""
+    if isinstance(slot, dict):
+        updated.pop("nativeContinuation", None)
+        if turn_state is not None and hasattr(turn_state, "envelope"):
+            turn_state.envelope = None
+        changed = [{"old_route": slot.get("route") or {}, "new_route": {}}, *changed]
+        surface = "top_level_turn_slot"
+    return updated, changed, surface
 
 
 class _MessageShapingMixin:

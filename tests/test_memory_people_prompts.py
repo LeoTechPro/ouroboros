@@ -103,27 +103,30 @@ def test_memory_vocabulary_is_not_dressed_up_as_tool_names():
             assert f"`{word}`" not in text, f"{rel} backticks {word}"
 
 
-def test_wake_template_maintains_understanding_of_people():
-    """The wake-up message (an ordinary Main turn's user text) keeps the commitment:
-    revise the existing note about a person rather than minting a new one (P12)."""
-    template = " ".join(_read("prompts/CONSCIOUSNESS.md").split()).lower()
+def test_the_people_memory_contract_has_exactly_one_home():
+    """The wake-up message is an ordinary Main turn's USER text, so it runs on the
+    system prompt that already states this contract. It used to restate it — which
+    made the same obligation editable in two places and drifted the moment one
+    changed. The contract is pinned above, in its single home; what is pinned here
+    is that the wake does not carry a second copy of it (P7 one home per fact)."""
+    memory = _section(_read("prompts/SYSTEM.md"), "Memory")
+    claims = _claims(memory)
 
-    assert "people you talk with" in template
-    assert "knowledge_read" in template and "knowledge_write" in template
-    assert "rather than minting a new one" in template
+    # Still exactly the obligations the wake used to duplicate.
+    assert any("revise" in c and ("in place" in c or "same turn" in c) for c in claims)
+    assert any("one interpretation" in c for c in claims)
 
-
-def test_wake_template_resolves_contradictions_about_people_too():
-    template = " ".join(_read("prompts/CONSCIOUSNESS.md").split()).lower()
-
-    assert "contradictions" in template and "about the people you talk with" in template
+    wake = " ".join(_read("prompts/CONSCIOUSNESS.md").split()).lower()
+    for duplicated in ("people you talk with", "rather than minting a new one",
+                       "knowledge_read", "knowledge_write", "contradictions"):
+        assert duplicated not in wake, f"the wake restates {duplicated!r}"
 
 
 def test_wake_template_addresses_its_human_not_a_user():
     consciousness = _read("prompts/CONSCIOUSNESS.md")
 
-    assert "write to your human" in consciousness
-    assert "the user" not in consciousness
+    assert "Speak to your human" in consciousness
+    assert "your human" in consciousness and "the user" not in consciousness
 
 
 def test_reflection_nominates_learning_about_people_as_well_as_itself():

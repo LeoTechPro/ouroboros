@@ -26,7 +26,7 @@ def _recoverable_review_invocations(drive_root: pathlib.Path) -> Dict[str, str]:
     """Unique durable delegated tokens keyed by their reserved operation."""
     from ouroboros import delegate_custody
 
-    rows = list(delegate_custody._iter_rows(delegate_custody.event_log_path(drive_root)))
+    rows = list(delegate_custody.custody_rows(drive_root))
     candidates: Dict[str, Set[str]] = {}
     records = [
         (record, str(record.get("invocation_id") or ""))

@@ -585,9 +585,10 @@ def test_release_workflow_orders_smoke_sbom_attestation_and_draft_verification()
     assert "lipo -archs" in workflow
     assert "Refusing to modify the published release" in workflow
     assert "group: release-${{ github.ref }}" in workflow
-    assert workflow.count('git ls-remote --exit-code origin "$TAG_REF" "$PEELED_REF"') == 2
-    assert workflow.count('test "$(git cat-file -t "$TAG_REF")" = "tag"') == 2
-    assert workflow.count('[ "$PEELED_SHA" != "$GITHUB_SHA" ]') == 2
+    publication = workflow.split("\n  release:\n", 1)[1]
+    assert publication.count('git ls-remote --exit-code origin "$TAG_REF" "$PEELED_REF"') == 2
+    assert publication.count('test "$(git cat-file -t "$TAG_REF")" = "tag"') == 2
+    assert publication.count('[ "$PEELED_SHA" != "$GITHUB_SHA" ]') == 2
     create_release_step = workflow[
         workflow.index("- name: Create draft GitHub Release") :
         workflow.index("- name: Verify uploaded draft")

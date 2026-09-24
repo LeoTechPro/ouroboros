@@ -171,6 +171,7 @@ def _record_forced_finalization(
         "current_evidence_revision": current_revision,
         "evidence_current": bool(
             candidate is not None
+            and bool(current_fingerprint) and not binding.get("stale_evidence")
             and candidate.evidence_fingerprint == current_fingerprint
         ),
         "acceptance_status": str(binding.get("acceptance_status") or "unaccepted"),
@@ -468,6 +469,17 @@ def _run_forced_children_acceptance(
         tools_ctx._forced_undispositioned_children = None
 
 
+def _plan_gate_identity(decision: Dict[str, Any]) -> str:
+    """Typed identity of the plan-review gate as the mind was last TOLD it.
+    Existing decision fields only — never the rendered English, which cannot tell
+    two different waves apart (astra F3)."""
+    return "|".join(str(decision.get(key) or "") for key in (
+        "status", "allow", "closed", "outcome", "enforcement", "cycles_paid",
+        "custody_pending", "reviewer_slots_degraded", "review_late_result_pending",
+        "quorum_unreachable", "owner_hurry_local_advisory",
+    ))
+
+
 def _enforce_swarm_actions(
     content: str,
     messages: List[Dict[str, Any]],
@@ -475,18 +487,55 @@ def _enforce_swarm_actions(
     llm_trace: Dict[str, Any],
     emit_progress: Callable[[str], None],
 ) -> bool:
-    """Hold normal finalization while blocking plan work is open."""
+    """Hold normal finalization while blocking plan work is open, and hand the mind
+    ONE fact when a hold it was told about was released behind its back (owner Q4=A).
+
+    The marker advances ONLY on the two paths that actually append a message to
+    ``messages`` — the hold reminder and the release note — so it records what
+    entered the MIND's context, not what this gate observed. Every other gate
+    transition already reaches the mind by its own route and must not buy a round:
+    a settled reviewer slot arrives as a ``[System task message]`` through the task
+    mailbox (``plan_review_collect.announce_released_settlement`` ->
+    ``loop_round_limits`` drain), a rail release rides the forced prompt's typed
+    facts, and ``closed``/``author_stopped``/``cycles_exhausted`` are the mind's own
+    ``plan_task`` results. The one residual is the owner's hurry, which the HQ1
+    no-chat contract forbids putting into ``messages``
+    (``loop_round_limits.py``) — that is the only release this fires on."""
 
     decision = _loop()._force_plan_decision(tools._ctx, llm_trace)
     if decision.get("required"):
         llm_trace["force_plan_decision"] = decision
+    identity = _plan_gate_identity(decision) if decision.get("required") else ""
+    told = str(getattr(tools._ctx, "_plan_gate_told_identity", "") or "")
     if decision.get("allow"):
-        return False
+        if not (
+            told and identity and identity != told
+            and not decision.get("closed")
+            and decision.get("status") != "author_stopped"
+            and decision.get("owner_hurry_local_advisory")
+            and not getattr(tools._ctx, "_plan_gate_release_told", False)
+        ):
+            return False
+        tools._ctx._plan_gate_told_identity = identity
+        tools._ctx._plan_gate_release_told = True
+        if content.strip():
+            messages.append({"role": "assistant", "content": content})
+        _loop()._append_or_merge_user_message(
+            messages,
+            "[PLAN_REVIEW_RELEASED]\n"
+            "The plan-review hold reported to you earlier is released by the owner's hurry "
+            "request, and the review is still open.\n" + _FACTS_LEAD + "\n"
+            + _plan_gate_facts(decision),
+        )
+        llm_trace["reasoning_notes"].append("Released plan-review gate reported before final response.")
+        emit_progress("Plan-review gate released before final response.")
+        return True
     if content.strip():
         messages.append({"role": "assistant", "content": content})
     reminder = _loop()._force_plan_reminder(decision)
     _loop()._append_or_merge_user_message(messages, reminder)
     llm_trace["reasoning_notes"].append(reminder)
+    tools._ctx._plan_gate_told_identity = identity
     emit_progress("Plan-review action required before final response.")
     return True
 
@@ -498,13 +547,98 @@ _FORCED_BEST_EFFORT_TAIL = (
 )
 
 
+_FACTS_LEAD = (
+    "Typed facts this task already records about this finalization. They stay recorded "
+    "whether or not you mention them; your own answer is where they are said, in your own "
+    "words — this block is data, not wording to reuse."
+)
+
+
+def _plan_gate_facts(decision: Dict[str, Any]) -> str:
+    """One ``key=value`` line for an open plan-review gate, built from the decision
+    dict's own typed fields (never ``plan_review_disclosure``'s owner-facing English:
+    BIBLE P5/P6 — the host does not put a template in the mind's mouth).
+
+    Only fields that do NOT depend on ``hard_rail`` are emitted, so the same line is
+    true on the normal rail and on every forced rail. ``owner_hurry_local_advisory``/
+    ``configured_enforcement`` carry the accurate hurry-vs-advisory attribution that
+    the recorded notice does not distinguish."""
+    if not decision.get("required") or decision.get("closed"):
+        return ""
+    parts = ["plan_review_open=true"]
+    if decision.get("outcome"):
+        parts.append(f"plan_review_outcome={decision['outcome']}")
+    if decision.get("enforcement"):
+        parts.append(f"plan_review_enforcement={decision['enforcement']}")
+    if decision.get("decision_authority"):
+        parts.append(f"decision_authority={decision['decision_authority']}")
+    if decision.get("owner_hurry_local_advisory"):
+        parts.append("owner_hurry_local_advisory=true")
+        parts.append(f"configured_enforcement={decision.get('configured_enforcement') or 'blocking'}")
+    for key in (
+        "reviewer_slots_degraded", "custody_pending",
+        "review_late_result_pending", "quorum_unreachable",
+    ):
+        if decision.get(key):
+            parts.append(f"{key}=true")
+    if decision.get("cycles_paid"):
+        parts.append(f"cycles_paid={decision['cycles_paid']}")
+    return " ".join(parts)
+
+
+def _forced_state_facts(ctx: _RoundLimitContext, llm_trace: Dict[str, Any]) -> str:
+    """Hand the ONE forced model call the same limitations this rail will record beside
+    its answer — as typed facts, not as the owner-facing notice.
+
+    Never raises: a forced answer outranks its own annotation."""
+    try:
+        tools_ctx = getattr(getattr(ctx, "tools", None), "_ctx", None)
+        projected = llm_trace.get("force_plan_decision")
+        decision = (
+            projected if isinstance(projected, dict)
+            else (_loop()._force_plan_decision(tools_ctx, llm_trace) if tools_ctx is not None else {})
+        )
+        lines = [line for line in (_plan_gate_facts(decision),) if line]
+        undecided = _undispositioned_children(ctx)
+        if undecided:
+            lines.append(
+                f"children_undecided={len(undecided)}: {_undecided_children_listing(undecided)}"
+            )
+        deferred = [
+            child for child in _direct_child_results(ctx)
+            if _child_disposition_state(child) == "deferred"
+        ]
+        if deferred:
+            lines.append(
+                f"children_deferred={len(deferred)}: {_undecided_children_listing(deferred)}"
+            )
+        candidate = _loop()._live_delivery_candidate(ctx)
+        current = str(getattr(tools_ctx, "_delivery_evidence_fingerprint", "") or "")
+        if (candidate is not None and current and candidate.evidence_fingerprint
+                and candidate.evidence_fingerprint != current):
+            lines.append("retained_answer_predates_current_evidence=true")
+        if not lines:
+            return ""
+        return "\n\n[TASK_STATE_FACTS]\n" + _FACTS_LEAD + "\n" + "\n".join(lines)
+    except Exception:
+        log.debug("Forced task-state facts unavailable", exc_info=True)
+        return ""
+
+
 def _prepare_forced_prompt(
     ctx: _RoundLimitContext, prompt: str, llm_trace: Dict[str, Any],
 ) -> str:
     _loop()._drain_forced_owner_directives(ctx, llm_trace)
     _loop()._finalize_forced_services(ctx, llm_trace)
     tools_ctx = getattr(getattr(ctx, "tools", None), "_ctx", None)
-    return prompt + _loop()._forced_delegation_note(tools_ctx, llm_trace) + _forced_subject_prompt(ctx, llm_trace)
+    # The typed facts sit BEFORE the acceptance observation so that one-shot block
+    # stays the tail of the message (the prompt-cache prefix rule).
+    return (
+        prompt
+        + _loop()._forced_delegation_note(tools_ctx, llm_trace)
+        + _forced_state_facts(ctx, llm_trace)
+        + _forced_subject_prompt(ctx, llm_trace)
+    )
 
 
 def _forced_subject_prompt(ctx: _RoundLimitContext, llm_trace: Dict[str, Any]) -> str:
@@ -714,15 +848,21 @@ def _publish_stale_forced_candidate(
     tools = getattr(ctx, "tools", None)
     if tools is None:
         return None
-    current_revision, _current_fingerprint = _loop()._delivery_evidence_state(
+    current_revision, current_fingerprint = _loop()._delivery_evidence_state(
         tools, ctx, llm_trace,
     )
     disclosure = (
         "\n\n⚠️ STALE-EVIDENCE NOTICE — RESUME REQUIRED (host): The preserved "
-        "answer above was produced before newer task evidence reached the loop. "
-        "It has not been regenerated or accepted against that newer evidence and "
-        "does not claim to incorporate it. Resume the task to produce and review "
-        "a complete answer against the latest evidence."
+        + ("answer above was produced before newer task evidence reached the loop. "
+           "It has not been regenerated or accepted against that newer evidence and "
+           "does not claim to incorporate it. "
+           if current_fingerprint else
+           # UNKNOWN evidence: the host could not re-read it, so it is not claimed
+           # newer — only unverified. Typed, never a crash or an approval.
+           "answer above rests on task evidence the host could no longer read. "
+           "It has not been re-verified or accepted against the current evidence and "
+           "does not claim to reflect it. ")
+        + "Resume the task to produce and review a complete answer against the latest evidence."
     )
     set_terminal_host_notice(ctx.accumulated_usage, suffix, disclosure)
     candidate = _loop()._replace_delivery_candidate(
@@ -770,6 +910,11 @@ def _forced_fallback_result(
         if tool_ctx is not None else ""
     )
     suffix = plan_suffix + _loop()._forced_orphan_note(ctx)
+    # Every rail that DISCLOSES types the fact: a host-notice fallback used to state
+    # the open review in prose while nothing typed carried it. Absent = not open: a
+    # clean result carries no key (pinned usage shapes).
+    if plan_suffix:
+        ctx.accumulated_usage["terminal_plan_review_open"] = True
     set_terminal_host_notice(ctx.accumulated_usage, suffix)
     live_candidate = _loop()._live_delivery_candidate(ctx)
     fallback_is_retained_model_text = (
@@ -782,10 +927,7 @@ def _forced_fallback_result(
             candidate.model_text or candidate.full_text if provider_terminal else
             candidate.full_text
         )
-        ctx.accumulated_usage.update(
-            terminal_origin=TERMINAL_ORIGIN_MODEL_FINAL,
-            terminal_plan_review_open=bool(plan_suffix),
-        )
+        ctx.accumulated_usage["terminal_origin"] = TERMINAL_ORIGIN_MODEL_FINAL
         if composed != candidate.full_text:
             candidate = _publish_model_forced_candidate(
                 ctx, llm_trace, composed, reason_code,
@@ -1047,7 +1189,8 @@ def _forced_final_answer(
             _loop()._force_plan_disclosure(tools_ctx, llm_trace, forced_reason=reason_code)
             if tools_ctx is not None else ""
         )
-        ctx.accumulated_usage["terminal_plan_review_open"] = bool(plan_suffix)
+        if plan_suffix:  # absent = not open: a clean result carries no key (pinned usage shapes)
+            ctx.accumulated_usage["terminal_plan_review_open"] = True
         set_terminal_host_notice(ctx.accumulated_usage, plan_suffix, _loop()._forced_orphan_note(ctx))
         full_text = extracted
         ctx.accumulated_usage["terminal_origin"] = TERMINAL_ORIGIN_MODEL_FINAL

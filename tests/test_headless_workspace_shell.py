@@ -403,10 +403,15 @@ def test_workspace_run_shell_allows_absolute_cwd_under_workspace_and_child_drive
         "advanced",
     )
     assert git_escape and "WORKSPACE_GIT_BLOCKED" in git_escape, git_escape
+    # Owner 5A: a bare command word no longer fences a TOP-LEVEL task (a guess is
+    # not write evidence); explicit shell syntax into the runtime drive still is,
+    # and the refusal names every root this task may write.
+    assert _shell_guard_text(registry, {"cmd": ["touch", "../data/state/state.json"]}, "pro") is None
     protected_escape = _shell_guard_text(registry,
-        {"cmd": ["touch", "../data/state/state.json"]}, "pro",
+        {"cmd": ["sh", "-c", "printf x > ../data/state/state.json"]}, "pro",
     )
-    assert "WORKSPACE_SHELL_BLOCKED" in protected_escape
+    assert "WORKSPACE_SHELL_BLOCKED" in protected_escape and "outside every root this task may write" in protected_escape
+    assert f"task_drive={parent_task_dir.parent.resolve()}" in protected_escape, protected_escape
     task_drive_write = registry.execute("run_command", {"cmd": ["touch", "output.txt"], "cwd": str(child_dir)})
     assert "WORKSPACE_SHELL_BLOCKED" not in task_drive_write
     assert (child_dir / "output.txt").is_file()

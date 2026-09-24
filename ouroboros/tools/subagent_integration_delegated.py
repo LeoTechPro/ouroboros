@@ -79,7 +79,7 @@ def _capture_failed_refusal(rid: str, cap_status: str, note: str) -> str:
 
 
 def _capture_at_disposition(
-    drive: Any, entry: Any, rid: str, manifest_path: pathlib.Path,
+    drive: Any, entry: Any, rid: str, manifest_path: pathlib.Path, decision: str = "apply",
 ) -> str:
     """Capture-on-demand (C1-R2) for a run that settled without terminal proof.
 
@@ -100,6 +100,20 @@ def _capture_at_disposition(
     """
     if entry.patch_captured and _manifest_capture_status(manifest_path) in _READY_CAPTURE_STATUSES:
         return ""
+    if str(decision or "").lower() == "reject":
+        try:
+            saved = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError, ValueError):
+            saved = {}
+        if (isinstance(saved, dict) and saved.get("status") == "failed"
+                and saved.get("authority_drift_source_status") == ARTIFACT_STATUS_READY_NO_CHANGES
+                and isinstance(saved.get("authority_drift"), dict)
+                and (saved.get("authority_drift", {}).get("paths")
+                     or saved.get("authority_drift", {}).get("error"))):
+            # The private snapshot is known to contain no child changes. A
+            # reject only discards that empty result, so it remains safe and
+            # prevents a neighboring edit from wedging custody forever.
+            return ""
     from ouroboros.tools.delegate_integration import capture_terminal_patch_for_drive
 
     try:
@@ -452,7 +466,7 @@ def _integrate_delegated_patch(
     cap_dir = custody.delegated_capture_dir(drive, entry.task_id, snapshot_key)
     manifest_path = cap_dir / "workspace_patch.json"
     patch_path = cap_dir / "workspace.patch"
-    capture_refusal = _si()._capture_at_disposition(drive, entry, rid, manifest_path)
+    capture_refusal = _si()._capture_at_disposition(drive, entry, rid, manifest_path, decision)
     if capture_refusal:
         return capture_refusal
     manifest: Dict[str, Any] = {}
@@ -506,8 +520,17 @@ def _integrate_git_capture(ctx, entry, decision, reason, manifest, cap_dir, orph
 
     capture_status = str(manifest.get("status") or "")
     if decision == "reject":
-        # A reject RELEASES the snapshot (the child's only copy): ready-only.
-        if capture_status not in _READY_CAPTURE_STATUSES:
+        drifted_no_change = (
+            capture_status == "failed"
+            and manifest.get("authority_drift_source_status") == ARTIFACT_STATUS_READY_NO_CHANGES
+            and isinstance(manifest.get("authority_drift"), dict)
+            and (manifest["authority_drift"].get("paths")
+                 or manifest["authority_drift"].get("error"))
+        )
+        # A reject releases a ready capture. It may also release a failed
+        # no-change capture whose only private fact is the durable authority
+        # drift record: there are no child bytes to discard in that shape.
+        if capture_status not in _READY_CAPTURE_STATUSES and not drifted_no_change:
             return _capture_failed_refusal(
                 rid, capture_status, "a reject would release the snapshot over it")
         verdict_path = _si()._write_verdict(

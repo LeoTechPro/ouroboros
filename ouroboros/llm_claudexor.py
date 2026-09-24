@@ -14,10 +14,11 @@ history, so ``ModelTurnState`` is one mutable slot the caller owns and this
 module reads. ``_request`` deep-copies the slot's value into the frozen request
 as top-level ``nativeContinuation`` (``None`` on an opted-in empty slot), and a
 DISPATCHED durable result replaces the slot's value through ``adopt_turn_state``
-— a not-dispatched or unknown outcome, or an exchange that never carried the
-field at all, leaves it exactly as it was, because holding state is never a
-reason to infer another generation. A candidate priced ahead of its send — the
-wrap-up a forced finalization is admitted against — reads that SAME slot, so
+— ordinary not-dispatched or unknown outcomes and exchanges without the field
+leave it exactly as it was. A released ``invalid_continuation`` refusal alone
+authorizes one stateless repair before generation. A candidate priced ahead of
+its send — the wrap-up a forced finalization is admitted against — reads that
+SAME slot, so
 the admitted request and the dispatched one carry identical bytes. The engine
 alone compares route identity and starts fresh when it changes; the caller
 clears the slot through ``turn_state_for_route`` when its dispatch leaves this
@@ -31,9 +32,9 @@ legacy shape, so a process's FIRST model call carries no slot, captures no
 token, and reads that legacy answer as silence about the turn rather than as a
 turn that ended. The value never leaves this transport: it is not usage, not
 an event, not a task card, and its ``repr`` says only whether a turn is active.
-The assistant-level
-``message.nativeContinuation`` and its ``native_continuation_reset`` semantics
-are a separate, unchanged contract.
+That repair also resets assistant-level ``message.nativeContinuation`` using
+the existing account/source rules; ``native_continuation_reset`` records only
+routes and the affected surface, never either opaque payload.
 """
 
 from __future__ import annotations
@@ -268,7 +269,7 @@ def _requested_turn_state(slot: ModelTurnState | None) -> tuple[bool, dict | Non
 def adopt_turn_state(slot: ModelTurnState | None, payload: dict, result: dict) -> None:
     """Take the active-turn envelope from a DISPATCHED durable result.
 
-    Only this seam writes the slot, and only for a result the engine proved
+    This seam adopts a new envelope only for a result the engine proved
     terminal on a request that ASKED about the turn. A legacy-shaped exchange —
     the shape the version floor sends whenever the serving engine is unproven —
     carries no ``nativeContinuation`` field either way, so its result is SILENCE
@@ -384,6 +385,7 @@ class _ModelInvocation:
 
     def __init__(self, target: dict, payload: dict, parameters: dict):
         self.target, self.payload = target, payload
+        self.model_turn_state = parameters.get("model_turn_state")
         self.role = str(parameters.get("model_role") or "")
         self.output_reserve = int(parameters.get("max_tokens") or 0)
         self.timeout = llm_transport_timeout_sec(parameters.get("timeout"))
@@ -741,26 +743,23 @@ class _ModelInvocation:
 
 
 def _reset_native(payload: dict, error: ClaudexorModelNotDispatched, invocation: _ModelInvocation) -> dict | None:
-    from ouroboros.llm_messages import drop_source_native_messages, reset_native_messages
+    from ouroboros.llm_messages import reset_native_payload
 
     capture = getattr(error, "physical_attempt_capture", None)
     if error.code != "invalid_continuation" or getattr(capture, "state", None) != "released":
         return None
-    messages, changed = reset_native_messages(
-        payload["messages"], error.route, source=payload["source"], model=payload["model"])
-    if not changed:
-        # The account never changed, so the refusal is about the continuation
-        # itself — an engine that still binds it to the model that produced it
-        # refuses a route the caller cannot repair by re-routing. Drop this
-        # source's continuations once and let the canonical messages speak.
-        messages, changed = drop_source_native_messages(payload["messages"], source=payload["source"])
-        if not changed:
-            return None
+    updated_with_slot = reset_native_payload(
+        payload, error.route, source=payload["source"], model=payload["model"],
+        turn_state=getattr(invocation, "model_turn_state", None))
+    if updated_with_slot is None:
+        return None
+    updated, changed, surface = updated_with_slot
     append_jsonl(invocation.root / "logs" / "events.jsonl", {
         "ts": utc_now_iso(), "type": "native_continuation_reset", "task_id": invocation.task_id,
         "model_role": invocation.role, "operation_id": invocation.operation_id, "routes": changed,
+        **({"surface": surface} if surface else {}),
     })
-    return {**payload, "messages": messages}
+    return updated
 
 
 def _accounted_request(invocation: _ModelInvocation):

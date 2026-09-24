@@ -5,8 +5,9 @@ turns live only in the server process's actor registry, so the main loop
 writes this small projection beside the snapshot (owner decision 6C).  Actor
 locks are only ever tried (``acquire(blocking=False)``): a turn mid-admission
 is skipped and the fragment says so through ONE aggregate ``incomplete`` fact
-rather than blocking the loop or fabricating a row.  Cleared on queue
-init/restore so a stale process's turns never outlive it.
+rather than blocking the loop or fabricating a row.  Queue init takes the
+roster over and clears it in the same step, so a stale process's turns never
+outlive it and snapshot restore still learns which direct roots the stop caught.
 """
 
 from __future__ import annotations
@@ -15,7 +16,8 @@ import logging
 import pathlib
 from typing import Any, Dict
 
-from ouroboros.utils import atomic_write_json, utc_now_iso
+from ouroboros.utils import atomic_write_json, read_json_dict, utc_now_iso
+from ouroboros.focus import compact_focus as _compact_focus
 
 log = logging.getLogger(__name__)
 
@@ -46,12 +48,16 @@ def publish_direct_roots(drive_root: Any) -> Dict[str, Any]:
             finally:
                 lock.release()
             if turn is not None:
-                rows.append({
+                row = {
                     "task_id": str(turn.get("id") or ""),
                     "title": str(turn.get("title") or "").strip(),
                     "chat_id": turn.get("chat_id"),
                     "project_id": str(turn.get("project_id") or ""),
-                })
+                }
+                focus = _compact_focus(turn.get("focus"))
+                if focus is not None:
+                    row["focus"] = focus
+                rows.append(row)
     except Exception:
         log.debug("direct roots projection failed", exc_info=True)
         incomplete = True
@@ -69,3 +75,29 @@ def clear_direct_roots(drive_root: Any) -> None:
         atomic_write_json(_fragment_path(drive_root), {"ts": utc_now_iso(), "roots": [], "incomplete": False})
     except Exception:
         log.debug("direct roots fragment clear failed", exc_info=True)
+
+
+def take_direct_roots(drive_root: Any) -> Dict[str, Any]:
+    """Hand the PREVIOUS process's rows over and clear the fragment in one step.
+
+    Queue init is the moment the roster stops describing anything live, so it is
+    also the last moment those ids exist: reading here keeps the clear exactly
+    where it was — a stale process's turns never outlive it however the boot
+    continues — while snapshot restore still learns which direct roots the stop
+    caught.  An ``incomplete`` roster skipped a turn that was mid-admission: the
+    rows it DOES list are real and are handed over, the skipped turn keeps the
+    projection it has today, and the flag rides along so the restore record
+    discloses that gap.  Never raises.
+    """
+    payload = read_json_dict(_fragment_path(drive_root))
+    clear_direct_roots(drive_root)
+    if not isinstance(payload, dict):
+        return {"task_ids": [], "incomplete": False}
+    incomplete = bool(payload.get("incomplete"))
+    rows = payload.get("roots")
+    task_ids = [] if not isinstance(rows, list) else [
+        str(row.get("task_id") or "")
+        for row in rows
+        if isinstance(row, dict) and str(row.get("task_id") or "")
+    ]
+    return {"task_ids": task_ids, "incomplete": incomplete}

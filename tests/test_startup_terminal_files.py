@@ -160,17 +160,30 @@ def test_host_terminal_without_child_terminal_does_not_disable_retention(
         write_task_result(child, task_id, child_status, result="unfinished work")
     stored = write_task_result(root, task_id, status, result="Host ended this execution",
                                child_drive_root=str(child))
-    # Repeated boots do not turn confirmed absence of a child terminal into
-    # a permanent save obligation that blocks unrelated startup retention.
-    for _ in range(2):
-        report = _recovery(root, repo)
-        assert report["unresolved"] == report["errors"] == report["protected"] == []
-        assert load_task_result(root, task_id, strict=True) == stored
+    # First boot may owe/publish the new host terminal's presentation, but
+    # must preserve every execution fact and never acquire a retention hold.
+    report = _recovery(root, repo)
+    assert report["unresolved"] == report["errors"] == report["protected"] == []
+    actual = load_task_result(root, task_id, strict=True)
+    bookkeeping = {"canonical_terminal_projection", "canonical_terminal_projection_ready", "updated_at"}
+    assert {k: v for k, v in actual.items() if k not in bookkeeping} == {
+        k: v for k, v in stored.items() if k not in bookkeeping}
+    if status == "cancelled":
+        assert actual["canonical_terminal_projection"]["summary_id"] == f"task-terminal:{task_id}"
+        assert actual["canonical_terminal_projection_ready"] is None
+    else:
+        assert actual["canonical_terminal_projection_ready"]["token"]
+        assert not actual.get("canonical_terminal_projection")
+    result_path = root / "task_results" / f"{task_id}.json"
+    settled_bytes = result_path.read_bytes()
+    report = _recovery(root, repo)
+    assert report["unresolved"] == report["errors"] == report["protected"] == []
+    assert result_path.read_bytes() == settled_bytes
     monkeypatch.setattr("ouroboros.retention.age_cutoff", lambda *a, **k: 4_000_000_000)
     maintenance._startup_prune_sweeps(preserve_task_sources=bool(
         report["unresolved"] or report["protected"] or report["errors"]))
     assert not child.exists()
-    assert load_task_result(root, task_id, strict=True) == stored
+    assert result_path.read_bytes() == settled_bytes
 
 
 def test_no_provider_unrestored_wait_is_preserved_but_other_saved_work_recovers(roots, monkeypatch):
@@ -221,7 +234,7 @@ def test_failed_first_save_preserves_child_and_followup_attachment_through_prune
     assert recovered["recovered"] == ["saved"]
     assert load_task_result(root, "saved")["child_ref_promotion"]["pending_refs"] == []
     for row in manifest:
-        assert (task_artifact_dir_path(root, "saved") / row["relpath"]).read_text() == "accepted follow-up file"
+        assert (task_artifact_dir_path(root, "saved") / row["relpath"]).read_text(encoding="utf-8") == "accepted follow-up file"
 
 
 @pytest.mark.parametrize("pids", [None, {777}])

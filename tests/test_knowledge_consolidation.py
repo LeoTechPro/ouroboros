@@ -34,6 +34,15 @@ class MemoryLLM:
 
     def chat(self, **kwargs):
         self.calls.append(deepcopy(kwargs))
+        if kwargs["messages"][0]["content"].startswith("Compare this draft memory"):
+            if kwargs["messages"][-1]["role"] != "tool":
+                return {"content": "", "tool_calls": [_call()]}, {"cost": 0.01}
+            # Corrected existing-note replacements require this operation's read.
+            prompt = kwargs["messages"][0]["content"]
+            block = prompt.split("## Draft memory", 1)[1].split("\n\n", 1)[0] if "## Draft memory" in prompt else ""
+            nominations = block[block.index("KNOWLEDGE_ENTRIES_JSON:"):] if "KNOWLEDGE_ENTRIES_JSON:" in block else ""
+            return {"content": "Checked interpretation." + ("\n" + nominations if nominations else "")}, {
+                "prompt_tokens": 5, "completion_tokens": 5, "total_tokens": 10, "cost": 0.02}
         if len(self.calls) == 1:
             return {"content": "", "tool_calls": [_call()]}, {
                 "prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15, "cost": 0.01}
@@ -134,9 +143,10 @@ def test_dialogue_consolidation_retains_nominations_and_commits_shared_note(tmp_
     llm = MemoryLLM(answer)
     ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id="dialogue-memory")
     usage = c.consolidate(chat, blocks, meta, llm, knowledge_context=ctx)
-    assert usage["cost"] == pytest.approx(0.03)
+    assert usage["cost"] == pytest.approx(0.06)  # draft read/answer, correction read/answer
     block = json.loads(blocks.read_text())[0]
     assert "KNOWLEDGE_ENTRIES_JSON" not in block["content"]
+    assert block["rooms"][0]["content"] == "Checked interpretation."
     source_id = block["knowledge_source_ref"]["entry_id"]
     rows = [json.loads(line) for line in (tmp_path / "memory" / "knowledge_history.jsonl").read_text().splitlines()]
     source = next(row for row in rows if row.get("entry_id") == source_id)
@@ -198,7 +208,10 @@ def test_era_compression_cannot_erase_unpublished_knowledge_proposals(tmp_path, 
         def chat(self, **kwargs):
             prompt = kwargs["messages"][0]["content"]
             if prompt.startswith("Compress these older memory blocks"):
-                return {"content": "### Era\nThe full historical span remains represented."}, {"cost": 0.01}
+                return {"content": "The full historical span remains represented."}, {"cost": 0.01}
+            if prompt.startswith("Compare this draft memory"):
+                return {"content": f"Episode {self.count}, checked.\nKNOWLEDGE_ENTRIES_JSON: " + json.dumps([
+                    {"topic": "people/alex", "content": f"Unpublished complete proposal {self.count}."}])}, {"cost": 0.01}
             self.count += 1
             return {"content": f"Episode {self.count}.\nKNOWLEDGE_ENTRIES_JSON: " + json.dumps([
                 {"topic": "people/alex", "content": f"Unpublished complete proposal {self.count}."}])}, {"cost": 0.01}

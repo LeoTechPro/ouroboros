@@ -6,6 +6,11 @@ import { loadVersion, initMatrixRain } from './modules/utils.js';
 import { bindScrollFade } from './modules/scroll_fade.js';
 import { initChat, createChatInstance } from './modules/chat.js';
 import { createStateSnapshotSequencer } from './modules/chat_activity.js';
+import {
+    buildProjectActivityIndex,
+    reconcileProjectActivityCensus,
+    summarizeProjectActivities,
+} from './modules/project_activity.js';
 import { initFiles } from './modules/files.js';
 import { getNotifier } from './modules/notifications.js';
 import { showToast } from './modules/toast.js';
@@ -25,7 +30,8 @@ import { initDashboard } from './modules/dashboard.js';
 import { hydrateNavIcons } from './modules/page_icons.js';
 
 import { initOnboardingOverlay } from './modules/onboarding_overlay.js';
-import { installAltMenuSuppression, installDesktopShellLinkInterceptor, renderProjectChip } from './modules/ui_helpers.js';
+import { installAltMenuSuppression, installDesktopShellLinkInterceptor } from './modules/ui_helpers.js';
+import { nameProjectReference, projectReference } from './modules/project_reference.js';
 
 const state = {
     messages: [],
@@ -65,11 +71,15 @@ const projectPanelTitle = document.getElementById('project-panel-title');
 const navProjects = document.getElementById('nav-projects');
 const navProjectsToggle = document.getElementById('nav-projects-toggle');
 const navProjectsCount = document.getElementById('nav-projects-count');
+const navProjectsActivity = document.getElementById('nav-projects-activity');
 const navProjectsList = document.getElementById('nav-projects-list');
 const projectInstances = new Map();
 const projectPaintRequests = new Map();
 let knownProjectsJson = '';
 let lastProjectRows = [];
+let projectActivityRows = new Map();
+let projectActivityIndex = buildProjectActivityIndex();
+let activitySocketDisconnected = false;
 let projectPanelHideTimer = null;
 let releaseMobileKeyboardForDrawer = () => {};
 
@@ -212,10 +222,18 @@ hydrateNavIcons();
 let projectPanelOpeningSince = 0;
 let mainChat;
 const stateSnapshots = createStateSnapshotSequencer((data, requestedAt, generation) => {
-    renderProjectsNav(data.projects || [], data.project_chat_ids);
+    data = data && typeof data === 'object' ? data : {};
+    // A complete REST body cannot prove absence while the socket is in a
+    // disconnect episode. Keep the previous rows and render them unknown until
+    // a post-reconnect snapshot is sequenced.
+    const activity = reconcileProjectActivityCensus(projectActivityRows, activitySocketDisconnected ? {} : data);
+    projectActivityRows = activity.rows;
+    projectActivityIndex = buildProjectActivityIndex([...projectActivityRows.values()]);
+    renderProjectsNav(data.projects || lastProjectRows,
+        data.project_chat_ids ?? (data.projects ? undefined : Array.from(state.projectChatIds)), projectActivityIndex);
     applyTaskBindings(data.task_bindings || {});
     hydrateOpenChatsFromState(data, requestedAt, generation);
-});
+}, undefined, markProjectActivityUnknown);
 
 const ctx = {
     ws,
@@ -437,7 +455,7 @@ navProjectsToggle?.addEventListener('click', () => {
     syncNavigationState();
 });
 
-function renderProjectsNav(projects, projectChatIds) {
+function renderProjectsNav(projects, projectChatIds, activityIndex = projectActivityIndex) {
     const all = projects || [];
     // Isolation fan-out SSOT: recognize EVERY registered project chat_id (incl.
     // file-less / no-activity / beyond the sidebar summary cap), matching the
@@ -472,7 +490,13 @@ function renderProjectsNav(projects, projectChatIds) {
     const json = JSON.stringify(rows.map(p => [
         p.id, p.name, p.chat_id, p.lifecycle, p.visible_revision, p._unread, p.delete_error,
     ]));
-    if (json === knownProjectsJson) return;
+    // Activity is a projection over the existing census and must not rebuild
+    // the keyed menu: replacing rows here would steal focus from an open menu,
+    // rename action or keyboard navigation. Patch marker attributes in place.
+    if (json === knownProjectsJson) {
+        patchProjectActivityMarkers(activityIndex);
+        return;
+    }
     knownProjectsJson = json;
     lastProjectRows = rows;
     paintProjectsNav();
@@ -480,6 +504,55 @@ function renderProjectsNav(projects, projectChatIds) {
     const active = rows.find((project) => project.id === navState.activeProjectId);
     if (active?._unread && active.lifecycle === 'active') {
         acknowledgeProjectAfterPaint(active);
+    }
+}
+
+// A transport or state-read failure cannot prove that an observed activity has
+// ended. Retain its row for the next complete census, but stop motion and make
+// the marker explicitly unknown rather than quietly showing stale liveness.
+function markProjectActivityUnknown() {
+    projectActivityRows = reconcileProjectActivityCensus(projectActivityRows).rows;
+    projectActivityIndex = buildProjectActivityIndex([...projectActivityRows.values()]);
+    patchProjectActivityMarkers(projectActivityIndex);
+}
+
+function setActivityMarker(marker, summary) {
+    if (!marker) return;
+    const label = summary.label;
+    const active = Boolean(label);
+    marker.hidden = !active;
+    marker.dataset.state = active ? String(summary.state || 'unknown') : 'idle';
+    marker.dataset.motion = summary.motion ? '1' : '0';
+    marker.dataset.waiting = summary.waiting ? '1' : '0';
+    marker.title = active ? label : '';
+    marker.setAttribute('aria-hidden', 'true');
+}
+
+function setActivityOwnerName(owner, baseName, summary) {
+    if (!owner) return;
+    const label = summary.label;
+    const name = label ? `${baseName} · ${label}` : baseName;
+    owner.setAttribute('aria-label', name);
+    owner.title = name;
+}
+
+function patchProjectActivityMarkers(activityIndex = projectActivityIndex) {
+    setActivityMarker(navProjectsActivity, activityIndex.aggregate);
+    const unread = navProjectsCount?.title;
+    setActivityOwnerName(navProjectsToggle, unread ? `Projects · ${unread}` : 'Projects', activityIndex.aggregate);
+    const buttons = new Map(
+        [...(navProjectsList?.querySelectorAll('[data-project-id]') || [])]
+            .map((button) => [String(button.dataset.projectId || ''), button]),
+    );
+    for (const row of lastProjectRows) {
+        const button = buttons.get(String(row.id));
+        const summary = activityIndex.byProject.get(String(row.id)) || summarizeProjectActivities();
+        setActivityMarker(button?.querySelector('.nav-activity-marker'), summary);
+        const name = row.name || row.id;
+        const baseName = String(row.lifecycle || 'active') === 'deleting'
+            ? `${name} — Deleting…${row.delete_error ? ` ${row.delete_error}` : ''}`
+            : row._unread ? `${name} · Unread` : name;
+        setActivityOwnerName(button, baseName, summary);
     }
 }
 
@@ -543,6 +616,10 @@ function paintProjectsNav() {
         label.className = 'nav-row-label';
         label.textContent = project.name || project.id;
         btn.appendChild(label);
+        const activityMarker = document.createElement('span');
+        activityMarker.className = 'nav-activity-marker chat-live-typing';
+        for (let i = 0; i < 3; i += 1) activityMarker.appendChild(document.createElement('span'));
+        btn.appendChild(activityMarker);
         if (project._unread && !deleting) {
             const dot = document.createElement('span');
             dot.className = 'nav-unread-dot';
@@ -590,6 +667,7 @@ function paintProjectsNav() {
         item.append(btn, trailing);
         navProjectsList.appendChild(item);
     }
+    patchProjectActivityMarkers(projectActivityIndex);
 }
 
 document.getElementById('nav-projects-add')?.addEventListener('click', async (event) => {
@@ -610,10 +688,15 @@ async function refreshProjectsNav() {
     const request = stateSnapshots.begin();
     try {
         const resp = await apiFetch('/api/state', { cache: 'no-store' });
-        if (!resp.ok) return;
+        if (!resp.ok) {
+            stateSnapshots.fail(request);
+            return;
+        }
         const data = await resp.json();
         stateSnapshots.apply(request, data);
-    } catch {}
+    } catch {
+        stateSnapshots.fail(request);
+    }
 }
 
 // A task bound to a project (e.g. a project-chat follow-up) is ALREADY a project
@@ -650,19 +733,11 @@ function renderBoundProjectPointer(card, projectId, chatId = 0) {
     const project = (Array.isArray(lastProjectRows) && lastProjectRows.find((p) => p.id === projectId))
         || { id: projectId, name: projectId, chat_id: chatId };
     let ptr = card.querySelector('.chat-live-bound-pointer');
-    if (!ptr) {
-        ptr = renderProjectChip({
-            name: project.name || project.id,
-            status: 'in project ↗',
-            className: 'chat-live-bound-pointer',
-            // Open-or-noop: openProjectPanel toggles, and a pointer must never close
-            // the panel it points at.
-            onClick: () => { if (navState.activeProjectId !== project.id) openProjectPanel(project); },
-        });
-        card.appendChild(ptr);
-    }
+    // The reference opens through `ouro:open-project`, whose listener below is
+    // open-or-noop and resolves the freshest project row at click time.
+    if (!ptr) card.appendChild(ptr = projectReference(project, { layout: 'footer' }));
     card.dataset.projectBound = '1';
-    ptr.querySelector('.chat-live-project-name').textContent = project.name || project.id;
+    nameProjectReference(ptr, project);
 }
 
 window.addEventListener('ouro:project-created', async (event) => {
@@ -750,7 +825,15 @@ apiFetch('/api/ui/preferences', { cache: 'no-store' })
     })
     .catch(() => setupResizablePanels({}));
 
-ws.on('open', refreshProjectsNav);
+ws.on('open', () => {
+    activitySocketDisconnected = false;
+    stateSnapshots.fail(stateSnapshots.begin());
+    refreshProjectsNav();
+});
+ws.on('close', () => {
+    activitySocketDisconnected = true;
+    stateSnapshots.fail(stateSnapshots.begin());
+});
 // A backend-created project (e.g. the agent's promote_chat_to_task tool) pushes
 // this so the live WS fan-out learns the new project chat_id immediately, instead
 // of waiting for the periodic poll and misrouting early frames into the main chat.

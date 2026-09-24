@@ -52,7 +52,9 @@ def test_api_all_fields_form_queues_without_changing_write_surface(registry, acc
     result = registry.execute_result("schedule_subagent", args)
 
     assert (result.status, result.code) == ("ok", "OK"), result.text
-    assert f"access={access!r} ignored for subagent_id='api-scout' (api_model)" in result.text
+    # The engine is named by its handle; the stored key never reaches the model.
+    assert f"access={access!r} ignored for subagent_id='openai/test-model' (api_model)" in result.text
+    assert "api-scout" not in result.text
     assert "write_surface controls read/write authority" in result.text
     events = [row for row in registry._ctx.pending_events if row["type"] == "schedule_subagent"]
     assert len(events) == 1
@@ -81,7 +83,8 @@ def test_invalid_access_names_field_value_and_selected_route(access):
         select_subagent_snapshot(_settings(), subagent_id="api-scout", access=access)
     assert raised.value.code == "subagent_access_invalid"
     assert f"access={access!r}" in raised.value.detail
-    assert "subagent_id='api-scout' (api_model)" in raised.value.detail
+    assert "subagent_id='openai/test-model' (api_model)" in raised.value.detail
+    assert "api-scout" not in raised.value.detail
     assert "inherit, readonly or workspace_write" in raised.value.detail
 
 

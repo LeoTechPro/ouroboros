@@ -279,10 +279,12 @@ def test_typed_retry_root_defers_self_review_and_is_host_eligible(
         return result
 
     monkeypatch.setattr(loop_mod, "_task_acceptance_eligible", capture_eligible)
+    # Stop the gate right after eligibility, before any reviewer slot is resolved: an
+    # unanswered fence no longer buys a wait round, a live subtree still does.
+    monkeypatch.setattr(loop_mod, "_begin_task_acceptance_fence", lambda *_a, **_k: (False, None))
     monkeypatch.setattr(
-        loop_mod,
-        "_begin_task_acceptance_fence",
-        lambda *_args, **_kwargs: (False, None),
+        loop_mod, "_task_acceptance_subtree_snapshot",
+        lambda *_a, **_k: (False, [{"task_id": "child", "status": "running"}]),
     )
     assert loop_mod._run_task_acceptance_review_once(
         tools=registry,

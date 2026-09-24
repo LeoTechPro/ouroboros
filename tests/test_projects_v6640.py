@@ -495,9 +495,12 @@ def test_project_activity_stays_out_of_main_static_contract():
     assert "appendTaskSummaryToLiveCard(msg" in history
     assert "PROJECT_ROW_TYPES.has(msg.system_type)" in history
     assert "incrementUnreadIfNeeded" not in history
-    # The lifecycle row's action lives in its own module since the completion mirror.
+    # The lifecycle row points at its Project through the door, which alone decides the
+    # fallback word: a missing or never-given name reads `Project`, never the raw id.
     project_answer = (root / "web" / "modules" / "project_answer.js").read_text(encoding="utf-8")
-    assert "name: projectName || 'Project'" in project_answer
+    door = (root / "web" / "modules" / "project_reference.js").read_text(encoding="utf-8")
+    assert "projectReference({ id: projectId, name: projectName })" in project_answer
+    assert "MINTED_ID.test(name)) ? name : 'Project'" in door
     assert "name: projectName || projectId" not in chat + project_answer
 
 
@@ -516,15 +519,14 @@ def test_project_lifecycle_rows_render_design_system_action_static_contract():
 
     # One shared set drives render, history replay, and live fan-out.
     assert (
-        "const PROJECT_ROW_TYPES = new Set(['project_started', 'project_completion_summary']);"
+        "const PROJECT_ROW_TYPES = new Set(['project_started', 'project_handoff', 'project_completion_summary']);"
         in chat
     )
-    # chat.js only delegates; the shared action composition is used by the
-    # lifecycle-row module (the System action and the mirror's Project chip alike).
+    # chat.js only delegates; the lifecycle-row module puts the one Project reference
+    # (web/modules/project_reference.js) into the shared action composition.
     assert "if (PROJECT_ROW_TYPES.has(systemType)) decorateProjectRow(bubble, { role, projectId, projectName });" in chat
     render = (root / "web" / "modules" / "project_answer.js").read_text(encoding="utf-8")
-    assert "createSystemMessageAction({" in render
-    assert "createSystemMessageActions(" in render
+    assert "createSystemMessageActions(projectReference(" in render
     assert "row.className = 'system-message-actions'" in helpers
     # The Main mirror of a Project question carries no system action: its Project chip is the way there.
     assert "createSystemMessageActions(" in (root / "web/modules/chat_activity.js").read_text(encoding="utf-8")
@@ -542,21 +544,26 @@ def test_project_lifecycle_rows_render_design_system_action_static_contract():
     assert "btn.className = 'btn btn-xs btn-default';" in chrome
     assert "btn.dataset.turnIntoProject = '1';" in chrome
     assert "btn.textContent = 'Turn into project';" in chrome
-    # The identity chip keeps its own role, now built once in ui_helpers and
-    # shared by the converted card (chat.js) and the bound-task footer (app.js).
-    assert "chat-live-project-card-btn" in helpers
-    assert "renderProjectChip(" in chat
-    assert "renderProjectChip(" in app
+    # One owner intent, one control: the converted card (chat.js), the bound-task
+    # footer (app.js) and every row that points at a Project get it from the door,
+    # which alone knows its classes and words.
+    door = (root / "web" / "modules" / "project_reference.js").read_text(encoding="utf-8")
+    assert "chat-live-project-card-btn" in door and "chat-live-project-card-btn" not in helpers
+    handoff = (root / "web" / "modules" / "project_handoff.js").read_text(encoding="utf-8")
+    # Main alone owns a handoff controller; the converted card mounts through it.
+    assert "handoffs?.mount(record.root" in chat and "isMain ? createProjectHandoffs(" in chat
+    assert "projectReference({ id: projectId, name: projectName }, { layout: 'inline', taskId })" in handoff
+    assert "state: 'background'" not in handoff
+    assert "projectReference(project, { layout: 'footer' })" in app
     # The project pointer is a Main-root affordance: applyTaskBindings walks
     # only Main root cards, never the Project panel's copy or nested subagents
     # (D15; the browser flow is pinned by the marker-gated continuity smoke).
     assert "'#page-chat .chat-live-card[data-task-id]:not(.subagent)'" in app
 
-    # Layout-only container CSS; the helper owns the one semantic button role.
+    # Layout-only container CSS; the page-local `Open Project` button and its rule are gone.
     assert ".system-message-actions {" in style
-    assert ".system-message-action {" in style
-    assert "export function createSystemMessageAction(" in helpers
-    assert "'btn btn-default btn-sm system-message-action'" in helpers
+    assert ".system-message-action {" not in style
+    assert "export function createSystemMessageAction(" not in helpers
 
 
 def test_chat_ws_subscriptions_flow_through_disposer_helper():

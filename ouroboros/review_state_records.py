@@ -248,7 +248,8 @@ class AdvisoryRunRecord:
     snapshot_summary: str = ""
     raw_result: str = ""
     # Typed cause for status="preflight_blocked" rows: "syntax" (a staged .py
-    # failed compile) or "release_metadata" (deterministic release preflight).
+    # failed compile), "release_metadata" (defect); status="error" also carries
+    # "release_metadata_unavailable" when the required source could not be read.
     # "" = unknown/legacy — guidance must then point at raw_result instead of
     # asserting a specific problem class (H4, capinv-447).
     reason_kind: str = ""

@@ -101,9 +101,9 @@ def test_drain_deadline_releases_pending_dispatch_rows_and_the_last_settlement_w
         assert _mailbox_entries(tmp_path, request.task_id) == []
         release["s1"].set()
         deadline = time.time() + 10
-        while not any("[s1]: finished;" in line for line in progress) and time.time() < deadline:
+        while not any("m/a answered" in line for line in progress) and time.time() < deadline:
             time.sleep(0.01)
-        assert sum("[s1]: finished;" in line and "state=settled" in line for line in progress) == 1
+        assert sum("m/a answered" in line and "reviewer" in line for line in progress) == 1
         assert _mailbox_entries(tmp_path, request.task_id) == []  # one slot still running
         release["s2"].set()
         while len(_mailbox_entries(tmp_path, request.task_id)) < 1 and time.time() < deadline:
@@ -174,7 +174,7 @@ def test_requests_without_a_drain_deadline_and_other_surfaces_are_untouched(tmp_
     [actor] = custody.run_custodied_review_slots(**kwargs)  # waits for the worker as before
     assert actor.status == "ok" and actor.operation_state == "settled"
     assert not custody._RELEASED_WAVES
-    assert len(progress) == 2 and "[s1]: started;" in progress[0] and "[s1]: finished;" in progress[1]
+    assert len(progress) == 2 and "reviewer m/a started" in progress[0] and "m/a answered" in progress[1]
     assert _mailbox_entries(tmp_path, request.task_id) == []
     # A non-plan surface released at a drain deadline gets pending rows but no frame.
     triad, triad_kwargs = _custody_kwargs(
@@ -190,7 +190,9 @@ def test_requests_without_a_drain_deadline_and_other_surfaces_are_untouched(tmp_
     deadline = time.time() + 5
     while custody._RELEASED_WAVES and time.time() < deadline:
         time.sleep(0.01)
-    assert _mailbox_entries(tmp_path, request.task_id) == [] and all(line.startswith("Review ") for line in progress)
+    assert _mailbox_entries(tmp_path, request.task_id) == []
+    # Every row is a reviewer row of its own surface; no plan frame reached the non-plan surface.
+    assert all(line.startswith(("Plan reviewer m/a ", "Commit reviewer m/a ")) for line in progress)
 
 
 class _HeldExecutor:
@@ -276,7 +278,7 @@ def test_fresh_dispatch_returns_at_the_barrier_and_the_resubmitted_envelope_coll
     assert state["cycles_paid"] == 1 and state["waves"][-1]["paid"] is True
     assert executor.execute_calls == 3
     # The final mailbox frame can precede another slot's progress callback.
-    assert _wait_until(lambda: any("[s1]: finished;" in line and "state=settled" in line for line in harness.progress))
+    assert _wait_until(lambda: any("m/a answered" in line and "reviewer" in line for line in harness.progress))
 
 
 def test_barrier_wave_replaces_a_stale_paid_predecessor_and_pays_only_at_collection(tmp_path):
@@ -319,7 +321,7 @@ def test_in_flight_panels_count_toward_the_cycle_cap_at_dispatch(harness, monkey
         state = _state(harness)
         assert state["cycles_paid"] == 0  # committed, not yet proven paid: nothing is written as spent
         assert state["current_attempt"]["fingerprint"] == first_fp  # the in-flight wave stays current
-        assert not any(line.startswith("📐 plan_task: PLAN_REVIEW_CYCLES_EXHAUSTED") for line in harness.progress)
+        assert not any(line.startswith("📐 Plan review: no review rounds left") for line in harness.progress)
     finally:
         executor.release.set()
     assert _wait_until(lambda: len(_mailbox_entries(harness.drive, "task-1")) == 1)
@@ -379,7 +381,7 @@ def test_a_slot_settling_during_the_barrier_release_never_splits_the_wave_into_t
             # s1 settles right after its own row is minted, before s2's row exists.
             assert entered["s1"].wait(10)
             release["s1"].set()
-            assert _wait_until(lambda: any("[s1]: finished;" in line for line in progress))
+            assert _wait_until(lambda: any("m/a wasn't sent" in line for line in progress))
         return actor
 
     monkeypatch.setattr(custody, "_late_or_timeout_actor", interleaved)
@@ -469,7 +471,8 @@ def test_the_open_wave_text_names_the_route_that_waits_for_the_settlement_frame(
     wave = _state(harness)["waves"][-1]
     fp = wave["request_fingerprint"]
     for text in (first, _next_step(wave, enforcement="blocking", cap=2, cycles_paid=0)):
-        assert "one or more paid reviewer operations are still in flight" in text
+        # "paid" is not claimed: a slot released at the barrier is $0 until its row proves the send.
+        assert "one or more reviewer operations are still in flight" in text and "paid reviewer" not in text
         assert ("The host writes ONE message into this task's mailbox when every released slot "
                 "settles: wait_task on this task's own id (wait_tasks while children run) "
                 "returns on it") in text

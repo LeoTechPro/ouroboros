@@ -201,7 +201,7 @@ def test_quota_wait_rejoins_call_without_replaying_tools_and_keeps_ledger(elapse
     assert rows[-1]["revision"] > rows[0]["revision"]
     assert all(row["worker_slot_held"] is True and row["is_progress"] is False for row in rows)
     assert load_task_result(root, "task-one")["model_waits"][rows[0]["wait_id"]]["state"] == "resolved"
-    assert controller.paused_seconds() == 2.5
+    assert controller.paused_seconds() == pytest.approx(2.5)
 
 
 def test_auto_wait_requests_its_model_and_resumes_when_compatible_second_account_recovers(live_wait, monkeypatch):

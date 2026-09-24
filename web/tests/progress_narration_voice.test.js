@@ -99,7 +99,7 @@ test('a host-notes-only turn keeps its coined name and an empty activity line', 
     try {
         f.census(direct());
         f.emit({ content: NOTE, narration: false, suggested_name: NAME });
-        f.emit({ content: '📐 plan_task: wave 1 dispatched', narration: false });
+        f.emit({ content: '📐 Plan review: wave 1 dispatched', narration: false });
         assert.equal(f.rows().length, 2);
         assert.equal(f.title(), NAME);
         assert.equal(f.activity(), '', 'no host note ever reaches the collapsed line');
@@ -137,7 +137,7 @@ test('replay reads the voice exactly as live did', async () => {
     const opening = { role: 'user', text: 'fix the flake', ts: TS, chat_id: 1 };
     const f = fixture([opening,
         row({ text: NOTE, content: NOTE, narration: false, suggested_name: NAME }),
-        row({ text: '📐 plan_task: wave 1 dispatched', content: '📐 plan_task: wave 1 dispatched',
+        row({ text: '📐 Plan review: wave 1 dispatched', content: '📐 Plan review: wave 1 dispatched',
             narration: false, ts: '2026-09-16T12:00:02Z' })]);
     try {
         await f.instance.refreshHistory({ revision: 1 });
@@ -182,4 +182,25 @@ test('finalizing outcome overlay keeps narration as title while publishing phase
             outcome_final: true, outcome_phase: 'done', outcome_axes: { execution: { status: 'ok' } } });
         assert.equal(f.title(), 'still working');
     } finally { f.close(); }
+});
+
+test('the collapsed line states the terminal cause, and a clean ending keeps the last narration', () => {
+    const f = fixture();
+    try {
+        f.census(direct());
+        f.emit({ content: '💬 reading the failing test first', narration: true, suggested_name: 'Flake hunt' });
+        assert.equal(f.activity(), 'reading the failing test first');
+        f.emit({ is_progress: false, role: 'system', system_type: 'task_summary', content: 'Done with warnings.',
+            outcome_final: true, outcome_phase: 'warn', reason_code: 'plan_review_advisory',
+            outcome_axes: { execution: { status: 'degraded', reason_code: 'plan_review_advisory', plan_review: 'unanswered' } } });
+        assert.equal(f.activity(), 'Only some of the plan reviewers answered; the work went on with their notes.');
+    } finally { f.close(); }
+    const g = fixture();
+    try {
+        g.census(direct());
+        g.emit({ content: '💬 reading the failing test first', narration: true, suggested_name: 'Flake hunt' });
+        g.emit({ is_progress: false, role: 'system', system_type: 'task_summary', content: 'Done.',
+            outcome_final: true, outcome_phase: 'done', outcome_axes: { execution: { status: 'ok' } } });
+        assert.equal(g.activity(), 'reading the failing test first');
+    } finally { g.close(); }
 });

@@ -1,7 +1,8 @@
 """What a consciousness wake-up may do, and how that authority follows its work.
 
-Three autonomy levels (owner decision В10', PLAN 5.4): ``observe`` reads and
-talks, ``act`` (the default) starts and steers work but may not evolve,
+Three autonomy levels (owner decision В10', PLAN 5.4): ``observe`` researches,
+keeps internal notes and may manage existing schedules while remaining
+resource-narrowed, ``act`` (the default) starts and steers work but may not evolve,
 restart, change settings or touch its own alarm, ``full`` is an owner turn in
 everything the install's runtime mode allows. A wake carries the level it
 started under as ``metadata.consciousness_autonomy`` beside its origin label
@@ -10,7 +11,7 @@ wake starts (a promoted root, a follow-up, a subagent, an evolution cycle)
 through ``consciousness_origin_metadata``, so a second generation never
 falls out of the level or the allowance.
 
-One helper derives the level's two consequences at task build
+One helper derives the level's two structural consequences at task build
 (``apply_consciousness_authority``): the contract's ``disabled_tools`` (an
 exception list, never an allowlist — a new READ tool is available to Observe
 by default) and ``runtime_mode_cap`` (Act/Observe run under ``light`` even on
@@ -42,13 +43,33 @@ ACT_DISABLED: tuple[str, ...] = (
     "toggle_evolution", "request_restart", "set_tool_timeout",
     "toggle_consciousness", "configure_presence",
 )
+# Names Observe keeps even though they appear in the mutation table above,
+# because each has a real read-only or own-work path that withholding the NAME
+# would destroy along with the mutation. What the name may then be asked to DO
+# is narrowed by ``observe_argument_refusal`` at dispatch, on the arguments.
+OBSERVE_ARGUMENT_NARROWED: frozenset[str] = frozenset({
+    # Research children and delegated research sessions: read-only shapes only.
+    "schedule_subagent", "delegate_start",
+    # Its own task artifacts and project workpad/journal — not owner files,
+    # not source, not the runtime's own controls.
+    "write_file", "edit_text", "journal_write", "workpad_write",
+    # Its own children: starting one is narrowed above, and a mind that may start
+    # a child must be able to stop the one it started (the nanny's other half).
+    "cancel_task",
+})
 # Observe withholds every verb that starts work or changes the world beyond
 # this mind's own memory (the table beside ``ROUTING_VERBS``) plus publication.
 OBSERVE_DISABLED: tuple[str, ...] = ACT_DISABLED + tuple(sorted(
-    (OBSERVE_WORLD_MUTATION_TOOLS | FOREGROUND_MUTATIVE_TOOLS) - set(ACT_DISABLED)
+    (OBSERVE_WORLD_MUTATION_TOOLS | FOREGROUND_MUTATIVE_TOOLS)
+    - set(ACT_DISABLED)
+    - OBSERVE_ARGUMENT_NARROWED
 ))
 # The nanny verb of a running campaign is never withheld (owner decision В12 A).
 NEVER_DISABLED: frozenset[str] = frozenset({"steer_task"})
+# The only file roots Observe may write: its own task drive and artifact store.
+# Both are already confined by the file tools; this is what it is ALLOWED to
+# choose, not a new path authority.
+OBSERVE_WRITE_ROOTS: frozenset[str] = frozenset({"task_drive", "artifact_store"})
 
 
 def normalize_level(value: Any) -> str:
@@ -94,7 +115,7 @@ def consciousness_origin_metadata(parent_metadata: Any) -> Dict[str, Any]:
 
 
 def apply_consciousness_authority(task: Dict[str, Any]) -> Dict[str, Any]:
-    """Derive the level's two consequences onto a consciousness-origin task's metadata.
+    """Derive the level's two structural consequences onto a consciousness-origin task's metadata.
 
     Called BEFORE the contract is attached (``attach_task_contract`` reads
     ``metadata.disabled_tools`` into the contract when the contract has none).
@@ -151,3 +172,56 @@ def effective_runtime_mode(install_mode: str, task_metadata: Any) -> str:
     if cap in VALID_RUNTIME_MODES and runtime_mode_at_least(str(install_mode), cap):
         return cap
     return str(install_mode)
+
+
+def is_observe_origin(task_metadata: Any) -> bool:
+    """Whether this task runs under a consciousness wake at the Observe level.
+
+    The one predicate every dispatch-time narrowing asks, so "what Observe is"
+    is decided here rather than re-derived, slightly differently, per call site.
+    """
+    metadata = task_metadata if isinstance(task_metadata, Mapping) else {}
+    return (is_consciousness_origin(metadata)
+            and normalize_level(metadata.get("consciousness_autonomy")) == LEVEL_OBSERVE)
+
+
+def observe_argument_refusal(task_metadata: Any, name: str, args: Mapping[str, Any]) -> str:
+    """The refusal text for an Observe call whose ARGUMENTS ask for mutation; '' to allow.
+
+    Observe keeps the names in ``OBSERVE_ARGUMENT_NARROWED`` visible because each
+    has a genuine read-only or own-work use. This is the seam that stops the
+    same name from carrying back the authority the level removed: a write root
+    outside its own drive, a mutating child, a writing delegated session. The
+    positive path is deliberately left open — a refusal here is about the
+    arguments, never about the tool.
+    """
+    if not is_observe_origin(task_metadata):
+        return ""
+    tool = str(name or "").strip()
+    values = args if isinstance(args, Mapping) else {}
+    if tool in {"write_file", "edit_text"}:
+        # The file tools already confine a resolved path inside the chosen base;
+        # this decides which base Observe may choose at all.
+        root = str(values.get("root") or "active_workspace").strip()
+        if root not in OBSERVE_WRITE_ROOTS:
+            return (
+                "⚠️ RESOURCE_CONSTRAINT_BLOCKED: Observe may write its own task_drive or "
+                "artifact_store only; use the cognitive-memory or project-note tools for "
+                "everything else it wants to keep."
+            )
+    elif tool == "schedule_subagent":
+        surface = str(values.get("write_surface") or "").strip().lower()
+        if surface not in ("", "read_only") or bool(values.get("may_mutate")):
+            return (
+                "⚠️ RESOURCE_CONSTRAINT_BLOCKED: Observe may schedule read-only research "
+                "children only; omit write_surface and may_mutate."
+            )
+    elif tool == "delegate_start":
+        # An omitted access is the READ-ONLY shape here (``_derive_authority``
+        # pins it), so only an explicit write request is refused.
+        if str(values.get("root") or "").strip() or str(values.get("access") or "").strip().lower() == "workspace_write":
+            return (
+                "⚠️ RESOURCE_CONSTRAINT_BLOCKED: Observe may start a delegated read-only "
+                "research session only; omit root and leave access readonly."
+            )
+    return ""

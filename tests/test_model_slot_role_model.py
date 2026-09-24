@@ -979,7 +979,8 @@ def test_a_reduction_reaches_the_record_the_child_and_the_parents_readback(tmp_p
         sched_ctx, subagent_id=subagent_id, objective="o", expected_output="e",
     )
     assert "CAPABILITY_DELTA" not in scheduled
-    assert "subagent_id=session-actor" in scheduled
+    # The result names the engine by its handle; the stored key stays in durable records.
+    assert "subagent_id=claude=route-a" in scheduled and "session-actor" not in scheduled
     assert "route=agent_session" in scheduled
 
 

@@ -654,7 +654,9 @@ async def _api_presence_delivery(request: Request) -> JSONResponse:
         return _json_error(str(exc), 403)
     if not ctx.rate_limiter.allow(f"{skill_name}:presence_delivery"):
         return _json_error("rate limit exceeded", 429)
-    if not ctx._enter_inflight(skill_name):
+    # Receipts, turns and inject have separate in-flight budgets: five long turns must
+    # not starve the receipts those turns' own sends produce.
+    if not ctx._enter_inflight(f"{skill_name}:delivery"):
         return _json_error("too many in-flight presence requests", 429)
     try:
         payload = await request.json()
@@ -668,7 +670,7 @@ async def _api_presence_delivery(request: Request) -> JSONResponse:
         log.warning("Presence delivery history write failed for skill %s", skill_name, exc_info=True)
         return _json_error("presence delivery history write failed; retry the same receipt", 503)
     finally:
-        ctx._leave_inflight(skill_name)
+        ctx._leave_inflight(f"{skill_name}:delivery")
 
 
 async def _api_presence_turn(request: Request) -> JSONResponse:
@@ -684,11 +686,12 @@ async def _api_presence_turn(request: Request) -> JSONResponse:
         return _json_error(str(exc), 403)
     if not ctx.rate_limiter.allow(f"{skill_name}:presence"):
         return _json_error("rate limit exceeded", 429)
-    if not ctx._enter_inflight(skill_name):
-        return _json_error("too many in-flight presence requests", 429)
     from ouroboros.presence_admission import PresenceAdmissionError, admit_presence_turn
+    from ouroboros.presence_bindings import conversation_key
     from ouroboros.presence_runner import PresenceTurnError, PresenceTurnEvent
 
+    if not ctx._enter_inflight(f"{skill_name}:presence"):
+        return _json_error("too many in-flight presence requests", 429)
     try:
         payload = await request.json()
         if not isinstance(payload, dict) or set(payload) - {
@@ -734,12 +737,7 @@ async def _api_presence_turn(request: Request) -> JSONResponse:
             # The transport authenticates provider facts, but it does not get
             # to choose the concurrency/history identity. Derive that identity
             # from the binding-checked origin facts above.
-            conversation_key=":".join((
-                provider,
-                account_id,
-                conversation_id,
-                thread_id or "0",
-            )),
+            conversation_key=conversation_key(provider, account_id, conversation_id, thread_id),
             actor=dict(event_payload["actor"]) if isinstance(event_payload["actor"], dict) else {},
             conversation=(
                 dict(event_payload["conversation"])
@@ -783,7 +781,7 @@ async def _api_presence_turn(request: Request) -> JSONResponse:
         log.debug("Host service presence turn failed", exc_info=True)
         return _json_error(str(exc), 500)
     finally:
-        ctx._leave_inflight(skill_name)
+        ctx._leave_inflight(f"{skill_name}:presence")
 
 
 async def _api_presence_work(request: Request) -> JSONResponse:
@@ -813,20 +811,16 @@ async def _api_presence_work(request: Request) -> JSONResponse:
         if status not in {"completed", "failed", "cancelled"}:
             return JSONResponse({"ok": True, "status": "pending", "work_ref": work_ref,
                                  "delivery_reporting_version": presence.get("delivery_reporting_version", 0)}, status_code=202)
-        outcome = str(metadata.get("presence_outcome") or "message")
-        if outcome not in {"message", "silent", "tool_delivered", "deferred"}:
-            outcome = "message"
+        from ouroboros.presence_runner import presence_result_from_stored
+
+        result = presence_result_from_stored(stored, work_ref)
         return JSONResponse({
             "ok": True,
             "status": status,
-            "outcome": outcome,
-            "text": (
-                str(metadata.get("presence_result_text") or stored.get("result") or "")
-                if outcome in {"message", "deferred"}
-                else ""
-            ),
+            "outcome": result.outcome,
+            "text": result.text,
             "work_ref": work_ref,
-            "delivery_reporting_version": presence.get("delivery_reporting_version", 0),
+            "delivery_reporting_version": result.delivery_reporting_version,
         })
     except Exception as exc:
         code = str(getattr(exc, "code", ""))

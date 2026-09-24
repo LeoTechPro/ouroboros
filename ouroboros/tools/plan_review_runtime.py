@@ -543,6 +543,7 @@ def _plan_row_from_actor(actor: Dict[str, Any], slot: Any) -> dict:
         "operation_id": str(actor.get("operation_id") or ""),
         "operation_state": str(actor.get("operation_state") or "settled"),
         "late_result_pending": bool(actor.get("late_result_pending")),
+        "awaiting_since": str(actor.get("awaiting_since") or ""),
         "pending_invocation_id": str(
             usage.get("pending_invocation_id") or actor.get("pending_invocation_id") or ""
         ),
@@ -580,6 +581,8 @@ def plan_row_typed_facts(row: Dict[str, Any]) -> Dict[str, Any]:
             "operation_id": str(row.get("operation_id") or ""),
             "operation_state": str(row.get("operation_state") or "settled"),
             "late_result_pending": bool(row.get("late_result_pending")),
+            # Since when the host has been waiting; '' whenever it never sent.
+            "awaiting_since": str(row.get("awaiting_since") or ""),
             "pending_invocation_id": pending_invocation_id,
             "delegated_run_id": delegated_run_id,
         })
@@ -726,15 +729,21 @@ _PROGRESS_REASON_CHARS = 160
 _PROGRESS_REASONS_SHOWN = 4
 
 
-def plan_slot_reasons(wave: Optional[Dict[str, Any]]) -> str:
+def plan_slot_reasons(wave: Optional[Dict[str, Any]], *, failed_only: bool = False) -> str:
     """The failed slots' typed reasons, deduplicated in order, the first four
     shown and the rest counted (``failure_code`` when the row carries one, else
-    its error text, each bounded by ``truncate_review_artifact``)."""
+    its error text, each bounded by ``truncate_review_artifact``). A slot with no
+    answer yet (awaiting, unresolved, uncollected) has no reason to name: it is
+    read through ``plan_wave_slot_census``, never listed here. ``failed_only``
+    also leaves out the typed $0 ``not_dispatched`` rows."""
     from ouroboros.utils import truncate_review_artifact
 
+    census = plan_wave_slot_census(wave)
+    unanswered = {id(row) for name in ("awaiting", "unresolved", "uncollected", *(("skipped",) if failed_only else ()))
+                  for row in census[name]}
     reasons: List[str] = []
     for actor in (wave or {}).get("actors") or []:
-        if not isinstance(actor, dict) or actor.get("ok"):
+        if not isinstance(actor, dict) or actor.get("ok") or id(actor) in unanswered:
             continue
         reason = str(actor.get("failure_code") or actor.get("error") or "unknown")
         reason = truncate_review_artifact(reason, limit=_PROGRESS_REASON_CHARS).replace("\n", " ")
@@ -746,41 +755,94 @@ def plan_slot_reasons(wave: Optional[Dict[str, Any]]) -> str:
     return shown
 
 
+def _findings_phrase(counts: Dict[str, Any]) -> str:
+    """``2 blocking findings, 1 ask for evidence, 3 notes``; findings with none blocking
+    end ``nothing blocking``; none at all read ``no findings``."""
+    blocking, asks, notes = (int(counts.get(key) or 0) for key in ("blocking", "need_evidence", "note"))
+    parts = [part for part, n in ((f"{blocking} blocking finding{'s'[:blocking != 1]}", blocking),
+                                  (f"{asks} ask{'s'[:asks != 1]} for evidence", asks),
+                                  (f"{notes} note{'s'[:notes != 1]}", notes)) if n]
+    return ", ".join(parts) + ("" if blocking else ", nothing blocking") if parts else "no findings"
+
+
 def plan_wave_progress_line(
     aggregate: str, counts: Dict[str, Any], *, cycles_paid: int, cap: Any,
     wave: Optional[Dict[str, Any]] = None,
 ) -> str:
-    """The wave's final owner-visible progress line (pure; ``plan_review.py``
-    sits at its size pin, so the formatting lives here). Honest DEGRADED:
-    zero-count tails must never read as a clean result, so the
-    parseable/configured ratio and the distrust are named inline, with the
-    failed slots' typed reasons (deduplicated, bounded) and the late-result
-    clause when reviewers are still working; every other aggregate renders
-    byte-identically to the plain form."""
-    verdict = (
-        f"DEGRADED ({counts['parseable']}/{counts['configured']} "
-        "parseable reviewers; counts are untrusted)"
-        if aggregate == "DEGRADED" else aggregate
-    )
-    line = (
-        f"📐 plan_task: {verdict} — {counts['blocking']} blocking / "
-        f"{counts['note']} note / {counts['need_evidence']} need_evidence; "
-        f"cycles paid {cycles_paid}{'' if cap is None else f'/{cap}'}"
-    )
-    reasons = plan_slot_reasons(wave) if aggregate == "DEGRADED" else ""
-    if reasons:
-        line += f"; slot reasons: {reasons}"
-    if (wave or {}).get("custody_pending"):
-        line += "; late result pending (reviewer slots still in flight, not yet collected)"
-    if (wave or {}).get("reviewer_effort"):
-        line += f"; declared reviewer effort {wave['reviewer_effort']}"
-    return line
+    """The wave's owner-visible state line (pure; ``plan_review.py`` sits at its size
+    pin, so the formatting lives here). Every owner progress line of this organ opens
+    with ``📐 Plan review``, so one task card reads as one family. The slot census is
+    read FIRST: while any slot has no collected answer the line is one plain sentence
+    about that gap and never a verdict or a finding count. A fully collected wave
+    reads ``<who answered> — <findings>``: how many of the configured reviewers
+    answered (and how many were not sent), then the finding counts in plain words.
+    The verdict token, the paid-cycle count, the per-slot reasons and the declared
+    effort stay in the Reviews group and the task detail; per-reviewer causes live on
+    the reviewer rows. ``aggregate``/``cycles_paid``/``cap`` stay for the callers."""
+    line = _plan_open_slots_line(wave)
+    if line:
+        return line
+    census = plan_wave_slot_census(wave)
+    total = census["configured"] or int(counts.get("configured") or 0)
+    answered = len(census["answered"]) if census["configured"] else int(counts.get("parseable") or 0)
+    not_sent = f", {len(census['skipped'])} not sent" if census["skipped"] else ""
+    pending = bool((wave or {}).get("custody_pending"))  # an untyped roster only: typed rows take the open line
+    if total == 1 and not pending:
+        who = "the reviewer answered" if answered else "the reviewer didn't answer"
+    elif answered and answered == total:
+        who = f"all {total} reviewers answered"
+    else:
+        who = f"{answered if answered else 'none of the'} {'of ' if answered else ''}{total} reviewers answered{not_sent}"
+    tail = f" — {_findings_phrase(counts)}" if answered else ""
+    tail += "; a reviewer's answer is still on its way" if pending else ""
+    return f"📐 Plan review: {who}{tail}."
+
+
+def _plan_open_slots_line(wave: Optional[Dict[str, Any]]) -> str:
+    """The owner sentence for a wave with uncollected answers, or ``''`` when every
+    slot is collected (the ONLY place these words live). A roster of planned waits
+    alone reads as sent and not answered yet; a partly answered one reads ``so far``;
+    an unresolved custody state is counted as ``unresolved`` (its raw typed state
+    stays on the Reviews row) and is never worded as a wait (no ``so far``, no
+    ``yet``); a typed $0 refusal is ``not sent``, never ``didn't answer``."""
+    census = plan_wave_slot_census(wave)
+    awaiting, unresolved, late = census["awaiting"], census["unresolved"], census["uncollected"]
+    if not (awaiting or unresolved or late):
+        return ""
+    total, answered = census["configured"], len(census["answered"])
+    noun = "reviewer" if total == 1 else "reviewers"
+    if len(awaiting) == total:
+        return f"📐 Plan review: sent to {total} {noun}, none has answered yet."
+    # A settled slot may have settled as a failure: until collected it is finished, never answered.
+    tail = f", {len(late)} finished but not collected yet" if late else ""
+    tail += f", {len(census['failed'])} didn't answer" if census["failed"] else ""
+    tail += f", {len(census['skipped'])} not sent" if census["skipped"] else ""
+    if unresolved:
+        awaited = f", {len(awaiting)} awaited" if awaiting else ""
+        return (f"📐 Plan review: {answered} of {total} {noun} answered{awaited}{tail}; "
+                f"{len(unresolved)} unresolved — no verdict.")
+    return f"📐 Plan review so far: {answered} of {total} {noun} answered{tail}."
+
+
+def plan_wave_line_has_news(wave: Optional[Dict[str, Any]]) -> bool:
+    """Whether the wave-state line tells a FRESH dispatch anything new (pure). The
+    dispatch line and the per-slot started rows already state a roster of planned
+    waits, so right after a dispatch that sentence is withheld; an answered, failed,
+    not dispatched, unresolved or uncollected row is news, and so is a roster the
+    census cannot read. Asked at a fresh dispatch only: every collection and every
+    fully collected wave prints its line."""
+    census = plan_wave_slot_census(wave)
+    return not census["awaiting"] or len(census["awaiting"]) != census["configured"]
 
 
 def plan_no_dispatch_line(wave: Dict[str, Any]) -> str:
     """The separate progress line for an attempt that dispatched no new reviewer
-    cycle (every row a typed $0 refusal), naming the typed reasons."""
-    return f"📐 plan_task: no new reviewer cycle dispatched: {plan_slot_reasons(wave) or 'no typed reason recorded'}"
+    round (every row a typed $0 refusal): how many were not sent and, when the wave
+    carries it, the earliest window reset. The typed reasons stay in Reviews and Logs."""
+    census = plan_wave_slot_census(wave)
+    reset = str(wave.get("earliest_reset") or "")
+    return (f"📐 Plan review: no reviewer could take the plan — {len(census['skipped']) or census['configured']} not sent"
+            + (f", earliest window reset {reset}" if reset else "") + ".")
 
 
 # Root exploration log (plan F3/S8): the task's OWN tool calls before this call,
@@ -827,12 +889,15 @@ def root_exploration_log(ctx: ToolContext) -> Optional[str]:
     return "\n".join([header, *tail])
 
 
-# Dedup memo for the advisory-open event: one event per recorded-open
-# (data root, task, fingerprint, health-epoch) STATE, not per call — empty-epoch
-# DEGRADED re-dispatches and unpaid $0 re-discoveries re-enter the emitter with
-# an unchanged state and must not spam the owner. Process-local by design: a
-# restart may re-announce an already-announced state once (disclosed residual —
-# this is an event rail, never authority).
+# Dedup memo for the advisory-open event: one event per ANNOUNCED OUTCOME of a
+# (data root, task, fingerprint, health-epoch) wave — its aggregate, whether answers
+# are still awaited, and the slots that FAILED with their code and reported cause —
+# not per call, so the settled failures are announced after the dispatch snapshot
+# while a slot that merely answered is no news. A re-dispatch that ends in the SAME outcome
+# is deliberately not re-announced (owner anti-spam, pinned by tests/
+# test_plan_review_epoch.py::test_three_identical_recalls_emit_one_advisory_open_event).
+# Process-local by design: a restart may re-announce an outcome once (disclosed
+# residual — this is an event rail, never authority).
 _ADVISORY_OPEN_SEEN: Dict[tuple, bool] = {}
 _ADVISORY_OPEN_SEEN_MAX = 512
 
@@ -841,23 +906,39 @@ def emit_plan_review_advisory_open(
     ctx: ToolContext, drive_root: Any, *, task_id: str, wave: Dict[str, Any],
     cycles_paid: int, cap: Any,
 ) -> None:
-    """ONE typed owner-visible event when a wave RECORDS open under advisory
-    enforcement (B2): loud at the moment it happens, not only when finalization
-    later appends ``owner_hurry.plan_review_disclosure``. Deduplicated per
-    (fingerprint, health-epoch) recorded-open state (see ``_ADVISORY_OPEN_SEEN``);
-    replays, dispositions and re-renders never reach this emitter at all.
+    """ONE typed owner-visible event per announced outcome of a wave that RECORDS
+    open under advisory enforcement (B2): loud at the moment it happens, not only
+    when finalization later appends ``owner_hurry.plan_review_disclosure``.
+    Deduplicated on the outcome the row announces (see ``_ADVISORY_OPEN_SEEN``):
+    cycle counters are not part of it, so a same-outcome re-dispatch stays quiet
+    while a wave that settles after its dispatch snapshot is announced again.
     Durability is UNCONDITIONAL: the ``events.jsonl`` append always lands — the
     live queue path persists only task_checkpoint rows — and a live queue
-    additionally gets the UI push. The dedup memo is inserted ONLY AFTER the
-    durable append succeeded (review fix 6): a failed append is logged loudly and
-    NOT memoized, so the next call for the same state retries the whole emission
-    instead of the memo silently swallowing an event that never landed. Never
-    raises."""
+    additionally gets the UI push. The memo is inserted ONLY AFTER the durable
+    append reported success: an append that raised OR returned False is logged
+    loudly and NOT memoized, so the next call for the same outcome retries the
+    whole emission instead of the memo swallowing an event that never landed.
+    Never raises."""
     from ouroboros.utils import append_jsonl, emit_log_event
 
+    # Bounded per-slot typed facts: who failed, with what code and reported cause, until
+    # when — and the custody state that tells a slot still unanswered from a slot that failed.
+    slots = [
+        {"slot_id": a.get("slot_id"), "ok": bool(a.get("ok")),
+         "failure_code": str(a.get("failure_code") or ""),
+         "operation_state": str(a.get("operation_state") or "settled"),
+         "reset_at": str(a.get("reset_at") or ""),
+         "reported_cause": str(a.get("reported_cause") or "")}
+        for a in (wave.get("actors") or []) if isinstance(a, dict)
+    ]
+    aggregate, custody_pending = str(wave.get("aggregate") or ""), bool(wave.get("custody_pending"))
+    # News = verdict, awaited-or-not, and who FAILED with what; a slot that merely answered is none.
+    failed = [s for s in slots if s["failure_code"] or s["reported_cause"]]
+    announced = json.dumps([aggregate, custody_pending, failed], sort_keys=True, default=str)
     key = (str(drive_root or ""), str(task_id or ""),
            str(wave.get("request_fingerprint") or ""),
-           json.dumps(wave.get("health_epoch") or [], sort_keys=True, default=str))
+           json.dumps(wave.get("health_epoch") or [], sort_keys=True, default=str),
+           sha256(announced.encode("utf-8")).hexdigest())
     if key in _ADVISORY_OPEN_SEEN:
         return
     from ouroboros.config import get_review_enforcement
@@ -868,25 +949,21 @@ def emit_plan_review_advisory_open(
         "surface": "plan_review",
         "task_id": str(task_id or ""),
         "fingerprint": str(wave.get("request_fingerprint") or ""),
-        "aggregate": str(wave.get("aggregate") or ""),
+        "aggregate": aggregate,
+        # Read BEFORE the aggregate: true = slots have not answered yet, no verdict exists.
+        "custody_pending": custody_pending,
         "cycle_index": wave.get("cycle_index"),
         "paid": bool(wave.get("paid")),
         "cycles_paid": int(cycles_paid),
         "cap": cap,
         "enforcement": get_review_enforcement(),
         "decision_authority": "cyber_pro" if not review_enforcement_blocks("blocking") else "advisory",
-        # Bounded per-slot typed facts: who failed, with what code, until when.
-        "slots": [
-            {"slot_id": a.get("slot_id"), "ok": bool(a.get("ok")),
-             "failure_code": str(a.get("failure_code") or ""),
-             "reset_at": str(a.get("reset_at") or "")}
-            for a in (wave.get("actors") or []) if isinstance(a, dict)
-        ],
+        "slots": slots,
     }
     stamped = {"ts": utc_now_iso(), **row}
     try:
-        if drive_root:
-            append_jsonl(pathlib.Path(str(drive_root)) / "logs" / "events.jsonl", stamped)
+        if drive_root and not append_jsonl(pathlib.Path(str(drive_root)) / "logs" / "events.jsonl", stamped):
+            raise OSError("append_jsonl reported a failed write")
     except Exception:
         log.warning("plan_review_advisory_open durable append failed for %s; "
                     "not memoized — the next call retries", task_id, exc_info=True)
@@ -1184,16 +1261,58 @@ def plan_wave_replay_decision(slots_fn: Any, existing: Dict[str, Any]) -> tuple:
     return plan_health_epoch(fresh) != normalized, fresh
 
 
-def plan_pending_actors(wave: Dict[str, Any]) -> list[dict]:
-    """Physical pending rows, retaining the original critic records unchanged."""
+def _plan_rows_reading_pending(wave: Dict[str, Any]) -> tuple[list[dict], list[dict]]:
+    """``(pending, uncollected)``: the rows whose typed facts still read pending, split
+    by whether a settled historical supplement of this cycle already supersedes the
+    operation — its terminal state exists and was simply not collected into the row."""
     settled = {
         row.get("operation_id") for row in wave.get("historical_supplements") or []
         if row.get("cycle_index") == wave.get("cycle_index")
         and row.get("operation_state") in {"settled", "late_settled", "not_dispatched"}
     }
-    return [row for row in wave.get("actors") or [] if isinstance(row, dict)
-            and (row.get("late_result_pending") or row.get("operation_state") in {"pending_dispatch", "in_flight"})
-            and row.get("operation_id") not in settled]
+    reading = [row for row in wave.get("actors") or [] if isinstance(row, dict)
+               and (row.get("late_result_pending") or row.get("operation_state") in {"pending_dispatch", "in_flight"})]
+    return ([row for row in reading if row.get("operation_id") not in settled],
+            [row for row in reading if row.get("operation_id") in settled])
+
+
+def plan_pending_actors(wave: Dict[str, Any]) -> list[dict]:
+    """Physical pending rows, retaining the original critic records unchanged."""
+    return _plan_rows_reading_pending(wave)[0]
+
+
+def plan_wave_slot_census(wave: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """Every roster row of one wave in exactly ONE typed class (pure; the rows are the
+    wave's own records). The ONE reader every plan renderer asks before it words a slot:
+    an answer that has not arrived is a gap, never a failure and never a verdict.
+
+    ``awaiting`` = a pending row released at the barrier (``review_slot_awaiting``), a
+    planned wait; ``unresolved`` = every other pending row (window expired, custody
+    lost) — exceptional, never worded as waiting; ``uncollected`` = reads pending but a
+    settled supplement of this cycle holds its terminal state; ``skipped`` = a typed $0
+    ``not_dispatched`` refusal; ``answered`` = ok; ``failed`` = every other row.
+    Pending custody outranks ``ok`` so an inconsistent row stays fail-closed. A roster
+    that is not a list classifies nothing: the custody ingress owns that anomaly."""
+    from ouroboros.review_records import review_slot_awaiting
+
+    census: Dict[str, Any] = {name: [] for name in (
+        "answered", "awaiting", "unresolved", "uncollected", "skipped", "failed")}
+    roster = wave.get("actors") if isinstance(wave, dict) else None
+    rows = [row for row in roster if isinstance(row, dict)] if isinstance(roster, list) else []
+    census["configured"] = len(rows)
+    pending, uncollected = _plan_rows_reading_pending(wave) if rows else ([], [])
+    pending_ids, uncollected_ids = {id(row) for row in pending}, {id(row) for row in uncollected}
+    for row in rows:
+        if id(row) in pending_ids:
+            name = "awaiting" if review_slot_awaiting(row) else "unresolved"
+        elif id(row) in uncollected_ids:
+            name = "uncollected"
+        elif row.get("ok"):
+            name = "answered"
+        else:
+            name = "skipped" if row.get("operation_state") == "not_dispatched" else "failed"
+        census[name].append(row)
+    return census
 
 
 def plan_wave_has_in_flight(wave: Dict[str, Any]) -> bool:

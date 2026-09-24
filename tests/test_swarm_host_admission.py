@@ -306,7 +306,7 @@ def test_existing_admission_refusal_text_and_order(host, failure):
     if failure == "update":
         host.monkeypatch.setattr(workers, "repo_writer_admission_closed", lambda: "destructive_test_window")
 
-    def budget(_state, *, strict):
+    def budget(_state, *, strict, **_display_read):
         budget_calls.append({"strict": strict})
         if failure == "update":
             pytest.fail("budget floor ran before the rejecting owner-conversation floor")

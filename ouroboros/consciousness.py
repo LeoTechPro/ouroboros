@@ -329,7 +329,7 @@ class BackgroundConsciousness:
         if not fresh and cached and now - cached_at < ALLOWANCE_VIEW_TTL_SEC:
             return cached
         try:
-            window = allowance_window(self._drive_root, now=now)
+            window = allowance_window(self._drive_root, now=now, allow_stale=not fresh)  # status shows; a wake admits
         except Exception as exc:  # the reader types every failure; this is the last net
             window = {"status": STATUS_UNKNOWN, "error": f"{type(exc).__name__}: {exc}"}
         self._allowance = (now, window)

@@ -32,6 +32,7 @@ import math
 import pathlib
 import shutil
 import tempfile
+import time
 from typing import Any, Dict, List, Optional
 
 from ouroboros.config import get_finalization_grace_sec
@@ -44,6 +45,7 @@ from ouroboros.usage_accounting import (
     BudgetExceeded,
     physical_attempt_limit,
 )
+from ouroboros.utils import utc_now_iso
 
 from ouroboros.review_execution import (
     ReviewAssignment,
@@ -239,6 +241,15 @@ _LANDING_RESERVE_CHARS = 2_048
 # marker: the call is WITHHELD (not executed) instead of read-and-discarded.
 _RESULT_ROOM_FLOOR_CHARS = 256
 
+# The episode walked away from a tool call that outlived its bound. The worker
+# is still loose on the shared inspection context, so nothing it produces may
+# be read as this episode's evidence.
+_SOURCE_GAP_TOOL_ABANDONED = "native_tool_abandoned"
+
+
+class _ToolAbandoned(Exception):
+    """One inspection call outlived its bound and was left to settle alone."""
+
 
 def _wire_size(messages: List[Dict[str, Any]], schemas: List[Dict[str, Any]]) -> int:
     """The ONE measure of a send: the serialized messages list plus the tool
@@ -383,6 +394,7 @@ class NativeToolRoundReviewExecutor(ReviewSlotExecutor):
         self._round_messages: list[dict] = []
         self._last_persisted_round = 0
         self._pressure_notice: Optional[dict] = None
+        self._tool_abandoned = False  # a loose worker retires this episode's read attribution
 
     def _source_root(self) -> Optional[pathlib.Path]:
         root = (self.assignment.request.policy or {}).get("native_data_root") or self.assignment.custody_root
@@ -1004,6 +1016,37 @@ class NativeToolRoundReviewExecutor(ReviewSlotExecutor):
             kwargs["default_temperature"] = default_temperature
         return kwargs
 
+    def _execute_bounded(self, registry: Any, name: str, args: Dict[str, Any]) -> Any:
+        """Run ONE inspection tool under the SAME timeout policy as any tool call.
+
+        The number is the loop's own per-tool resolution (`_get_tool_timeout`:
+        the settings/env ceiling and the tool's own minimum, for THIS registry
+        and these arguments), narrowed by whatever calendar or execution bound
+        this reviewer already inherited (`dispatch_deadline_remaining_sec`) —
+        no new number, and no floor, exactly as the episode bounds its own
+        sends. Past the bound the call is ABANDONED on its private worker: the
+        episode never reads its value, so a late return can neither answer the
+        reviewer nor source a receipt. A tool that raised its OWN timeout has
+        settled, and rides the ordinary tool-error rail instead.
+        """
+        import concurrent.futures
+
+        from ouroboros.loop_tool_execution import _get_tool_timeout, abandoned_on_timeout, tool_timeout_text
+        from ouroboros.model_wait import dispatch_deadline_remaining_sec, future_result
+
+        timeout = float(_get_tool_timeout(registry, name, args))
+        remaining = dispatch_deadline_remaining_sec()
+        if remaining is not None:
+            timeout = min(timeout, max(0.0, remaining))
+        with abandoned_on_timeout(timeout) as submit:
+            future = submit(registry.execute, name, args)
+            try:
+                return future_result(future, timeout)
+            except (TimeoutError, concurrent.futures.TimeoutError):
+                if future.done():
+                    raise
+                raise _ToolAbandoned(tool_timeout_text(name, timeout)) from None
+
     def _execute_inspection_call(
         self, registry: Any, tc: Dict[str, Any], validation_by_id: Dict[str, Any],
         *, round_idx: int, room: int,
@@ -1019,6 +1062,11 @@ class NativeToolRoundReviewExecutor(ReviewSlotExecutor):
         CONTROL FLOW, never string-sniffing: a refused call must not read as an
         executed one.
         """
+        # ONE clock domain for the receipt's pair: the wall clock. `started_at`
+        # is its ISO stamp and `duration_sec` the seconds elapsed on that same
+        # clock, so a receipt lines up with the task's own event rows instead
+        # of pairing a wall stamp with a monotonic number nothing can compare.
+        started_at, started = utc_now_iso(), time.time()
         call_id = str(tc.get("id") or "")
         function = tc.get("function") if isinstance(tc.get("function"), dict) else {}
         name = str(function.get("name") or "")
@@ -1066,13 +1114,25 @@ class NativeToolRoundReviewExecutor(ReviewSlotExecutor):
                     self._inspection_ctx.last_read_view = None
                 try:
                     if name == "compact_context":
+                        # NOT bounded: authoring the working view is this
+                        # thread's own bookkeeping over the transcript, not a
+                        # call that can wedge on anything outside it.
                         from ouroboros.tools.compact_context import _compact_context
                         if not args.get("inspect") and args.get("working_note") is None:
                             result = "Native review focus uses your own working_note. Call compact_context(inspect=true), then select complete unit IDs and author the next working view."
                         else:
                             result = _compact_context(self._inspection_ctx, **args)
                     else:
-                        result = str(registry.execute(name, args))
+                        result = str(self._execute_bounded(registry, name, args))
+                except _ToolAbandoned as exc:
+                    # The worker may still settle; its value is never read. The
+                    # receipt names the gap, the reviewer gets the host's own
+                    # timeout text, and the episode credits no further read
+                    # extent (below) — a late stamp cannot become coverage.
+                    outcome = "error"
+                    source_gap = self._source_gap = _SOURCE_GAP_TOOL_ABANDONED
+                    self._tool_abandoned = True
+                    result = str(exc)
                 except Exception as exc:  # tool errors feed the model, not the rail
                     outcome = "error"
                     result = f"⚠️ {type(exc).__name__}: {exc}"
@@ -1108,7 +1168,7 @@ class NativeToolRoundReviewExecutor(ReviewSlotExecutor):
                     if overshoot <= 0 or shown == 0:
                         break
                     shown = max(0, min(shown, len(full) - 1) - overshoot)
-                if name == "read_file" and outcome == "executed":
+                if name == "read_file" and outcome == "executed" and not self._tool_abandoned:
                     # Measured on `sent`, never on a `shown` the exhausted fit
                     # loop reduced after the last build: the receipt credits
                     # exactly what the reviewer received.
@@ -1116,7 +1176,8 @@ class NativeToolRoundReviewExecutor(ReviewSlotExecutor):
         # Host-observed evidence (bounded): which artifacts THIS episode
         # actually opened — disclosure, never a claim of full-surface coverage.
         self._tool_calls_total += 1
-        receipt: Dict[str, Any] = {"round": round_idx, "tool": name, "delivered": False}
+        receipt: Dict[str, Any] = {"round": round_idx, "tool": name, "delivered": False,
+                                   "started_at": started_at, "duration_sec": round(time.time() - started, 3)}
         if isinstance(args, dict):
             for key in ("path", "root", "query", "pattern"):
                 if args.get(key):
@@ -1153,9 +1214,12 @@ class NativeToolRoundReviewExecutor(ReviewSlotExecutor):
         would shift ``body_start``. The stamp's binding
         to THIS call is structural, not a comparison: the reader resets it on
         entry, the caller clears it before every dispatch, the context is
-        instance-local and dispatch is synchronous — so a call refused before
-        the tool ran, or one that returned without rendering, finds no stamp
-        and records no extent. The ``last_read_view`` WRITER-SET invariant
+        instance-local, and the caller reads the stamp only for a call that
+        RETURNED inside its bound — so a call refused before the tool ran, one
+        that returned without rendering, or one the episode ABANDONED (its
+        outcome is an error and a loose worker retires the episode's read
+        attribution for good) finds no stamp and records no extent. The
+        ``last_read_view`` WRITER-SET invariant
         backs this: exactly three writers exist — the reader's entry reset and
         its stamp in ``tools/core_file_tools.py`` and this episode's clear-before-dispatch
         — pinned by a static test, so a fourth writer cannot forge coverage

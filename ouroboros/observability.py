@@ -406,7 +406,7 @@ def _ref_path(drive_root: pathlib.Path, ref: dict, relative: pathlib.Path) -> pa
 
 def _blob_ref_path(drive_root: pathlib.Path, ref: dict) -> pathlib.Path:
     digest, kind = str(ref.get("sha256") or ""), str(ref.get("kind") or "")
-    if not re.fullmatch(r"[0-9a-f]{64}", digest) or kind not in {"json", "txt"}:
+    if not re.fullmatch(r"[0-9a-f]{64}", digest) or kind not in {"json", "txt", "bin"}:
         raise ValueError("observability blob ref has no valid sha256 or kind")
     return _ref_path(drive_root, ref, pathlib.Path("blobs") / f"{digest}.{kind}.gz")
 
@@ -572,7 +572,7 @@ _PUBLISHED_CHILD_REF_FIELDS = frozenset(
     }
 )
 _SOURCE_HANDLES_SUBDIR = "source_handles"
-_TASK_SOURCE_MARKER = "FULL_RESULT_SOURCE_JSON="
+_TASK_SOURCE_MARKERS = ("FULL_RESULT_SOURCE_JSON=", "PRODUCER_RESULT_SOURCE_JSON=")
 _SERVICE_REF_TOOLS = frozenset({"service_logs", "stop_service"})
 
 
@@ -857,17 +857,17 @@ def _rewrite_task_source_markers(
     task_id: str,
     state: Dict[str, Any],
 ) -> str:
-    """Rewrite only Phase3B's explicit actor-source envelope inside tool text."""
+    """Promote the host's full-view and clean-producer source envelopes."""
 
     rewritten_lines: List[str] = []
     for line in str(text).splitlines(keepends=True):
         body = line.rstrip("\r\n")
-        newline = line[len(body):]
-        if not body.startswith(_TASK_SOURCE_MARKER):
+        marker = next((prefix for prefix in _TASK_SOURCE_MARKERS if body.startswith(prefix)), None)
+        if marker is None:
             rewritten_lines.append(line)
             continue
         try:
-            ref = json.loads(body[len(_TASK_SOURCE_MARKER):])
+            ref = json.loads(body[len(marker):])
         except (TypeError, ValueError):
             rewritten_lines.append(line)
             continue
@@ -878,14 +878,14 @@ def _rewrite_task_source_markers(
             parent_root, child_root, task_id, ref, state
         )
         rewritten_lines.append(
-            _TASK_SOURCE_MARKER
+            marker
             + json.dumps(
                 promoted,
                 ensure_ascii=False,
                 sort_keys=True,
                 separators=(",", ":"),
             )
-            + newline
+            + line[len(body):]
         )
     return "".join(rewritten_lines)
 
@@ -940,7 +940,7 @@ def _rewrite_child_ref_tree(
             _rewrite_child_ref_tree(item, parent_root, child_root, task_id, state)
             for item in value
         ]
-    if isinstance(value, str) and _TASK_SOURCE_MARKER in value:
+    if isinstance(value, str) and any(marker in value for marker in _TASK_SOURCE_MARKERS):
         return _rewrite_task_source_markers(
             value, parent_root, child_root, task_id, state
         )

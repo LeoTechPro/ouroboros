@@ -172,7 +172,7 @@ def test_ui_smoke_agents_panel_list_editor(direct_server_with_data):
                 set_cadence("every_n", "x")
                 save_expecting("Every-N cadence")
                 assert page.locator(".available-subagent-row[data-invalid]").count() == 1
-                fresh.locator('[data-subagent-field="model"]').fill("openai/gpt-5.6-luna")
+                fresh.locator('[data-subagent-field="model"]').fill("openai/gpt-5.6-sol-high")
                 page.wait_for_function(
                     "() => document.querySelector('[data-subagents-validation]').hidden"
                     " && !document.querySelector('.available-subagent-row[data-invalid]')", timeout=5_000)

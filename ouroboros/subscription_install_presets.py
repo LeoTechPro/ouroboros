@@ -711,8 +711,11 @@ def preview_main_reviewer_slots(settings: Mapping[str, Any]) -> Tuple[str, str]:
     if any(row.retrieves for row in resolved.triad):
         # Empty actor effort leaves each reviewer's captured effort authoritative.
         destination = RouteSpec(ROUTE_KIND_API_MODEL, main, profile)
+        # An owner-disabled row is never proposed as a reviewer seat: the
+        # reviewer parser refuses that reference, so reusing it here would
+        # compile a draft that cannot be saved.
         actor_id = next((row.subagent_id for row in roster.items
-                         if row.route == destination and not row.effort
+                         if row.enabled and row.route == destination and not row.effort
                          and row.processing_preference == processing), "")
         if not actor_id:
             used = {row.subagent_id for row in roster.items}

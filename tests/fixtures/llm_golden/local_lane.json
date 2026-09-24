@@ -113,7 +113,8 @@
             "cost": 0.0,
             "cost_final": true,
             "provider": "local",
-            "resolved_model": "local-model"
+            "resolved_model": "local-model",
+            "response_finish_reason": "stop"
           },
           "ledger_attempt_count": 1
         },

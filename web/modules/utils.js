@@ -38,6 +38,20 @@ export function safeExternalHrefAttr(value) {
     return '';
 }
 
+/**
+ * ` · since HH:MM` in the viewer's own 24-hour clock, for an instant the host
+ * actually recorded. A wait that began on an earlier local day carries that day
+ * too, so `since 23:50` can never be misread as tonight. A missing or
+ * unparseable value yields '': a moment is never invented or inferred.
+ */
+export function sinceLocalTime(value, now = Date.now()) {
+    const at = new Date(Date.parse(String(value ?? '').trim()));
+    if (Number.isNaN(at.getTime())) return '';
+    const clock = at.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false });
+    if (at.toDateString() === new Date(now).toDateString()) return ` · since ${clock}`;
+    return ` · since ${at.toLocaleDateString([], { month: 'short', day: 'numeric' })} ${clock}`;
+}
+
 /** Bound untrusted text with a visible marker before it reaches DOM surfaces. */
 export function boundedText(value, maxLen = 1200) {
     const text = String(value ?? '');
@@ -448,6 +462,37 @@ export function joinMarkdownHeadings(text) {
         const separate = next >= 0 && !opensFence(next) && visible.length <= MARKDOWN_HEADING_MAX_CHARS && !/[—–\-:]$/.test(visible);
         return heading[1] + (separate ? ' —' : '');
     }).join('\n');
+}
+
+/**
+ * One plain-text projection of RECORDED free text before it joins a host cause
+ * cancellation clause. The Python twin is
+ * `ouroboros.utils.strip_markdown` followed by a whitespace split/join, and the
+ * two strip the SAME marker inventory so one stored cause reads the same in the
+ * browser card and in the host's durable chat row. Line-anchored patterns
+ * (headings, bullets) only match while the newlines are still there, so
+ * stripping precedes flattening — exactly the order the Python docstring names.
+ * The common fixture pins Markdown, empty provenance and sentence punctuation
+ * through both consumers. `max` of 0 keeps the whole text; any other value
+ * bounds it by Unicode characters with an ellipsis.
+ */
+export function plainCauseText(value, max = 160) {
+    const plain = String(value || '')
+        .replace(/```[^\n]*\n([\s\S]*?)```/g, '$1')
+        .replace(/`([^`]+)`/g, '$1')
+        .replace(/\*\*\*(.+?)\*\*\*/g, '$1')
+        .replace(/\*\*(.+?)\*\*/g, '$1')
+        .replace(/(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)/g, '$1')
+        .replace(/(?<![\p{L}\p{N}_])_(.+?)_(?![\p{L}\p{N}_])/gu, '$1')
+        .replace(/~~(.+?)~~/g, '$1')
+        .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
+        .replace(/^#{1,6}\s+/gm, '')
+        .replace(/^[*-]\s+/gm, '• ')
+        .replace(/\*\*|__|~~|`/g, '')
+        .replace(/\s+/g, ' ')
+        .trim();
+    const chars = Array.from(plain);
+    return max > 0 && chars.length > max ? `${chars.slice(0, max - 1).join('').trimEnd()}…` : plain;
 }
 
 export function renderMarkdown(text, { inlineHeadingBreaks = false } = {}) {

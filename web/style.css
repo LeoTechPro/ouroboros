@@ -152,6 +152,44 @@ body.resizing-panels { user-select: none; }
     white-space: nowrap;
 }
 
+/* Sidebar activity reuses the live-card's three 4px dots (`.chat-live-typing`
+   supplies the size, 3px gap and 1.4s bounce). The dots take the row's own
+   foreground, like the shared status-sentence dot, so they never out-shout the
+   title and follow its hover/active ink; a confirmed wait is the one amber
+   fact; queued and unknown work stay static at a quieter step of that ink. */
+.nav-activity-marker {
+    pointer-events: none;
+}
+
+.nav-activity-label {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-2);
+    flex: 1 1 auto;
+    min-width: 0;
+}
+
+.nav-activity-label .nav-row-label { flex: 0 1 auto; }
+
+.nav-activity-marker[hidden] { display: none; }
+
+/* Same specificity as the later shared `.chat-live-typing span` accent rule
+   would lose on order; name the composed marker so the row ink wins. */
+.nav-activity-marker.chat-live-typing span { background: currentColor; }
+.nav-activity-marker[data-state="waiting"] span { background: var(--amber); }
+.nav-activity-marker[data-state="queued"],
+.nav-activity-marker[data-state="unknown"] { opacity: 0.55; }
+
+/* Only confirmed computation inherits the bounce. */
+.nav-activity-marker[data-state="waiting"] span,
+.nav-activity-marker[data-state="queued"] span,
+.nav-activity-marker[data-state="unknown"] span,
+.nav-activity-marker[data-state="idle"] span { animation: none; }
+
+@media (prefers-reduced-motion: reduce) {
+    .nav-activity-marker[data-state="working"] span { animation: none; }
+}
+
 .nav-row-meta {
     flex: 0 0 auto;
     color: var(--text-muted);
@@ -293,21 +331,14 @@ body.resizing-panels { user-select: none; }
     content: ' ⏩';
 }
 
-/* Layout-only composition for question, Project lifecycle and routing
-   actions, with room for keyboard focus above and below. Buttons use the shared
-   `.btn.btn-default.btn-sm` role — no new colors, radii, or variants. */
+/* Layout-only composition for the row under a question, a Project lifecycle row or a
+   routed message, with room for keyboard focus above and below. What sits in it is a
+   reference (`project_reference.js`) or the shared `.btn.btn-default.btn-sm` verb. */
 .system-message-actions {
     display: flex;
     flex-wrap: wrap;
     gap: var(--space-3);
     padding-block: var(--space-3);
-}
-
-.system-message-action {
-    flex: 0 1 auto;
-    max-width: 100%;
-    white-space: normal;
-    overflow-wrap: anywhere;
 }
 
 /* === design-system:migrated-begin (chat: Project question mirror) === */
@@ -349,7 +380,8 @@ body.resizing-panels { user-select: none; }
 }
 .chat-bubble.project-answer > .message > :first-child { margin-top: 0; }
 .chat-bubble.project-answer > .system-message-actions { align-items: center; padding-block: var(--space-2) var(--space-1); }
-.chat-bubble.project-answer .chat-quiz-project { margin-inline-end: 0; max-width: min(100%, 44ch); }
+/* Under any message the reference has the row to itself, so its name may run longer than in a quiz head. */
+.system-message-actions .chat-quiz-project { margin-inline-end: 0; max-width: min(100%, 44ch); }
 /* === design-system:migrated-end === */
 
 
@@ -441,6 +473,34 @@ body.resizing-panels { user-select: none; }
     font-weight: 500;
     color: var(--text-meta);
 }
+
+.project-handoff-heading {
+    display: flex;
+    align-items: baseline;
+    flex-wrap: wrap;
+    gap: var(--space-2);
+    padding: var(--space-3);
+}
+
+.project-handoff-title {
+    min-width: 0;
+    overflow-wrap: anywhere;
+    font-size: var(--type-body);
+    color: var(--text-primary);
+}
+
+.chat-bubble.system.project-handoff {
+    border-color: var(--project-18);
+    background: var(--project-08);
+}
+
+/* A converted card whose Main history receipt is not durable: the binding
+   holds, the anchor does not survive a reload — say so with the border. */
+.chat-bubble.system.project-handoff--unsaved,
+.project-handoff--unsaved { border-style: dashed; }
+
+.project-handoff > .sender { display: none; }
+.project-handoff .message { padding: 0; }
 
 .nav-section {
     display: flex;
@@ -1954,6 +2014,16 @@ body.resizing-panels { user-select: none; }
     min-height: 1.35em;
 }
 
+/* The secondary status fact beside the outcome chip (a running finalization).
+   Neutral by rule: the outcome owns the status colour, this only says the task
+   has not let go yet, so it stays a quiet sentence rather than a second chip. */
+.chat-live-phase-secondary {
+    color: var(--text-meta);
+    font-size: var(--type-meta);
+    line-height: var(--line-meta);
+    white-space: nowrap;
+}
+
 .chat-live-meta-text {
     display: inline-flex;
     align-items: center;
@@ -1969,6 +2039,13 @@ body.resizing-panels { user-select: none; }
     margin-inline-start: auto;
     align-self: baseline;
     white-space: nowrap;
+}
+
+.chat-live-review-summary[data-warning="1"] {
+    color: var(--status-warn-fg);
+    white-space: normal;
+    overflow-wrap: anywhere;
+    max-width: 100%;
 }
 
 [data-live-reviews-host] > .chat-live-reviews {
@@ -3001,10 +3078,14 @@ body.resizing-panels { user-select: none; }
 }
 
 /* "Chat freed" cue (P3): a brief fuchsia brighten when a task moves out to a
-   project, signalling the main chat is free again. Self-clears after ~900ms. */
-.chat-text-row.chat-freed {
-    border-color: var(--project);
-    box-shadow: inset 0 1px 0 rgba(var(--neutral-rgb), 0.04), 0 0 0 3px var(--project-12);
+   project, signalling the main chat is free again. The animation owns the
+   900ms and the class comes off on animationend, so no chat-instance timer. */
+.chat-text-row.chat-freed { animation: chat-freed 900ms ease-out; }
+@keyframes chat-freed {
+    0%, 70% {
+        border-color: var(--project);
+        box-shadow: inset 0 1px 0 rgba(var(--neutral-rgb), 0.04), 0 0 0 3px var(--project-12);
+    }
 }
 
 .chat-toolbar-row {
@@ -4360,13 +4441,18 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
     font-size: 11.5px;
 }
 
-.skills-details {
+/* One disclosure, two surfaces: a Skills card's detail and Activity's retained
+   schedules (a fired one-shot, a suppressed skill row) read the same, so they
+   share these rules instead of growing a second look for the same gesture. */
+.skills-details,
+.activity-history {
     margin-top: 4px;
     border-top: 1px solid rgba(var(--neutral-rgb), 0.06);
     padding-top: 10px;
 }
 
-.skills-details > summary {
+.skills-details > summary,
+.activity-history > summary {
     cursor: pointer;
     user-select: none;
     color: var(--text-meta);
@@ -4377,18 +4463,21 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
     gap: 4px;
 }
 
-.skills-details > summary::-webkit-details-marker {
+.skills-details > summary::-webkit-details-marker,
+.activity-history > summary::-webkit-details-marker {
     display: none;
 }
 
-.skills-details > summary::before {
+.skills-details > summary::before,
+.activity-history > summary::before {
     content: '\25B8';
     display: inline-block;
     transition: transform 120ms ease;
     font-size: 10px;
 }
 
-.skills-details[open] > summary::before {
+.skills-details[open] > summary::before,
+.activity-history[open] > summary::before {
     transform: rotate(90deg);
 }
 
@@ -5836,7 +5925,28 @@ textarea.chat-input {
     padding-left: calc(var(--space-3) + 18px + var(--space-3));
     padding-right: var(--space-1);
     border-radius: var(--radius-sm);
+    /* One trailing rail per row: label, activity column, unread column. Each
+       trailing child is placed explicitly in its own always-reserved column
+       (the global [hidden] rule removes an idle marker from layout, so the
+       tracks, not the children, hold the slots): the dots and the unread dot
+       keep one x across rows whether or not the other is present, whatever
+       the name length, and while the sibling kebab (the item's own 28px
+       column) is hovered or focused. 18px is the marker's own width, three
+       4px dots and two 3px gaps; 8px is the unread dot's. */
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 18px 8px;
+    column-gap: var(--space-2);
 }
+
+.nav-project-row > .nav-row-label { grid-column: 1; }
+.nav-project-row > .nav-activity-marker { grid-column: 2; }
+.nav-project-row > .nav-unread-dot { grid-column: 3; }
+
+/* A deleting row states one trailing fact, `Deleting…`, in its wider sibling
+   column. Its census marker stays in the accessible name but is not drawn:
+   motion on a row the owner cannot open would read as work to look at. */
+.nav-project-item.is-deleting .nav-project-row { grid-template-columns: minmax(0, 1fr); }
+.nav-project-item.is-deleting .nav-activity-marker { display: none; }
 
 .nav-project-row:hover {
     color: var(--text-primary);
@@ -6761,7 +6871,9 @@ textarea.chat-input {
 .chat-live-executor-chip {
     font-size: var(--type-meta);
     padding: 0 6px;
-    margin-right: 6px;
+    /* No trailing margin: the meta line now carries a real ' \00b7 ' text part
+       between the chip and the next fact, so this boundary is spaced by the
+       same flex gap as every other one. */
     vertical-align: middle;
     opacity: 0.85;
 }

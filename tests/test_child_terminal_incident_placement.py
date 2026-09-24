@@ -175,23 +175,20 @@ def test_owed_outbox_replay_keeps_the_same_row_identity(tmp_path):
     assert replayed["progress_meta"]["card_row_id"] == ROW_ID
 
 
-def test_host_notice_split_never_inherits_the_answer_placement(tmp_path, monkeypatch):
-    """A salvaged child answer that also carries a host notice: the untyped
-    notice stays an ordinary row. Sharing the receipt's row id would let one
-    overwrite the other inside the card."""
+def test_a_host_notice_beside_a_salvaged_child_answer_yields_no_second_row(tmp_path, monkeypatch):
+    """A salvaged child answer that also carries a host notice: the notice stays a
+    field of the RESULT (chat-voice C3) and never rides the send event, so the
+    receipt is the only row and keeps its own placement."""
     host, _frames, _published = _wire(tmp_path, monkeypatch)
     notice = "Plan review stayed open; inspect the task details."
     event = _worker_final(tmp_path, CHILD_TASK, terminal_host_notice=notice)
-    assert event["terminal_host_notice"] == notice
+    assert "terminal_host_notice" not in event
 
     delivery._handle_send_message(event, host)
 
-    receipt, host_row = _stored_rows(tmp_path)
+    (receipt,) = _stored_rows(tmp_path)
     assert receipt["type"] == "terminal_incident" and receipt["card_row_id"] == ROW_ID
-    assert host_row["text"] == notice and host_row["direction"] == "system"
-    assert "type" not in host_row, "the host notice keeps its untyped replay role"
-    assert "card_row" not in host_row and "card_row_id" not in host_row
-    assert host_row["delegation_role"] == "subagent", "its lineage still rides along"
+    assert notice not in receipt["text"]
 
 
 def test_telegram_holds_a_child_row_only_while_its_root_is_unfinished(tmp_path):

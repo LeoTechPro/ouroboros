@@ -8,6 +8,7 @@ task category), the accounting envelope and the root-task breakdown. The
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import pathlib
 from typing import Any, Callable, Dict, Optional
@@ -90,14 +91,14 @@ def _compat_cost_groups(
     return dict(sorted(result.items(), key=lambda item: item[1]["cost"], reverse=True))
 
 def make_cost_breakdown_endpoint(data_dir: pathlib.Path):
-    async def api_cost_breakdown(_request: Request) -> JSONResponse:
-        """Return ledger-derived cost and physical-attempt breakdowns."""
+    def _cost_breakdown_response() -> JSONResponse:
         try:
             from ouroboros.pricing import infer_model_category
             from ouroboros.usage_accounting import ensure_legacy_imported, usage_breakdown
 
             ensure_legacy_imported(data_dir)
-            breakdown = usage_breakdown(data_dir)
+            # Display read: a contended ledger lock serves the last validated snapshot.
+            breakdown = usage_breakdown(data_dir, allow_stale=True)
             unattributed = dict(breakdown.get("unattributed") or {})
             by_model_raw = dict(breakdown.get("by_model") or {})
             try:
@@ -159,6 +160,12 @@ def make_cost_breakdown_endpoint(data_dir: pathlib.Path):
                 },
             }, status_code=503)
 
+    async def api_cost_breakdown(_request: Request) -> JSONResponse:
+        """Return ledger-derived cost and physical-attempt breakdowns."""
+        # Off the event loop (as ``gateway/state.py`` does): a ledger read, stale
+        # path or a cold first replay, must never hold every HTTP client behind it.
+        return await asyncio.to_thread(_cost_breakdown_response)
+
     return api_cost_breakdown
 
 
@@ -186,7 +193,8 @@ def _task_cost_breakdown_view(drive_root: pathlib.Path, result: Dict[str, Any]) 
         from ouroboros.cost_projection import honest_accounted_amount
         from ouroboros.usage_accounting import usage_breakdown
 
-        breakdown = usage_breakdown(drive_root, root_task_id=root_id)
+        # Read at display time only: contention serves the last validated snapshot.
+        breakdown = usage_breakdown(drive_root, root_task_id=root_id, allow_stale=True)
     except Exception:
         log.debug("cost breakdown view unavailable for %s", task_id, exc_info=True)
         return None

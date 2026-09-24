@@ -213,8 +213,9 @@ async def _dispatch_extension_message(
             extension_name_prefix,
             list_ws_handlers,
             reconcile_extension,
+            runtime_state_for_skill_name,
         )
-        from ouroboros.skill_loader import discover_skills
+        from ouroboros.skill_peer_inventory import discover_skill_peers
 
         drive_root = pathlib.Path(
             websocket.app.state.drive_root  # type: ignore[attr-defined]
@@ -230,13 +231,14 @@ async def _dispatch_extension_message(
         handler_spec = list_ws_handlers().get(msg_type)
         skill_name = str((handler_spec or {}).get("skill") or "")
         if not skill_name:
-            for skill in discover_skills(drive_root, repo_path=repo_path):
+            for skill in await asyncio.to_thread(discover_skill_peers, drive_root, repo_path=repo_path):
                 if msg_type.startswith(extension_name_prefix(skill.name)):
                     skill_name = skill.name
                     break
         if not skill_name:
             raise KeyError(msg_type)
-        state = reconcile_extension(skill_name, drive_root, load_settings, repo_path=repo_path)
+        state = await asyncio.to_thread(reconcile_extension, skill_name, drive_root, load_settings, repo_path=repo_path)
+        state = {**state, **await asyncio.to_thread(runtime_state_for_skill_name, skill_name, drive_root, repo_path=repo_path)}
         if not state.get("desired_live"):
             await websocket.send_text(json.dumps({"type": "log", "data": {"level": "warning", "message": f"extension WS handler {msg_type!r} is not live: {state.get('reason')}"}}))
             return True
@@ -294,7 +296,15 @@ async def _dispatch_extension_message(
         }))
         return True
     try:
-        result = handler(msg) if callable(handler) else None
+        # Mirror the HTTP dispatcher: a synchronous in-process handler (and its
+        # synchronous barrier wait) runs off the ASGI loop, so one skill's
+        # blocking callback never stalls unrelated HTTP and WebSocket work.
+        if not callable(handler):
+            result = None
+        elif inspect.iscoroutinefunction(handler):
+            result = await handler(msg)
+        else:
+            result = await asyncio.to_thread(handler, msg)
         if inspect.iscoroutine(result):
             result = await result
         if result is not None:

@@ -63,7 +63,7 @@ COST_RESULT_FIELDS = (
     "accounted_upper_bound_usd", "accounted_upper_bound_usd_with_children", "cost_known",
     "cost_accounting_status", "cost_accounting_error", "cost_final", "cost_with_children_partial",
     "unknown_unmetered", "non_final_rows", "reserved_usd", "unresolved_upper_bound_usd",
-    "ledger_integrity_degraded",
+    "ledger_integrity_degraded", "cost_presentation",
 )
 
 

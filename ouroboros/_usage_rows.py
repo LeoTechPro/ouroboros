@@ -116,6 +116,16 @@ def _summary(rows: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
     # reporting `cost_final: false` with every dollar bucket at zero and `unknown` at zero
     # is a flag no reader can reconstruct.
     non_final_rows = 0
+    # Rows whose money is KNOWN: a settled price, or a reservation upper bound a
+    # still-open row is carrying. It is the evidence behind a ZERO — an empty
+    # ledger and a ledger of exclusively unpriced rows both sum to 0.0, and only
+    # this count separates "nothing was spent" from "nothing is known" (#498).
+    # Weighted like every other axis, so a compacted baseline group answers the
+    # same as the final attempt rows it folded.
+    priced_rows = 0
+    # Presentation facts are independent of cost_final: a settled unpriced
+    # attempt leaves the total unknown without making a known subtotal inexact.
+    tracked_nonfinal_rows = accounting_open_rows = 0
     counts: Dict[str, int] = {}
     # Session count/quota and incremental cash remain separate observed axes.
     sessions = 0
@@ -156,27 +166,39 @@ def _summary(rows: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
                 bound = _number(row.get("reservation_upper_bound_usd"))
                 if bound is not None:
                     unresolved += bound
+                    priced_rows += weight
+                    tracked_nonfinal_rows += weight
+                    accounting_open_rows += weight
             else:
+                priced_rows += weight
                 settled += cost
                 if bool(row.get("cost_final")):
                     confirmed += cost
                 else:
                     estimated += cost
                     non_final_rows += weight
+                    tracked_nonfinal_rows += weight
+                    accounting_open_rows += weight
         elif state == "reserved":
             non_final_rows += weight
+            accounting_open_rows += weight
             bound = _number(row.get("reservation_upper_bound_usd"))
             if bound is None or pricing_unknown:
                 unknown += weight
             if bound is not None:
                 reserved += bound
+                priced_rows += weight
+                tracked_nonfinal_rows += weight
         elif state in {"dispatched", "unresolved"}:
             non_final_rows += weight
+            accounting_open_rows += weight
             bound = _number(row.get("reservation_upper_bound_usd"))
             if bound is None or pricing_unknown:
                 unknown += weight
             if bound is not None:
                 unresolved += bound
+                priced_rows += weight
+                tracked_nonfinal_rows += weight
     settled, confirmed, estimated, reserved, unresolved = (
         round(value, 6) for value in (settled, confirmed, estimated, reserved, unresolved)
     )
@@ -188,6 +210,9 @@ def _summary(rows: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
         "unresolved_upper_bound_usd": unresolved,
         "accounted_usd": round(settled + reserved + unresolved, 6),
         "unknown_unmetered": unknown,
+        "priced_rows": priced_rows,
+        "tracked_nonfinal_rows": tracked_nonfinal_rows,
+        "accounting_open_rows": accounting_open_rows,
         # Every row that increments `unknown` is open, so the old `not unknown` term is
         # subsumed here rather than dropped.
         "non_final_rows": non_final_rows,

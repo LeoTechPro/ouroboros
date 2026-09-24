@@ -57,9 +57,14 @@ def test_schedule_task_live_emits_strict_contract_and_requested_status(tmp_path,
     )
 
     assert "Subagent request queued" in result
+    # The result names the engine by its handle; the stored key stays in the
+    # durable snapshot and never reaches the model.
+    assert "(subagent_id=openai/gpt-5.6-sol/high, route=api_model" in result
+    assert "api-scout" not in result
     assert ctx.pending_events == []
     assert len(event_queue.events) == 1
     evt = event_queue.events[0]
+    assert evt["configured_subagent"]["selected_subagent_id"] == "api-scout"
     task_id = evt["task_id"]
     assert evt["description"] == "Do the thing"
     assert evt["expected_output"] == "A concise handoff"
