@@ -226,6 +226,10 @@ def build_task_acceptance_evidence(
     if claims_source in {"plan_review", "author_plan"}:
         contract = {**contract, "acceptance_claims": claims}
     receipts = read_context_verification_receipts(ctx, task_id, fallback_root=drive_root) if task_id else []
+    # The same host-recorded provenance the post-task synthesis reads: the reviewer
+    # learns whether the owner door stamped this run before it weighs the corpus.
+    ev["run_origin"] = _accept_run_origin(ctx, drive_root, task_id)
+    prov["run_origin"] = "host_attested"
     owner_directives = _accept_owner_directives(ctx, drive_root, task_id)
     if owner_directives:
         # This is an immutable verbatim corpus, not a parsed decision ledger:
@@ -1133,6 +1137,7 @@ from ouroboros.review_evidence_sections import (  # noqa: E402, F401 -- intentio
     _accept_obligation_row,
     _accept_owner_directives,
     _accept_protected_set,
+    _accept_run_origin,
     _accept_receipt_exhibits,
     _accept_redact_cap,
     _accept_task_contract,

@@ -72,6 +72,7 @@ from ouroboros.loop_transport import (
     transport_wait_step as _transport_wait_step,
 )
 from ouroboros.pricing import estimate_cost_optional  # noqa: F401 -- the loop module keeps its historical import surface for the L-B leaves
+from ouroboros.budget_pause import load_budget_pause, resume_paused_loop
 from ouroboros.owner_wait import load_owner_wait, resume_native_loop, wait_after_tools
 
 log = logging.getLogger(__name__)
@@ -377,16 +378,14 @@ def _apply_runtime_overrides(
     return active_model, active_use_local, active_effort
 
 
-def _resolve_loop_max_rounds(ctx: Any = None) -> int:
-    from ouroboros.config import SETTINGS_DEFAULTS
+def _resolve_loop_max_rounds(ctx: Any = None) -> Optional[int]:
+    """The round limit that binds first: the configured total (``None`` = no limit) and a
+    Presence turn's own finite inline cap. ``None`` means no round limit at all."""
+    from ouroboros.config import get_max_rounds
 
-    default = int(SETTINGS_DEFAULTS["OUROBOROS_MAX_ROUNDS"])
-    try:
-        configured = max(1, int(runtime_setting("OUROBOROS_MAX_ROUNDS", str(default))))
-    except (ValueError, TypeError):
-        log.warning("Invalid OUROBOROS_MAX_ROUNDS, defaulting to %s", default)
-        configured = default
-    return min(configured, int(getattr(ctx, "inline_max_rounds", configured)))
+    inline = getattr(ctx, "inline_max_rounds", None)
+    bounds = [int(b) for b in (get_max_rounds(), inline) if b is not None]
+    return min(bounds) if bounds else None
 
 
 def _record_transcript_prefix(ctx, messages, round_idx, accumulated_usage,
@@ -473,7 +472,8 @@ def run_llm_loop(
     invalidate_task_cache_splits(task_id or getattr(ctx, "task_id", ""))  # rebuilt attempt = new prefix
     max_retries = 3
     saved = load_owner_wait(ctx)
-    if not saved:
+    saved_pause = load_budget_pause(ctx) if not saved else {}
+    if not saved and not saved_pause:
         accumulated_usage["initial_model_request"] = {
             "model": active_model, "use_local": active_use_local,
         }
@@ -485,10 +485,9 @@ def run_llm_loop(
     from ouroboros.tools import tool_discovery as _td
     _td.set_registry(tools)
 
-    tool_schemas = saved["tool_schemas"] if saved else initial_tool_schemas(tools, context_mode=active_context_mode)
-    tool_schemas, _enabled_extra_tools = _setup_dynamic_tools(
-        tools, tool_schemas, messages, context_mode=active_context_mode
-    )
+    continuation = saved or saved_pause
+    tool_schemas = continuation["tool_schemas"] if continuation else initial_tool_schemas(tools, context_mode=active_context_mode)
+    tool_schemas, _enabled_extra_tools = _setup_dynamic_tools(tools, tool_schemas, messages, context_mode=active_context_mode)
     ctx.event_queue, ctx.task_id, ctx.messages = event_queue, task_id, messages
     stateful_executor = StatefulToolExecutor()
     exit_ctx = _LoopExitContext(
@@ -505,9 +504,19 @@ def run_llm_loop(
         if saved:
             active_model, active_effort, active_use_local, active_context_mode, round_idx, context_fit_plan = resume_native_loop(
                 tools, saved, messages, llm_trace, accumulated_usage, _owner_msg_seen)
-        # A no-tool round that did NOT finish owes the same budget comparison the
-        # tool tail makes; the flag carries it to the next round's ordered exits.
+        # Both continuing tool tails and unfinished no-tool rounds owe budget checks.
         pending_tool_budget, pending_tool_calls, pending_no_tool_budget = bool(saved), None, False
+        if saved_pause:
+            # Restore cognition under the same ID, closing unanswered calls as
+            # execution-unknown without replay. The shared budget tail checks
+            # the owner-refreshed threshold before any new model call.
+            (active_model, active_effort, active_use_local, active_context_mode,
+             round_idx, context_fit_plan) = resume_paused_loop(
+                tools, saved_pause, messages, llm_trace, accumulated_usage, _owner_msg_seen,
+                budget_remaining_usd=budget_remaining_usd)
+            cost_ceiling = _resolve_task_cost_ceiling(tools._ctx, budget_remaining_usd)
+            pending_no_tool_budget = saved_pause.get("resume_point", {}).get("budget_tail") == "no_tool"
+            pending_tool_budget, free_redial = not pending_no_tool_budget, pending_no_tool_budget
         while True:
             if free_redial or pending_tool_budget:
                 free_redial = False  # Tool tails and transport waits retain their logical round.
@@ -537,15 +546,15 @@ def run_llm_loop(
             ctx.active_effort = active_effort
             ctx.active_use_local = active_use_local
 
-            # One forced-wrap-up context per round: consumed by the round-limit
-            # path and supervisor finalize_now control path below.
+            # One context per round, shared by budget, round-limit and finalize_now rails.
             limit_ctx = _RoundLimitContext(
                 messages, llm, active_model, active_effort, max_retries, drive_logs,
-                task_id, round_idx, event_queue, accumulated_usage, task_type,
-                active_use_local, MAX_ROUNDS, drive_root=drive_root, llm_trace=llm_trace,
+                task_id, round_idx, event_queue, accumulated_usage, task_type, active_use_local, MAX_ROUNDS,
+                drive_root=drive_root, llm_trace=llm_trace,
                 incoming_messages=incoming_messages, owner_msg_seen=_owner_msg_seen, tool_schemas=tool_schemas)
             _finalize_limit_ctx(limit_ctx, tools, llm_trace)
-            if round_idx > MAX_ROUNDS:
+            limit_ctx.budget_tail = "tool" if pending_tool_budget else "no_tool"
+            if MAX_ROUNDS is not None and round_idx > MAX_ROUNDS:
                 # Live hold: a paid [ROUND_LIMIT] dial would be a resend (no wake receipt) — no-call unknown terminal.
                 if _delegate_hold_close(tools, drive_logs=drive_logs, task_id=task_id,
                     detail="round_limit") == "active":
@@ -622,17 +631,13 @@ def run_llm_loop(
                 seal_task_transcript(messages)
 
                 model_call = _RoundModelCallContext(
-                        llm=llm, messages=messages, tools=tools, context_fit_plan=context_fit_plan,
-                        active_model=active_model, tool_schemas=tool_schemas,
-                        active_effort=active_effort, max_retries=max_retries,
-                        drive_logs=drive_logs, task_id=task_id, round_idx=round_idx,
-                        event_queue=event_queue,
-                        accumulated_usage=accumulated_usage,
-                        task_type=task_type,
-                        active_use_local=active_use_local,
-                        active_context_mode=active_context_mode,
-                        drive_root=drive_root, emit_progress=emit_progress,
-                    )
+                    llm=llm, messages=messages, tools=tools, context_fit_plan=context_fit_plan,
+                    active_model=active_model, tool_schemas=tool_schemas,
+                    active_effort=active_effort, max_retries=max_retries,
+                    drive_logs=drive_logs, task_id=task_id, round_idx=round_idx,
+                    event_queue=event_queue, accumulated_usage=accumulated_usage, task_type=task_type,
+                    active_use_local=active_use_local, active_context_mode=active_context_mode,
+                    drive_root=drive_root, emit_progress=emit_progress)
                 try:
                     msg, cost, active_context_mode = _call_round_model(model_call)
                 except ModelWaitInterrupted as error:
@@ -657,13 +662,8 @@ def run_llm_loop(
                 drive_logs=drive_logs, task_id=task_id, model=active_model, emit_progress=emit_progress)
             if msg is None and _fallback_chain_allowed(ctx, last_error_kind, transport_wait, accumulated_usage):
                 _episode_before_chain = transport_wait is not None
-                (
-                    msg,
-                    active_model,
-                    active_use_local,
-                    context_fit_plan,
-                    active_context_mode,
-                ) = _run_cross_model_fallback_chain(
+                (msg, active_model, active_use_local,
+                 context_fit_plan, active_context_mode) = _run_cross_model_fallback_chain(
                     llm=llm, ctx=ctx, tools=tools, messages=messages, active_model=active_model,
                     active_use_local=active_use_local, tool_schemas=tool_schemas, active_effort=active_effort,
                     max_retries=max_retries, drive_logs=drive_logs, task_id=task_id, round_idx=round_idx,
@@ -720,10 +720,10 @@ def run_llm_loop(
 
             if getattr(tools._ctx, "_skill_finalization_injected", False):
                 tools._ctx._skill_finalization_injected = False
-            assistant_msg = dict(msg)
-            assistant_msg.setdefault("role", "assistant")
+            assistant_msg = dict(msg, role=msg.get("role", "assistant"))
             messages.append(assistant_msg)
             _emit_round_progress(content, msg, emit_progress, llm_trace)
+            limit_ctx.budget_tail = "tool"
             handle_tool_calls(
                 tool_calls, tools, drive_logs, task_id, stateful_executor,
                 messages, llm_trace, emit_progress
@@ -736,11 +736,13 @@ def run_llm_loop(
             pending_tool_budget, pending_tool_calls = True, tool_calls
     except BudgetExceeded as exc:
         _delegate_hold_close(tools, drive_logs=drive_logs, task_id=task_id, detail="budget")
-        return _handle_budget_exceeded(
-            exc, exit_ctx, limit_ctx=limit_ctx, episode=transport_wait)
+        try:
+            return _handle_budget_exceeded(exc, exit_ctx, limit_ctx=limit_ctx, episode=transport_wait)
+        except ModelWaitInterrupted as interrupted:  # a refused-dispatch HOLD ended by control: the sibling clause below never sees it
+            return _loop_exit_after_exception(interrupted, limit_ctx, exit_ctx, llm_trace, transport_wait)
     except Exception as exc:
-        exit_ctx.attach_exception_evidence(exc)
-        raise
+        # A budget-pause HOLD ended by control rejoins the model-wait rails; else re-raise with evidence.
+        return _loop_exit_after_exception(exc, limit_ctx, exit_ctx, llm_trace, transport_wait)
     finally:
         _delegate_hold_close(tools, drive_logs=drive_logs, task_id=task_id, detail="loop_exit")
         _cleanup_loop_resources(stateful_executor, exit_ctx)
@@ -829,6 +831,7 @@ from ouroboros.loop_round_limits import (  # noqa: E402, F401 -- intentional pub
     _handle_owner_stop_finalization,
     _handle_provider_unavailable,
     _handle_model_wait_control,
+    _loop_exit_after_exception,
     _maybe_deadline_local_finalize,
     _maybe_early_finalize,
     _finalize_limit_ctx,

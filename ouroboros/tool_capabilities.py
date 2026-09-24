@@ -41,6 +41,11 @@ CORE_TOOL_NAMES: frozenset[str] = frozenset({
     # D#7 soft-join child controls (siblings of steer_task): inspect/decide a child's fate
     # before finalizing (peek = pure read, discard = explicit abandon, cancel = real stop).
     "cancel_task", "peek_task", "discard_child_result", "override_delegation_constraint",
+    # The same family (#1196, owner Q9): a resumed parent selects each of its OWN
+    # budget-paused children explicitly. It belongs in the round-one envelope for
+    # the reason cancel_task does — a task that just came back from a pause must
+    # not need an enable_tools detour to continue the children it still needs.
+    "resume_child_task",
     # Task-tree coordination must be in the round-one envelope so a parent can publish the
     # shared frame BEFORE fanning out interdependent children (no enable_tools detour).
     "tree_note", "tree_read",
@@ -87,6 +92,10 @@ LOCAL_READONLY_SUBAGENT_TOOL_NAMES: frozenset[str] = frozenset({
     "await_messages",
     "escalate",
     "forward_to_worker", "peek_task", "cancel_task", "discard_child_result",
+    # A recursive parent selects its OWN budget-paused children (#1196, Q9); the
+    # supervisor checks lineage and the root's live grant, so no authority the
+    # child lacks is widened — the same reasoning as cancel_task above.
+    "resume_child_task",
     "schedule_subagent",
     # Reading the schedule table is research: a child asked about what this mind
     # has standing can see it. The tool's own authority check refuses every
@@ -133,6 +142,7 @@ ACTING_SUBAGENT_TOOL_NAMES: frozenset[str] = frozenset({
     "await_messages",
     "escalate",
     "forward_to_worker", "peek_task", "cancel_task", "discard_child_result",
+    "resume_child_task",
     "verify_and_record",
     "knowledge_read", "knowledge_list",
     "tree_note", "tree_read", "override_delegation_constraint",
@@ -320,7 +330,7 @@ OBSERVE_WORLD_MUTATION_TOOLS: frozenset[str] = frozenset({
     # starting or steering work (steer_task stays: the nanny of a running campaign)
     "promote_chat_to_task", "schedule_subagent", "schedule_followup", "plan_task",
     "route_to_project", "ensure_project_scope", "delegate_start", "initiate_presence",
-    "cancel_task", "override_delegation_constraint", "request_deep_self_review",
+    "cancel_task", "resume_child_task", "override_delegation_constraint", "request_deep_self_review",
     # writing files, running processes, integrating patches
     "write_file", "edit_text", "apply_patch", "edit_batch",
     "run_command", "run_script", "start_service", "stop_service", "verify_and_record",

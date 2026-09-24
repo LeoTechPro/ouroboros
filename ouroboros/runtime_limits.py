@@ -17,6 +17,7 @@ from ouroboros.settings_defaults import (
     SUPERVISOR_LIVENESS_DEADLINE_DEFAULT_SEC,
 )
 from ouroboros.settings_integrity import runtime_setting
+from ouroboros.settings_scales import optional_bound_value
 
 # Local model-operation status polling; not a provider deadline or quota timer.
 CLAUDEXOR_MODEL_POLL_INTERVAL_SEC = 0.25
@@ -106,11 +107,42 @@ def get_task_idle_timeout_sec() -> int:
     return _clamped_number_setting("OUROBOROS_TASK_IDLE_TIMEOUT_SEC", low=60, cast=int)
 
 
-def get_task_abs_ceiling_sec() -> int:
-    """Absolute wall-clock backstop per task, independent of activity — the only hard
-    time axis (budget/cost is the other, separate hard axis). A productively-waiting
-    orchestrator survives to this ceiling instead of a flat 1800s wall-clock kill."""
-    return _clamped_number_setting("OUROBOROS_TASK_ABS_CEILING_SEC", low=300, cast=int)
+def _optional_bound_setting(key: str, *, low: int) -> Optional[int]:
+    """Env-or-default optional bound (``settings_scales.optional_bound_value``): ``None`` = no
+    bound, else at least ``low``. An absent variable is the shipped default; an explicitly empty
+    or malformed one is a typo and takes the finite legacy fallback, never "no bound"."""
+    raw = runtime_setting(key)
+    value = optional_bound_value(key, SETTINGS_DEFAULTS[key] if raw is None else raw)
+    return None if value is None else max(low, value)
+
+
+def get_max_rounds() -> Optional[int]:
+    """The total round limit of one task loop; ``None`` = no limit (the shipped default).
+    Presence turns add their own finite inline cap (``loop._resolve_loop_max_rounds``)."""
+    return _optional_bound_setting("OUROBOROS_MAX_ROUNDS", low=1)
+
+
+def get_task_abs_ceiling_sec() -> Optional[int]:
+    """Absolute wall-clock backstop per task, independent of activity; ``None`` = no lifetime
+    bound (the shipped default). Budget/cost and an explicit deadline stay separate hard axes,
+    and a productively-waiting orchestrator is never killed by a flat wall-clock timer. A set
+    value is floored at 300 s so a typo cannot end every task at birth."""
+    return _optional_bound_setting("OUROBOROS_TASK_ABS_CEILING_SEC", low=300)
+
+
+# The finite window ONE physical operation that inherits the task lifetime keeps when the task
+# has none: a delegated agent-session run, a retrieving review session, a VLM child, the
+# plan/preflight tool envelopes, an active-operation idle lease. It is the former shipped task
+# ceiling, so an unlimited task never turns a wedged operation into an unbounded one and never
+# shrinks those operations to a transport bound; a finite lifetime and every deadline still
+# narrow it. Structural, not a settings key.
+OPERATION_WINDOW_FALLBACK_SEC = 21600
+
+
+def operation_window_sec(task_lifetime_sec: Optional[float]) -> float:
+    """The outer window of an operation bounded by the task lifetime: that lifetime when it
+    is finite (``get_task_abs_ceiling_sec()``), else ``OPERATION_WINDOW_FALLBACK_SEC``."""
+    return float(OPERATION_WINDOW_FALLBACK_SEC if task_lifetime_sec is None else task_lifetime_sec)
 
 
 def get_per_call_timeout_ceiling_sec() -> int:

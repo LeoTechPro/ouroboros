@@ -1021,8 +1021,33 @@ def _owner_content_projection(content: Any) -> str:
             raw = block.get("image_url") or block.get("source") or ""
             digest = hashlib.sha256(str(raw).encode("utf-8")).hexdigest()[:16]
             caption = str(block.get("_caption") or block.get("caption") or "").strip()
-            parts.append(f"[owner image ref sha256:{digest}{'; caption=' + caption if caption else ''}]")
+            parts.append(f"[image ref sha256:{digest}{'; caption=' + caption if caption else ''}]")
     return "\n".join(parts)
+
+
+def _accept_run_origin(ctx: Any, drive_root: Any, task_id: str) -> Dict[str, Any]:
+    """The same host-recorded provenance the post-task synthesis reads, from the
+    same record: the persisted task carries ``source``, ``delegation_role`` and the
+    parent as top-level fields; the live metadata (which the loop builds from the
+    record's metadata plus the door's stamp) is laid over the record's own. A
+    missing or unreadable record leaves the metadata-derived facts in place."""
+    from ouroboros.dialogue_provenance import run_origin
+    from ouroboros.task_results import load_task_result
+
+    meta = getattr(ctx, "task_metadata", {})
+    meta = meta if isinstance(meta, dict) else {}
+    record: Dict[str, Any] = {}
+    if drive_root and task_id:
+        try:
+            record = load_task_result(drive_root, task_id) or {}
+        except Exception:
+            log.debug("run_origin: task record unreadable for %s", task_id, exc_info=True)
+    stored = record.get("metadata") if isinstance(record.get("metadata"), dict) else {}
+    return run_origin({
+        **record,
+        "type": getattr(ctx, "current_task_type", None) or record.get("type"),
+        "metadata": {**stored, **meta},
+    })
 
 
 def _accept_owner_directives(ctx: Any, drive_root: Any, task_id: str) -> List[Dict[str, str]]:
@@ -1059,9 +1084,12 @@ def _accept_owner_directives(ctx: Any, drive_root: Any, task_id: str) -> List[Di
                 )
 
     messages = getattr(ctx, "messages", None)
-    # The task-local collector is canonical when present; transcript parsing is
-    # only a compatibility fallback, avoiding two physical copies of each turn.
-    if not rows and isinstance(messages, list):
+    # The task-local collector is canonical when PRESENT, even when its rows project
+    # to nothing; transcript parsing is only a compatibility fallback for a context
+    # that never recorded one, avoiding two physical copies of each turn. The
+    # fallback labels state what they are — a transcript position, or a host
+    # marker found in the text — never owner authority.
+    if not isinstance(recorded, list) and isinstance(messages, list):
         first_user = True
         for index, message in enumerate(messages):
             if not isinstance(message, dict) or str(message.get("role") or "") != "user":
@@ -1069,10 +1097,10 @@ def _accept_owner_directives(ctx: Any, drive_root: Any, task_id: str) -> List[Di
             content = message.get("content")
             rendered = _owner_content_projection(content)
             if first_user:
-                add("initial_user_transcript", content, f"transcript:{index}")
+                add("initial_text_transcript", content, f"transcript:{index}")
                 first_user = False
             elif "[Message from my human]:" in rendered:
-                add("owner_transcript", content, f"transcript:{index}")
+                add("transcript_marked_owner", content, f"transcript:{index}")
 
     if drive_root is not None and task_id:
         try:

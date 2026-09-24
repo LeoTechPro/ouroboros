@@ -452,6 +452,7 @@ def _build_task(
         "profile_fingerprint": admission.profile_fingerprint,
         "instructions": admission.instructions,
         "context_topics": list(admission.context_topics),
+        "observed_text": str(event.text or ""),
         "delivery_reporting_version": event.delivery_reporting_version,
         "event": {
             "source_event_id": event.source_event_id,

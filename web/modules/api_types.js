@@ -93,7 +93,7 @@
  * @property {string} project_id
  * @property {string} client_message_id  // empty for managed queue rows
  * @property {string} kind  // direct_chat | managed_task — presentational label; membership in this census, not kind, decides liveness
- * @property {string} phase  // managed rows: queued | budget_paused | working | finalizing; direct rows: thinking, or unknown when the live wait owner could not be read
+ * @property {string} phase  // managed rows: queued | budget_pausing | budget_paused | working | finalizing; direct rows: thinking or unknown; budget-paused direct turns retain their ID/kind and use the managed phases after parking
  * @property {number} started_at
  */
 

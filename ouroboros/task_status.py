@@ -24,7 +24,11 @@ from ouroboros.outcomes import (
     infra_failed_axes,
     normalize_outcome_axes,
 )
-from ouroboros.post_task_checkpoint import project_replica_task_result_fields
+from ouroboros.budget_pause import LIVE_PAUSE_STATES
+from ouroboros.post_task_checkpoint import (
+    _TERMINAL_ACCOUNTING_SCRUB_FIELDS,
+    project_replica_task_result_fields,
+)
 from ouroboros.task_results import (
     STATUS_CANCEL_REQUESTED,
     STATUS_CANCELLED,
@@ -556,12 +560,36 @@ def _parent_workspace_artifact_lifecycle_fields(result: Dict[str, Any]) -> froze
     return frozenset()
 
 
-def _merge_queue_status(current_status: str, queue_status: str) -> str:
+# A canonical row carrying a LIVE exact budget pause (#1196) owns its lifecycle
+# and accounting planes: the forked child-drive replica is the worker's
+# pre-pause ``running`` row, so it must neither resurrect ``running`` nor blank
+# the ledger-derived cost fields the park wrote onto the canonical row.
+_LIVE_PAUSE_CANONICAL_FIELDS = frozenset({
+    "status", "reason_code", "resource_limit", "result", "error", "ts", "outcome_axes",
+    "budget_pause", *_TERMINAL_ACCOUNTING_SCRUB_FIELDS,
+})
+
+
+def _budget_pause_marker(queue_task: Any) -> bool:
+    """A TYPED budget-pause marker on a PENDING row: exact (``exact_continuation``
+    is a bool, True for an exact mid-run pause, False for a pre-dispatch hold).
+    ``{}`` or a malformed dict is no marker, so it cannot defeat the ordinary
+    requeue race where the running mirror wins."""
+    pause = queue_task.get("_budget_pause") if isinstance(queue_task, dict) else None
+    return isinstance(pause, dict) and isinstance(pause.get("exact_continuation"), bool)
+
+
+def _merge_queue_status(
+    current_status: str, queue_status: str, queue_task: Optional[Dict[str, Any]] = None,
+) -> str:
     current = str(current_status or "").lower()
     queued = str(queue_status or "").lower()
     if not queued or current in FINAL_STATUSES:
         return current
-    if current == STATUS_RUNNING and queued == STATUS_SCHEDULED:
+    if current == STATUS_RUNNING and queued == STATUS_SCHEDULED and not _budget_pause_marker(queue_task):
+        # A PENDING row parked under a budget-pause marker is not running,
+        # whatever a stale mirror says (#1196); an ordinary PENDING row beside a
+        # ``running`` mirror is the requeue race the running mirror wins.
         return current
     return queued
 
@@ -833,6 +861,13 @@ def effective_task_result(
             else set()
         )
         parent_authoritative_fields = parent_authoritative_fields | _parent_workspace_artifact_lifecycle_fields(result)
+        canonical_pause = result.get("budget_pause") if isinstance(result.get("budget_pause"), dict) else {}
+        # Only a STALE nonterminal replica (the worker's pre-pause ``running``
+        # row) yields to the live pause; a replica that already reached a
+        # terminal status is the child's real outcome and is never suppressed
+        # by a canonical pause the copyback has not yet cleared.
+        if str(canonical_pause.get("state") or "") in LIVE_PAUSE_STATES and child_status not in FINAL_STATUSES:
+            parent_authoritative_fields = parent_authoritative_fields | _LIVE_PAUSE_CANONICAL_FIELDS
         child_overlay = project_replica_task_result_fields(result, child_result)
         for key, value in child_overlay.items():
             if key in {"task_id", "parent_task_id", "root_task_id", "session_id", "actor_id", "delegation_role"}:
@@ -856,7 +891,7 @@ def effective_task_result(
         queue_snapshot = _load_queue_snapshot(pathlib.Path(drive_root))
         queue_status, queue_task = _queue_task_status(queue_snapshot, task_id)
         if queue_status and queue_status != "unknown":
-            merged["status"] = _merge_queue_status(parent_status, queue_status)
+            merged["status"] = _merge_queue_status(parent_status, queue_status, queue_task)
             for key in (
                 "parent_task_id",
                 "root_task_id",
@@ -1217,7 +1252,7 @@ def find_child_tasks(
                     for key, value in row.items():
                         if key == "status":
                             combined["status"] = _merge_queue_status(
-                                str(disk.get("status") or ""), str(value or "")
+                                str(disk.get("status") or ""), str(value or ""), row,
                             )
                         elif not combined.get(key) and value:
                             combined[key] = value
@@ -1228,7 +1263,7 @@ def find_child_tasks(
             combined = dict(existing)
             for key, value in row.items():
                 if key == "status":
-                    combined["status"] = _merge_queue_status(str(existing.get("status") or ""), str(value or ""))
+                    combined["status"] = _merge_queue_status(str(existing.get("status") or ""), str(value or ""), row)
                 elif not combined.get(key) and value:
                     combined[key] = value
             rows[tid] = combined

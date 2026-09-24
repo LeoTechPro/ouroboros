@@ -215,26 +215,26 @@ ISSUER_TASK = "task"
 def _routing_issuer(ctx: ToolContext) -> Dict[str, Any]:
     """WHO speaks through this routing act -- minted by value where the host knows.
 
-    An OWNER TURN has direct owner ingress or a host-stamped ``client_message_id``.
-    Every other context speaks as a TASK, including a pooled root relaying an
-    owner message it just drained. ``last_owner_delivery`` keys the receipt,
-    never the issuer. The 14.09 incident decided this five times from proxies (a routing
-    contract a Swarm root never has, an empty client id read as "agent-issued",
-    a room veto keyed on the chat): the host now states it once, and the model
-    has no argument to claim otherwise.
+    An OWNER TURN is the direct turn the owner door stamped: ``is_direct_chat`` AND
+    ``run_origin``'s ``owner_ingress`` (``origin_message_ref`` / ``origin_suppressed``,
+    written only by owner routing). Every other context speaks as a TASK, including
+    a pooled root relaying an owner message it just drained. ``last_owner_delivery``
+    keys the receipt, never the issuer. The 14.09 incident decided this five times
+    from proxies (a routing contract a Swarm root never has, an empty client id read
+    as "agent-issued", a room veto keyed on the chat): the host now states it once,
+    and the model has no argument to claim otherwise.
 
-    A consciousness wake-up runs on the direct lane too, but nobody typed it: its
-    ``is_direct_chat`` fact does NOT make it an owner turn (PLAN 5.2a) — it
-    speaks as a task. An actual owner-ingress stamp still identifies an owner turn.
+    Neither the lane nor a client id makes an owner turn: a consciousness wake-up,
+    a Presence event (which carries the provider's event id as its client id) and
+    the auto-resume template all run on the direct lane, and nobody typed them; a
+    promoted root inherits the owner's stamp as ancestry but is not a direct turn.
+    All of them speak as a task.
     """
     metadata = getattr(ctx, "task_metadata", None)
     metadata = metadata if isinstance(metadata, dict) else {}
-    from ouroboros.consciousness_authority import is_consciousness_origin
+    from ouroboros.dialogue_provenance import run_origin
 
-    if (
-        (bool(getattr(ctx, "is_direct_chat", False)) and not is_consciousness_origin(metadata))
-        or str(metadata.get("client_message_id") or "").strip()
-    ):
+    if bool(getattr(ctx, "is_direct_chat", False)) and run_origin({"metadata": metadata})["owner_ingress"]:
         return {"kind": ISSUER_OWNER_TURN}
     task_id = str(getattr(ctx, "task_id", "") or "").strip()
     return {

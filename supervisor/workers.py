@@ -1170,6 +1170,7 @@ def kill_workers(
 ) -> bool:
     global _WORKER_POOL_DISABLED_REASON
     from supervisor import queue
+    from supervisor.queue_snapshot import _exact_pause_row
     with _queue_lock:
         if disable_reason:
             _WORKER_POOL_DISABLED_REASON = str(disable_reason)
@@ -1207,6 +1208,12 @@ def kill_workers(
         orphaned_ids = []
         drained_ids = []
         terminalization_retry_ids = []
+        # #1196: an exact mid-run budget pause survives the physical epoch. Its
+        # PENDING carrier and its durable ``paused`` row are left exactly as they
+        # are — never cancelled here, never ``pending_parent_interrupted`` — so the
+        # next boot's ``restore_pending_from_snapshot`` re-validates the durable
+        # authority and parks the same task id again (or holds it, typed).
+        retained_paused_ids = []
         cleanup_ok = True
         try:
             done_status = terminal_status or "failed"
@@ -1350,6 +1357,10 @@ def kill_workers(
                     if str(task.get("id") or "") in preserve_running:
                         kept.append(task)
                         continue
+                    if _exact_pause_row(task):
+                        retained_paused_ids.append(str(task.get("id") or ""))
+                        kept.append(task)
+                        continue
                     parent_id = str(task.get("parent_task_id") or "")
                     root_id = str(task.get("root_task_id") or "")
                     if parent_id and (parent_id in running_task_ids or root_id in interrupted_roots):
@@ -1384,6 +1395,10 @@ def kill_workers(
                         else:
                             PENDING.append(task)
                         continue
+                    if _exact_pause_row(task):
+                        retained_paused_ids.append(tid)
+                        PENDING.append(task)
+                        continue
                     if _settle_killed_pending(
                         task,
                         reason=result_reason,
@@ -1401,7 +1416,7 @@ def kill_workers(
                             status=done_status,
                             trigger="pending_pool_kill",
                         ))
-            if orphaned_ids or drained_ids or terminalization_retry_ids:
+            if orphaned_ids or drained_ids or terminalization_retry_ids or retained_paused_ids:
                 append_jsonl(
                     DRIVE_ROOT / "logs" / "supervisor.jsonl",
                     {
@@ -1410,6 +1425,7 @@ def kill_workers(
                         "orphaned_running": orphaned_ids,
                         "drained_pending": drained_ids,
                         "terminalization_retry": terminalization_retry_ids,
+                        **({"retained_budget_paused": retained_paused_ids} if retained_paused_ids else {}),
                     },
                 )
         except Exception:

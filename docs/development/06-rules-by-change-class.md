@@ -823,8 +823,8 @@ and what enforces each.
 - Timeout classes are separate axes. A transport timeout
   (`OUROBOROS_LLM_TRANSPORT_READ_TIMEOUT_SEC`) bounds only a dead socket — never a
   reasoning cutoff or evidence of a stall. API review uses it as a settlement fallback
-  (that request ends there); a delegated agent session inherits the task absolute
-  ceiling (the paid run can outlive an HTTP read); the owner deadline narrows either;
+  (that request ends there); a delegated agent session inherits the task operation
+  window (the paid run can outlive an HTTP read); the owner deadline narrows either;
   provider transport defaults (Anthropic, VLM captioning) are ceilings, not promises.
   Default reviewer slots deliberately have no short cognition cap; the outer `plan_task` envelope
   covers the session lifetime; `web_search` sizes its envelope for the complete
@@ -966,8 +966,8 @@ and what enforces each.
   generation. File/diff requests impose no commit-or-revert rule; self-modification
   keeps reviewed commits (BIBLE P0/P3).
 - Before cleanup, freeze `review_evidence.task_inputs` and `completion_observations`
-  for summary/reflection (ARCHITECTURE §6 "Post-task reflection"): whole owner Q/A,
-  peer provenance and canonical split-root verification receipts. Zero exit is positive;
+  for summary/reflection (ARCHITECTURE §6 "Post-task reflection"): run origin, whole
+  owner Q/A, peer provenance and canonical split-root verification receipts. Zero exit is positive;
   absent is unknown; unrelated passes erase no failure. Send content, not pointers;
   recover the same snapshot. Count delivery via `OWNER_DELIVERY_TOOL_NAMES`, never
   global skill state. Summary uses `chat_observed` custody and the task-scoped,

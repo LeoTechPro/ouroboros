@@ -126,6 +126,12 @@ TOOL_POLICY: Dict[str, str] = {
     # carries no authority the task lacks (same reasoning as the verbs above).
     "delegate_answer": POLICY_SKIP,
     "cancel_task": POLICY_SKIP,
+    # The other half of the same nanny authority (#1196, owner Q9): selecting ONE
+    # of this task's OWN budget-paused descendants to continue under its same id.
+    # The tool only REQUESTS; the supervisor re-checks lineage, the root's live
+    # owner Resume grant, money, Stop/cancel, deadline and lifetime through the
+    # seam the owner's own Resume uses, so it adds no reach the task lacks.
+    "resume_child_task": POLICY_SKIP,
     # Parent's explicit decision to abandon a child result: stamps parent_decision +
     # records the reason on the tree ledger; tree-scoped, no external effect (like cancel_task).
     "discard_child_result": POLICY_SKIP,

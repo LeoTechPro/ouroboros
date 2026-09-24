@@ -31,7 +31,9 @@ CHAPTER_BYTE_BUDGETS: dict[str, int] = {
     # and what each owns; none displaces older text.
     # +200 (issue #1241): the subagent_worktrees module-map row states the lock scope
     # (measured 165470 on the merged chapter).
-    "docs/architecture/01-high-level-architecture.md": 165500,
+    # 165500 -> 165550: the long-work continuity merge landed the chapter at 165507 (over by
+    # 7 bytes on the official line); re-based here, no text of this chapter was touched.
+    "docs/architecture/01-high-level-architecture.md": 165550,
     # 15517 -> 16200 (#1195): the session-custodied startup historical audit is a
     # new node of the startup flow (readiness no longer waits for the historical
     # seal diagnostic); the chapter had no older description of that pass to replace.
@@ -133,7 +135,15 @@ CHAPTER_BYTE_BUDGETS: dict[str, int] = {
     # 306800 -> 307100 (#1247 fix-forward; measured 306832 on the merged chapter): the
     # populate sentence names the post-copy stat re-record that keeps a CRLF-converting
     # checkout clean.
-    "docs/architecture/06-agent-core.md": 307100,
+    # 307100 -> 307800 (#1196, measured 307709): the exact budget pause / Resume owner
+    # table, the finite leaf continuation admission and the strict money read are the
+    # rationale layer of a new lifecycle; the Budget tracking prose they extend was
+    # compressed in the same diff rather than appended to.
+    # 307800 -> 308900: the official line landed the chapter over its own budget (308475
+    # after the long-work continuity merge, 308678 after the Claudexor 3.14.0 pin, #1264);
+    # the run-origin sentences replace the "request decides what the run was for" and the
+    # owner-turn descriptions (+144 on the merged base) rather than appending to them.
+    "docs/architecture/06-agent-core.md": 308900,
     "docs/architecture/07-configuration.md": 36991,
     # 18947 -> 19287: CI failure collection now documents diagnostic desktop builds while release remains gated.
     # 19287 -> 20560 (#1215): three contracts the chapter had no older text for — the
@@ -187,7 +197,9 @@ CHAPTER_BYTE_BUDGETS: dict[str, int] = {
     # +300 (2026-09-22): two new house precedents (custody row memo, bounded
     # filtered tail reader) join the projection-over-replay list; the base sat
     # 15 bytes under the previous budget.
-    "docs/development/03-module-size-and-complexity.md": 23400,
+    # 23400 -> 23500: the long-work continuity merge landed the chapter at 23471 on the
+    # official line; re-based here, no text of this chapter was touched.
+    "docs/development/03-module-size-and-complexity.md": 23500,
     "docs/development/04-core-governance-artifacts.md": 16431,
     "docs/development/05-review-and-commit-protocol.md": 12956,
     # 94197 -> 94520: the usage-ledger lock rule gains its reader contract (a display read

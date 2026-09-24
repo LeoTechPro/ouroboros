@@ -71,6 +71,9 @@ EVENT_DISPOSITIONS: Dict[str, EventDisposition] = {
         "supervisor.events_worker_reports", "ouroboros/agent.py"),
     "budget_pause": _handled(
         "supervisor.events_budget", "ouroboros/agent.py"),
+    "budget_resume_child": _handled(
+        # #1196 (owner Q9): the resumed root's model selects one paused child.
+        "supervisor.events_budget", "ouroboros/tools/join_ledger.py"),
     "budget_root_fence": _handled(
         # v7 L-B split: the loop's fence emitter lives in the budget leaf.
         "supervisor.events_budget", "ouroboros/agent.py", "ouroboros/loop_budget.py"),

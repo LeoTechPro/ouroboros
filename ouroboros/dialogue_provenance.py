@@ -64,6 +64,52 @@ def presence_provenance_fields(task: Mapping[str, Any]) -> dict[str, Any]:
     return {"presence_provenance": value} if value else {}
 
 
+_RUN_ORIGIN_PRESENCE_KEYS = ("provider", "account_id", "conversation_id", "thread_id", "source_event_id", "actor_id")
+
+
+def run_origin(record: Mapping[str, Any] | None) -> dict[str, Any]:
+    """The host-recorded provenance of one run, read from typed fields only.
+
+    ``owner_ingress`` is the one authority fact: True iff the owner door stamped the
+    run — ``metadata.origin_message_ref`` or ``origin_suppressed``, which only owner
+    routing writes and a promoted root inherits by value. It is never derived from
+    the execution lane, a client id, a caller-declared channel or the text. Every
+    other key is the raw typed marker as its producer recorded it, with no
+    vocabulary of its own, so a transport this projection has never heard of shows
+    its marker instead of a guess and an absent marker stays absent. ``text_author``
+    names the correspondent only for a Presence turn itself (the transport's display
+    name or username; the platform id rides in ``presence.actor_id``); a follow-up or
+    promoted root that inherits ``metadata.presence`` carries the room, not an author,
+    because a model wrote its text. Booleans are always written, empty values never.
+    """
+    source = _mapping(record)
+    metadata = _mapping(source.get("metadata"))
+    # The door's ref rides a persisted record at top level (the promote handler
+    # writes it there; the loop copies it into the live metadata) and the live
+    # context in metadata: one reader accepts both shapes.
+    ref = metadata.get("origin_message_ref") or source.get("origin_message_ref")
+    origin: dict[str, Any] = {
+        "task_type": _text(source.get("type")),
+        "owner_ingress": bool(metadata.get("origin_suppressed") or (isinstance(ref, Mapping) and ref)),
+        "source": _text(source.get("source") or metadata.get("source")),
+    }
+    for key in ("initiator", "origin_task_id", "schedule_id", "objective_author"):
+        origin[key] = metadata.get(key)
+    for key in ("delegation_role", "parent_task_id"):
+        origin[key] = source.get(key) or metadata.get(key)
+    presence = presence_provenance_from_task(source)
+    if presence:
+        origin["presence"] = {key: presence[key] for key in _RUN_ORIGIN_PRESENCE_KEYS if presence.get(key)}
+    if origin["task_type"] == "presence":
+        actor = _mapping(_mapping(_mapping(metadata.get("presence")).get("event")).get("actor"))
+        origin["text_author"] = _text(actor.get("display_name") or actor.get("username"))
+        origin["actor_kind"] = _text(actor.get("kind"))
+    return {
+        key: value for key, value in origin.items()
+        if isinstance(value, bool) or value not in (None, "", {}, [])
+    }
+
+
 def dialogue_speaker(entry: Mapping[str, Any]) -> str:
     transport = entry.get("transport") if isinstance(entry.get("transport"), Mapping) else {}
     actor = transport.get("actor") if isinstance(transport.get("actor"), Mapping) else {}
@@ -248,4 +294,5 @@ __all__ = [
     "is_presence_task",
     "presence_provenance_fields",
     "presence_provenance_from_task",
+    "run_origin",
 ]

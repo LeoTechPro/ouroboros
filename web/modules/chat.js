@@ -3494,7 +3494,7 @@ export function createChatInstance({
             if (modelWaits.waiting(id)) continue;
             if (String(entry?.kind || '') !== 'managed_task') directCount += 1;
             else if (String(entry?.phase || '') === 'queued') managedQueued += 1;
-            else if (String(entry?.phase || '') === 'budget_paused') managedPaused += 1;
+            else if (/^budget_paus(ed|ing)$/.test(entry?.phase ?? '')) managedPaused += 1;
             else managedActive += 1;
         }
         return computeDerivedChatStatus({

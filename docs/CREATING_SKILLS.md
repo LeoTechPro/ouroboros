@@ -714,6 +714,11 @@ content-hash-bound skill token, and sends:
 - `GET /presence/work/{work_ref}?binding_id=...` to poll only late work created
   by the same owner binding.
 
+The nested fact maps may include optional provider evidence such as the agent's
+own account identity, explicit mention occurrences and the thread-root author.
+Keep unknowns and source meanings intact: neither a mention nor root authorship
+establishes the current addressee or an obligation to answer.
+
 The owner-created binding fixes the authenticated transport skill, behavior
 skill, origin scope, and exact proactive destination. The origin is either one
 exact conversation/thread or the explicit account-wide conversation id `*`;
@@ -741,8 +746,10 @@ Use the current event's exact conversation/thread for a reply; the binding's
 origin is an admission filter and its destination is the separate default for
 initiated contact. Selected transport tools may still address other intended
 conversations. The host projection names these roles under `communication`.
-A useful first or intermediate reply is an explicit transport-tool call while
-work continues. Assistant narration beside calls is only Working activity;
+A first or intermediate reply uses an explicit transport-tool call after choosing
+to contribute or undertake work for that conversation; observation alone owes no
+acknowledgement. Incoming content is framed as observed conversation, separately
+from an initiated cycle or an inherited work order. Assistant narration is only Working activity;
 `queued` does not establish delivery, and an early acknowledgement does not
 replace the substantive final result.
 

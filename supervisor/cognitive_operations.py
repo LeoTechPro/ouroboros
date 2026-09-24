@@ -93,11 +93,16 @@ def _handle_cognitive_operation(evt: Dict[str, Any], ctx: Any) -> None:
         requested_until = float(evt.get("lease_until") or 0.0)
     except (TypeError, ValueError):
         requested_until = 0.0
-    from ouroboros.config import get_task_abs_ceiling_sec
+    from ouroboros.config import OPERATION_WINDOW_FALLBACK_SEC, get_task_abs_ceiling_sec
     from ouroboros.deadline_utils import parse_deadline_ts
 
     started_at = float(meta.get("started_at") or now)
-    hard_until = started_at + float(get_task_abs_ceiling_sec())
+    ceiling = get_task_abs_ceiling_sec()
+    # A finite task lifetime bounds the lease from task start; without one the operation's
+    # own finite window bounds it from this start fact, so a lost terminal never spares the
+    # idle rail forever.
+    hard_until = (started_at + float(ceiling) if ceiling is not None
+                  else now + float(OPERATION_WINDOW_FALLBACK_SEC))
     task = meta.get("task") if isinstance(meta.get("task"), dict) else {}
     metadata = task.get("metadata") if isinstance(task.get("metadata"), dict) else {}
     deadline = parse_deadline_ts(task.get("deadline_at") or metadata.get("deadline_at"))

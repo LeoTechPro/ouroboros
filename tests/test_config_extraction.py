@@ -69,6 +69,19 @@ _ADDED_OWNERS = {
     # The pooled worker's short acceptance-fence ack wait (one wait, one re-send, then a typed unknown).
     "ACCEPTANCE_FENCE_ACK_WAIT_SEC": runtime_limits,
     "get_acceptance_fence_ack_wait_sec": runtime_limits,
+    # #1196 optional bounds: the shared positive-or-unlimited vocabulary (also the review-cycle
+    # cap's), the legacy finite values of documents that predate it, and their readers.
+    "UNLIMITED": settings_scales,
+    "UNLIMITED_ALIASES": settings_scales,
+    "parse_positive_or_unlimited": settings_scales,
+    "OPTIONAL_BOUND_LEGACY": settings_scales,
+    "_WARNED_OPTIONAL_BOUNDS": settings_scales,
+    "optional_bound_value": settings_scales,
+    "defaults_for_settings_document": settings_scales,
+    "_optional_bound_setting": runtime_limits,
+    "get_max_rounds": runtime_limits,
+    "OPERATION_WINDOW_FALLBACK_SEC": runtime_limits,
+    "operation_window_sec": runtime_limits,
 }
 
 _MOVED_OWNERS = {

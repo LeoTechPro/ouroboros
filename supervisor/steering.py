@@ -53,29 +53,6 @@ def _task_issued(evt: Dict[str, Any]) -> bool:
     return str(_issuer(evt).get("kind") or "") == "task"
 
 
-def _record_task_message_routing(
-    ctx: Any, evt: Dict[str, Any], target: str, *, status: str, reason: str = "",
-) -> None:
-    """One typed Logs row per task-authored act: true author, target, outcome (7A).
-
-    The receiving task's own timeline gets ``task_message_injected`` when it
-    drains the row; this row lands in the SENDER's timeline (keyed on its id),
-    so a refusal a target never saw is still visible somewhere."""
-    issuer = _issuer(evt)
-    try:
-        ctx.append_jsonl(ctx.DRIVE_ROOT / "logs" / "events.jsonl", {
-            "ts": utc_now_iso(),
-            "type": "task_message_routed",
-            "task_id": str(issuer.get("task_id") or ""),
-            "target_task_id": target,
-            "status": status,
-            "reason": reason,
-            "routing_token": str(evt.get("routing_token") or ""),
-        })
-    except Exception:
-        log.debug("task_message_routed row failed", exc_info=True)
-
-
 def _refuse_steering_while_cancelling(
     ctx: Any,
     evt: Dict[str, Any],
@@ -150,11 +127,22 @@ def _steer_receipt(
         attachment_manifest=attachment_manifest, publish=not task_issued or bool(owner_message_id),
     )
     if task_issued:
-        _record_task_message_routing(
-            ctx, evt, target,
-            status="written" if status == "delivered" else "refused",
-            reason=reason,
-        )
+        # One typed Logs row per task-authored act: true author, target, outcome
+        # (7A). The receiving task's own timeline gets ``task_message_injected``
+        # when it drains the row; this row lands in the SENDER's timeline (keyed
+        # on its id), so a refusal a target never saw is still visible somewhere.
+        try:
+            ctx.append_jsonl(ctx.DRIVE_ROOT / "logs" / "events.jsonl", {
+                "ts": utc_now_iso(),
+                "type": "task_message_routed",
+                "task_id": str(_issuer(evt).get("task_id") or ""),
+                "target_task_id": target,
+                "status": "written" if status == "delivered" else "refused",
+                "reason": reason,
+                "routing_token": str(evt.get("routing_token") or ""),
+            })
+        except Exception:
+            log.debug("task_message_routed row failed", exc_info=True)
     return receipt
 
 
@@ -249,15 +237,17 @@ def _handle_steer_task(evt: Dict[str, Any], ctx: Any) -> None:
     ):
         return
 
-    # Four different refusals in the same order the boolean used to fold them
+    # Three different refusals in the same order the boolean used to fold them
     # into one. Which one fired is what the owner needs: a task running in its
     # own project room for another half hour is not a task that "may have
     # finished", and a receipt that says only `target_not_steerable` cannot tell
-    # the two apart afterwards either.
+    # the two apart afterwards either. A direct turn is steerable exactly when it
+    # is a live in-process actor OR a queue row — parked under its exact budget
+    # pause, or resumed on a pooled worker under the SAME id (#1196): the owner's
+    # follow-up reaches that actor's mailbox, never a second direct turn. A
+    # direct turn that is neither is simply unknown here.
     if not isinstance(task, dict):
         refusal = "target_unknown"
-    elif not (direct_active or not task.get("_is_direct_chat")):
-        refusal = "direct_chat_turn"
     elif str(task.get("delegation_role") or "") == "subagent":
         refusal = "subagent_target"
     elif not task_issued and not _owner_lane_allows(ctx, task, target, chat_id):

@@ -516,6 +516,10 @@ def promote_chat_to_task(evt: dict, ctx: Any) -> dict:
         task["origin_message_ref"] = dict(evt["source_ref"])
         if isinstance(evt.get("source_text"), str) and evt.get("source_text"):
             task["origin_message_text"] = evt["source_text"]
+    elif evt.get("origin_suppressed") is True:
+        # The door's other stamp (an owner message it never logged) rides the root
+        # in METADATA, where run_origin reads it, the way a ref rides by value.
+        task.setdefault("metadata", {})["origin_suppressed"] = True
     if isinstance(evt.get("predecessor_authority_source"), dict):
         task["predecessor_authority_source"] = dict(evt["predecessor_authority_source"])
     # Owner Surface Fact: the promoting turn's sending-surface fact lands in

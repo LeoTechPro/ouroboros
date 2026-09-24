@@ -310,17 +310,22 @@ def test_routing_issuer_keeps_wake_relays_task_authored_and_explicit_owner_ingre
     wake = types.SimpleNamespace(task_id="wake-1", is_direct_chat=True, last_owner_delivery=None,
                                  task_metadata=dict(_wake_task("act")["metadata"]))
     assert _routing_issuer(wake) == {"kind": ISSUER_TASK, "task_id": "wake-1", "root_task_id": "wake-1"}
+    # An owner turn is the direct turn the owner door stamped; a bare direct context is not one.
     owner = types.SimpleNamespace(task_id="turn-1", is_direct_chat=True, last_owner_delivery=None,
-                                  task_metadata={})
+                                  task_metadata={"origin_message_ref": {"chat_id": 1, "client_message_id": "cm-1"}})
     assert _routing_issuer(owner) == {"kind": ISSUER_OWNER_TURN}
+    bare = types.SimpleNamespace(task_id="turn-2", is_direct_chat=True, last_owner_delivery=None, task_metadata={})
+    assert _routing_issuer(bare) == {"kind": ISSUER_TASK, "task_id": "turn-2", "root_task_id": "turn-2"}
     # Draining real owner dialogue provides receipt identity, never authorship.
     relaying = types.SimpleNamespace(task_id="c-root", is_direct_chat=False,
                                      last_owner_delivery={"client_message_id": "cm-9", "text": "go"},
                                      task_metadata={"initiator": "consciousness"})
     assert _routing_issuer(relaying) == {"kind": ISSUER_TASK, "task_id": "c-root", "root_task_id": "c-root"}
-    stamped = types.SimpleNamespace(task_id="c-root", is_direct_chat=True, last_owner_delivery=None,
-                                    task_metadata={"initiator": "consciousness", "client_message_id": "cm-2"})
-    assert _routing_issuer(stamped) == {"kind": ISSUER_OWNER_TURN}
+    # A client id is not the door's stamp: a wake (or a Presence event, whose client id is the
+    # provider's event id) keeps speaking as a task.
+    client_id_only = types.SimpleNamespace(task_id="c-root", is_direct_chat=True, last_owner_delivery=None,
+                                           task_metadata={"initiator": "consciousness", "client_message_id": "cm-2"})
+    assert _routing_issuer(client_id_only) == {"kind": ISSUER_TASK, "task_id": "c-root", "root_task_id": "c-root"}
 
 
 def test_steer_from_a_wake_is_written_as_an_independent_task_message(tmp_path, monkeypatch):

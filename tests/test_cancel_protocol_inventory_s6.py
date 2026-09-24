@@ -107,6 +107,7 @@ TERMINAL_WRITERS = {
     # current terminal status; it cannot publish a lifecycle transition.
     ('supervisor/events_task_done.py::_refresh_terminal_task_cost', 'current["status"]'): 'dynamic',
     ('supervisor/queue_snapshot.py::restore_pending_from_snapshot', 'STATUS_CANCELLED'): 'terminal',
+    ('supervisor/queue_snapshot.py::_refuse_restore_invalid_fences', 'STATUS_CANCELLED'): 'terminal',
     ('supervisor/task_admission.py::record_scheduled_admission', 'STATUS_FAILED'): 'terminal',
     ('supervisor/task_admission.py::terminalize_invalid_depth_restore', 'STATUS_FAILED'): 'terminal',
     ('supervisor/task_lifecycle.py::_finish_captured_pending', 'STATUS_CANCELLED'): 'terminal',
@@ -146,6 +147,9 @@ NO_DELIVERABLE_LANES = {
         'dropped before assignment; the salvage receipt belongs to custody',
     'supervisor/queue_snapshot.py::restore_pending_from_snapshot':
         'restore-time reconciliation of a task cancelled while the server was down',
+    'supervisor/queue_snapshot.py::_refuse_restore_invalid_fences':
+        'the invalid-acceptance-fence refusal moved out of restore_pending_from_snapshot (#1196): '
+        'ordinary rows keep the pre-existing fail-closed cancel, exact budget pauses are held instead',
     'supervisor/events_task_done.py::_finish_task_done_dispatch':
         'lifecycle fault: the durable row, not a message, is the disclosure',
     'supervisor/events_task_done.py::_resolve_lifecycle_fault':
