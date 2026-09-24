@@ -1282,6 +1282,7 @@ def log_chat(
     message_meta: Optional[Dict[str, Any]] = None,
     drive_root=None,
     require_write: bool = False,
+    ensure_record_boundary: bool = False,
 ) -> Optional[dict]:
     root = drive_root if drive_root is not None else DATA_DIR
     if root:
@@ -1366,7 +1367,10 @@ def log_chat(
             record["quiz"] = dict(quiz)
         if size_bytes is not None:
             record["size_bytes"] = int(size_bytes)
-        written = append_jsonl(root / "logs" / "chat.jsonl", record, require_lock=require_write)
+        written = append_jsonl(
+            root / "logs" / "chat.jsonl", record,
+            require_lock=require_write, ensure_record_boundary=ensure_record_boundary,
+        )
         if require_write:
             if not written:
                 raise RuntimeError("canonical message acceptance could not be persisted")
