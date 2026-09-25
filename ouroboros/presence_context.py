@@ -180,8 +180,8 @@ def presence_finish_not_accepted_note(ctx: Any, completion: Mapping[str, Any]) -
         "finalization asked for the work above first, so it no longer decides what the conversation "
         f"receives. Sends confirmed for this task so far: {sent}. When the work is done, finish again: "
         "tool_delivered or silent when the substantive result already reached the conversation and "
-        "nothing new needs saying, message only for new useful speech. Review, helper and limit "
-        "details are not conversation content."
+        "nothing new needs saying, message only for speech you choose. Internal host notes are "
+        "not sent automatically; you decide whether any of their facts matter to this conversation."
     )
 
 

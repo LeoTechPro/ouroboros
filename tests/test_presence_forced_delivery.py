@@ -1,9 +1,10 @@
 """A Presence forced final keeps its internal record apart from what the conversation receives.
 
-Owner Q4: execution, review and helper diagnostics stay with the owner. The ONE
-forced model call declares its outward delivery beside the record; without a valid
-declaration nothing new is spoken, and a declared useful reply is spoken even when
-the run itself failed. Deterministic fake-model replay; no transport sends anything.
+Owner Q4: host diagnostics are not sent automatically. The model may choose what
+to say, including relevant limitations. The ONE forced model call declares its
+outward delivery beside the internal record; without a valid declaration nothing
+new is spoken, and a declared useful reply is spoken even when the run itself
+failed. Deterministic fake-model replay; no transport sends anything.
 """
 
 from __future__ import annotations
@@ -90,6 +91,8 @@ def _run(root, monkeypatch, forced, *, task=None, presence=True, handoff=None, f
 @pytest.mark.parametrize("forced,outcome,spoken,status", [
     (_forced("message", "Q1 figures are ready; Q2 is still coming."), "message",
      "Q1 figures are ready; Q2 is still coming.", "declared"),
+    (_forced("message", "The review is delayed; Q1 figures are ready."), "message",
+     "The review is delayed; Q1 figures are ready.", "declared"),
     (_forced("silent", ""), "silent", "", "declared"),
     (_forced("tool_delivered", "sent the table via the transport tool"), "tool_delivered", "", "declared"),
     (RECORD, "silent", "", "missing"),  # untyped internal prose is never speech
@@ -99,13 +102,14 @@ def _run(root, monkeypatch, forced, *, task=None, presence=True, handoff=None, f
     (_forced("deferred", "on it"), "silent", "", "invalid"),  # nothing was scheduled
     (json.dumps({"delivery_control": "replace", "full_answer": RECORD,
                  "presence_finish": {"outcome": "message", "message": "x", "to": "y"}}), "silent", "", "invalid"),
-], ids=["message", "silent", "tool_delivered", "prose", "blank_message", "unknown_outcome", "silent_with_text",
+], ids=["message", "chosen_limitation", "silent", "tool_delivered", "prose", "blank_message", "unknown_outcome", "silent_with_text",
         "unscheduled_deferred", "extra_key"])
 def test_forced_final_speaks_only_what_it_declares(tmp_path, monkeypatch, forced, outcome, spoken, status):
     result, stored, calls, text = _run(tmp_path, monkeypatch, forced)
 
     assert len(calls) == 2  # the one forced call; no repair or polishing round
     assert "[PRESENCE_DELIVERY]" in str(calls[-1][-1]["content"])
+    assert "You decide what, if anything, to say" in str(calls[-1][-1]["content"])
     assert (result["outcome"], result["text"]) == (outcome, spoken)
     assert stored["reason_code"] == "round_limit"
     assert stored["outcome_axes"]["execution"]["status"] != "ok"  # speech is declared, not read off status
@@ -222,6 +226,7 @@ def test_invalidated_finish_is_named_void_with_this_tasks_confirmed_sends(tmp_pa
         return
     assert len(notes) == 1
     assert '"The full answer, sent by tool."' in str(notes[0]["content"])
+    assert "you decide whether any of their facts matter" in str(notes[0]["content"])
 
 
 # --- repair pass: arming identity, duplicate evidence, internal notes --------------

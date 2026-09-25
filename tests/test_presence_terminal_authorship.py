@@ -84,12 +84,11 @@ def test_real_round_limit_delivers_only_the_current_authored_final(tmp_path, mon
 
 
 def test_exact_host_diagnostic_is_deliverable_when_the_model_authors_it(tmp_path, monkeypatch):
-    """Pins a disclosed owner-Q4 limit, not a goal: speech follows terminal authorship.
+    """Owner Q4 keeps host bytes internal by default without forbidding model speech.
 
     Host-authored terminal bytes never speak, and a forced final speaks only its typed
     declaration; an ordinary final is the model's own text in one channel, so a model
-    that restates a diagnostic there is heard. Only its wording could tell the two
-    apart, and this host adds no text filter; the prompt is the boundary there.
+    that chooses to restate a diagnostic there is heard. The host adds no text filter.
     """
     _result, host, _calls, _held = _run_loop(tmp_path / "host", monkeypatch, [_read_response(), {"content": ""}])
     result, authored, calls, _held = _run_loop(tmp_path / "author", monkeypatch, [{"content": host["result"]}])
