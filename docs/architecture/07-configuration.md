@@ -63,6 +63,7 @@ A registry of `config.SETTINGS_DEFAULTS` (exact defaults canonical in `settings_
 | GIGACHAT_BASE_URL | `https://api.giga.chat/v1` | GigaChat base URL |
 | GIGACHAT_VERIFY_SSL_CERTS | `true` | GigaChat TLS verification |
 | GIGACHAT_PROFANITY_CHECK | "" | GigaChat profanity filter passthrough |
+| OUROBOROS_EXTRA_CA_BUNDLE | "" | PEM file whose CA certificates are added to the default trust bundle for every first-party provider call (merged copy under `state/`; empty = defaults only) |
 | ANTHROPIC_API_KEY | "" | Official direct-Anthropic credential |
 | MINIMAX_API_KEY | "" | MiniMax credential |
 | MINIMAX_REGION | "" | MiniMax region (empty resolves `global_en`) |

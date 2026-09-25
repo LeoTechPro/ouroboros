@@ -354,7 +354,9 @@ docker run --rm -p 8765:8765 \
   ouroboros-web
 ```
 
-Docker runs the web runtime, not the native desktop shell. It bundles Chromium and WebKit support; use [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) for network and container policy.
+Docker runs the web runtime, not the native desktop shell. The image bundles Chromium and WebKit for the locked
+Playwright version and needs Docker's default BuildKit builder; use [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) for network
+and container policy, including how to trust an extra CA (`OUROBOROS_EXTRA_CA_BUNDLE`).
 
 ### Release tag prerequisite
 
