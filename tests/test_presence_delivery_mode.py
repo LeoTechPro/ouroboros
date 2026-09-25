@@ -43,7 +43,12 @@ def test_retry_echoes_original_mode_instead_of_new_request(tmp_path, original):
     presence = {} if original is None else {"delivery_reporting_version": original}
     atomic_write_json(tmp_path / "task_results" / f"{task_id}.json", {
         "_schema_version": 1, "task_id": task_id, "status": "completed", "result": "Old reply",
-        "metadata": {"presence": presence, "presence_outcome": "message", "presence_result_text": "Old reply"},
+        "metadata": {"presence": {
+            **presence, "binding_id": _admission().binding_id, "observed_text": event.text,
+            "event": {"source_event_id": event.source_event_id, "provider": event.provider,
+                      "account_id": event.account_id, "conversation_id": event.conversation_id,
+                      "thread_id": event.thread_id, "actor": dict(event.actor)},
+        }, "presence_outcome": "message", "presence_result_text": "Old reply"},
     })
 
     def no_reexecution(**_kwargs):
