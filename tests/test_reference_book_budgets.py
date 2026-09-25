@@ -153,10 +153,13 @@ CHAPTER_BYTE_BUDGETS: dict[str, int] = {
     # after the long-work continuity merge, 308678 after the Claudexor 3.14.0 pin, #1264);
     # the run-origin sentences replace the "request decides what the run was for" and the
     # owner-turn descriptions (+144 on the merged base) rather than appending to them.
-    # 308900 -> 309100 (TZ2 own work): the task-message sentence names the Presence
-    # sender's own-binding boundary and the delivery-control paragraph the Presence
-    # forced declaration it resolves around; both clauses extend existing sentences.
-    "docs/architecture/06-agent-core.md": 309100,
+    # 308900 -> 309800 (#1262): the one name-miss answer, every-mode discovery and the MCP
+    # lookup-before-safety facts are mechanisms no older text held; the "Not found"
+    # sentence they sit in was compressed rather than appended to (measured 309712).
+    # 309800 -> 310100 (TZ2 + #1262 merge, measured 309985): the Presence task-message
+    # own-binding boundary and forced declaration remain beside #1262's name-miss
+    # contract; both are independent rules in the same chapter, not duplicate prose.
+    "docs/architecture/06-agent-core.md": 310100,
     # 36991 -> 37300: the facade paragraph names the three loop constants runtime_limits.py
     # gained (events batch bound, budget-projection retry interval); no older text to displace.
     "docs/architecture/07-configuration.md": 37300,
@@ -245,7 +248,9 @@ CHAPTER_BYTE_BUDGETS: dict[str, int] = {
     # system-message-actions bullet and adds what no older text held: the door, the
     # regenerate-and-read-the-neighbours duty and what enforces each half.
     "docs/development/11-design-system.md": 28300,
-    "docs/development/12-mcp-client-integration.md": 3313,
+    # 3313 -> 3520 (#1262): the missed-name rule (catalog-only answer, no guess, alias,
+    # cross-server hint or automatic call, before safety); no older text held it (measured 3506).
+    "docs/development/12-mcp-client-integration.md": 3520,
     "docs/development/13-gateway-boundary-pattern.md": 2228,
     # 14958 -> 16100: release proof now records diagnostic signing/attestation side effects, authority asymmetry, and fail-closed prerequisites.
     # 16100 -> 19350 (#1215): the safe-launch recipe an operator must copy exactly,
