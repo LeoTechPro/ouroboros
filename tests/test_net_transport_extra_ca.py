@@ -16,6 +16,8 @@ import sys
 import threading
 import types
 
+import re
+
 import pytest
 
 from ouroboros import net_transport
@@ -124,14 +126,15 @@ def test_unset_setting_leaves_every_client_as_before(monkeypatch):
     assert "verify" not in seen and seen["trust_env"] is False
 
 
-def test_setting_merges_the_owner_file_over_certifi_and_rewrites_only_on_change(monkeypatch, tmp_path):
+def test_setting_merges_the_owner_file_over_certifi_and_rotates_with_its_content(monkeypatch, tmp_path):
     import certifi
 
     extra, _cert, _key = _throwaway_ca(tmp_path)
     monkeypatch.setenv("OUROBOROS_EXTRA_CA_BUNDLE", str(extra))
 
     merged = pathlib.Path(net_transport.extra_ca_bundle())
-    assert merged == tmp_path / "data" / "state" / "extra-ca-bundle.pem"
+    assert merged.parent == tmp_path / "data" / "state" / "extra-ca-bundle"
+    assert re.fullmatch(r"[0-9a-f]{12}\.pem", merged.name), merged.name
     body = merged.read_bytes()
     assert body.startswith(pathlib.Path(certifi.where()).read_bytes().rstrip(b"\n"))
     assert body.endswith(extra.read_bytes().rstrip(b"\n") + b"\n")
@@ -147,7 +150,11 @@ def test_setting_merges_the_owner_file_over_certifi_and_rewrites_only_on_change(
 
     second, _cert2, _key2 = _throwaway_ca(tmp_path / "second")
     extra.write_bytes(second.read_bytes())
-    assert pathlib.Path(net_transport.extra_ca_bundle()).read_bytes().endswith(second.read_bytes().rstrip(b"\n") + b"\n")
+    rotated = pathlib.Path(net_transport.extra_ca_bundle())
+    assert rotated != merged and rotated.read_bytes().endswith(second.read_bytes().rstrip(b"\n") + b"\n")
+    assert not merged.exists(), "the stale sibling is removed"
+    assert net_transport.trust_ssl_context() is not context, "a new owner file rotates the SSL context"
+    assert net_transport.verify_kwargs()["verify"] is net_transport.trust_ssl_context()
 
 
 @pytest.mark.parametrize("content", [None, b"not a certificate\n", b"-----BEGIN CERTIFICATE-----\nMIIBogus\n-----END CERTIFICATE-----\n"])

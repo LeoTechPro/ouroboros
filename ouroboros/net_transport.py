@@ -37,8 +37,11 @@ def extra_ca_bundle() -> Optional[str]:
     default bundle lacks (a TLS-inspecting corporate proxy, a national CA such
     as the one behind GigaChat). httpx, requests and the GigaChat SDK each take
     ONE bundle path and treat it as the whole trust list, so the owner's file is
-    merged with certifi into ``<data>/state/extra-ca-bundle.pem`` — rewritten
-    only when its content would change — and that merged path is returned.
+    merged with certifi into a content-addressed
+    ``<data>/state/extra-ca-bundle/<digest>.pem`` and that path is returned: a
+    changed owner file yields a new path, so every cache keyed on the path — the
+    SSL context below and the provider clients — rotates with it, and the stale
+    sibling files are removed.
     Unset returns None and every client is built exactly as before the setting
     existed. An unreadable or non-PEM file raises ``ExtraCaBundleError``: a
     silent fall-back to certifi would reproduce the very TLS failure the owner
@@ -55,12 +58,12 @@ def extra_ca_bundle() -> Optional[str]:
     from ouroboros.config import DATA_DIR
 
     extra = pathlib.Path(raw).expanduser()
-    target = pathlib.Path(DATA_DIR) / "state" / "extra-ca-bundle.pem"
+    bundle_dir = pathlib.Path(DATA_DIR) / "state" / "extra-ca-bundle"
     try:
         stat = extra.stat()
     except OSError as exc:
         raise ExtraCaBundleError(f"{_EXTRA_CA_BUNDLE_KEY} is not readable: {extra} ({exc})") from exc
-    key = (str(extra), str(target), stat.st_mtime_ns, stat.st_size)
+    key = (str(extra), str(bundle_dir), stat.st_mtime_ns, stat.st_size)
     cached = _merged_bundle_cache.get(key)
     if cached and os.path.isfile(cached):
         return cached
@@ -79,18 +82,27 @@ def extra_ca_bundle() -> Optional[str]:
     except (ssl.SSLError, ValueError) as exc:
         raise ExtraCaBundleError(f"{_EXTRA_CA_BUNDLE_KEY} holds no loadable PEM certificate: {extra} ({exc})") from exc
 
+    import hashlib
+    import threading
+
     base = pathlib.Path(certifi.where()).read_bytes()
     merged = base.rstrip(b"\n") + b"\n" + extra_bytes.rstrip(b"\n") + b"\n"
+    digest = hashlib.sha256(merged).hexdigest()[:12]
+    target = bundle_dir / f"{digest}.pem"
     try:
-        if not (target.is_file() and target.read_bytes() == merged):
-            target.parent.mkdir(parents=True, exist_ok=True)
-            import threading
-
+        if not target.is_file():
+            bundle_dir.mkdir(parents=True, exist_ok=True)
             # Per-process AND per-thread temp name: two threads first building clients at once
             # must not share one temp file (Windows refuses to replace a file another thread holds open).
             tmp = target.with_name(f"{target.name}.{os.getpid()}-{threading.get_ident()}.tmp")
             tmp.write_bytes(merged)
             os.replace(tmp, target)
+        for stale in bundle_dir.glob("*.pem"):
+            if stale != target:
+                try:
+                    stale.unlink()
+                except OSError:
+                    pass  # another process may be materializing; its own call re-resolves
     except OSError as exc:
         raise ExtraCaBundleError(f"cannot write the merged trust bundle {target}: {exc}") from exc
     _merged_bundle_cache[key] = str(target)

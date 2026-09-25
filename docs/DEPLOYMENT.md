@@ -46,5 +46,5 @@ docker run --rm -p 8765:8765 \
 ```
 
 On a desktop install the same key lives in Settings → Advanced. It covers
-Ouroboros's own HTTP clients only: `git`, `uv`, `pip`, the Claudexor engine and
-the browsers keep their own trust stores.
+Ouroboros's own HTTP clients only: `git`, `uv`, `pip`, the Claudexor engine, the
+web-search scraper and the browsers keep their own trust stores.
