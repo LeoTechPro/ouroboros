@@ -350,10 +350,13 @@ def test_presence_cancel_requests_own_pending_work_from_another_thread(tmp_path)
 
 def test_selected_cancel_and_forward_refuse_foreign_work_before_any_effect(tmp_path):
     from ouroboros.tools.join_ledger import _cancel_task
+    from ouroboros.owner_mailbox import drain_owner_entries
 
     _work(tmp_path, "foreign", "running", binding=OTHER)
     _work(tmp_path, "owner-root", "running", binding="")
     _work(tmp_path, "mine", "running", key=ROOM)
+    _queue(tmp_path, running=[{"id": "mine", "delegation_role": "root",
+                               "metadata": {"presence": _presence(key=ROOM)}}])
     ctx = _cancel_ctx(tmp_path)
     for target in ("foreign", "owner-root"):
         refused = _cancel_task(ctx, target, "stop")
@@ -364,8 +367,11 @@ def test_selected_cancel_and_forward_refuse_foreign_work_before_any_effect(tmp_p
     registry, _ctx = _registry(tmp_path, selected)
     assert "is not independent work started from this Presence binding" in registry.execute(
         "forward_to_worker", {"task_id": "foreign", "message": "stop"})
-    assert "is not independent work started from this Presence binding" not in registry.execute(
-        "forward_to_worker", {"task_id": "mine", "message": "new fact"})
+    sent = registry.execute("forward_to_worker", {"task_id": "mine", "message": "new fact"})
+    assert "written to its mailbox as a message from this task" in sent
+    [entry] = drain_owner_entries(tmp_path, "mine")
+    assert (entry["text"], entry["provenance"], entry["source_task_id"]) == (
+        "new fact", "independent_task", "presence-turn-1")
 
 
 def test_a_root_acting_only_for_its_binding_cancels_that_bindings_work_and_nothing_foreign(tmp_path):
