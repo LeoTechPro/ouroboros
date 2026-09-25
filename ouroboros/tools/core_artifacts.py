@@ -511,23 +511,14 @@ def _quiz_host_facts(ctx: ToolContext, canonical_root: pathlib.Path, task_id: st
     how its run started, and when the owner last wrote in this chat. Read from
     typed records only (the task record's ``run_origin`` provenance and the chat
     log tail), never from the question text; an unrecorded fact says unknown."""
-    import datetime
-
     from ouroboros.consciousness_authority import CONSCIOUSNESS_INITIATOR
+    from ouroboros.deadline_utils import parse_deadline_ts as moment, utc_now
     from ouroboros.dialogue_provenance import run_origin
     from ouroboros.task_results import load_task_result
     from ouroboros.tools.followup import FOLLOWUP_SOURCE
     from ouroboros.utils import iter_jsonl_objects
 
-    def moment(value: Any) -> Optional[datetime.datetime]:
-        try:
-            parsed = datetime.datetime.fromisoformat(str(value or ""))
-        except ValueError:
-            return None
-        return (parsed if parsed.tzinfo else parsed.replace(tzinfo=datetime.timezone.utc)).astimezone(
-            datetime.timezone.utc)
-
-    def shown(when: datetime.datetime) -> str:
+    def shown(when: Any) -> str:
         return when.strftime("%Y-%m-%d %H:%M UTC")
 
     meta = getattr(ctx, "task_metadata", {}) if isinstance(getattr(ctx, "task_metadata", {}), dict) else {}
@@ -566,7 +557,7 @@ def _quiz_host_facts(ctx: ToolContext, canonical_root: pathlib.Path, task_id: st
     if last is None:
         seen = "your last message in this chat: unknown"
     else:
-        minutes = max(0, int((datetime.datetime.now(datetime.timezone.utc) - last).total_seconds() // 60))
+        minutes = max(0, int((utc_now() - last).total_seconds() // 60))
         seen = f"your last message in this chat: {shown(last)} ({minutes} minutes before this question)"
     return f"Asked by task {task_id}, {started}; {seen}."
 
