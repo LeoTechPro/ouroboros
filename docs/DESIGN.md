@@ -645,7 +645,11 @@ answer keep both forms readable. Anatomy, top to bottom:
    contain paragraphs, lists, checklists, tables and code; those blocks keep
    the shared rich-content gutter, rhythm and bounded code scrolling. The card
    does not infer a title from the first line or rewrite authored Markdown to
-   make it fit.
+   make it fit, and the question has no quiz-specific length cap. Directly under
+   it, a muted plain-text host line (`.chat-quiz-host-facts`, `--type-meta`,
+   `--text-meta`) states what only the host knows: the asking task, how its run
+   started and when the owner last wrote in this chat, with unknown facts said
+   as unknown; the line is absent when the card carries no `host_facts`.
 3. **Stake** — optional one-liner (`At stake: …`), `--type-meta`, `--text-meta`.
 4. **Options** — real owner actions: buttons with `--text-primary` labels,
    legible at rest; an optional per-option detail steps down to meta ink.

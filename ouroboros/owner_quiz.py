@@ -17,7 +17,7 @@ like the hurry projection):
             "assumption", "state": open|answered|expired_terminal,
             "asked_at", "answered_at"?, "answered_index"?, "request_id"?,
             "comment"?, "reconciled_at"?, "chat_id"?, "max_wait_minutes"?,
-            "answered_after_terminal"?,
+            "answered_after_terminal"?, "host_facts"?,
         }, ...
     }
 
@@ -121,6 +121,7 @@ def record_asked(
     recommended_index: Optional[int] = None,
     chat_id: Optional[int] = None,
     max_wait_minutes: Optional[int] = None,
+    host_facts: str = "",
 ) -> Dict[str, Any]:
     """Worker-side projection write at ask time.
 
@@ -132,7 +133,10 @@ def record_asked(
     real hidden partition, never "no chat"): a late answer arriving after the
     task is gone is delivered there as an ordinary owner message instead of
     into a mailbox nobody drains. ``max_wait_minutes`` records the bound a
-    waiting asker chose, so replay can say what the task waited for."""
+    waiting asker chose, so replay can say what the task waited for.
+    ``host_facts`` is the host-written sentence the card shows under the
+    question (asking task, how its run started, the owner's last message in
+    the chat); stored only when non-empty."""
     if option_details is not None and (
         not isinstance(option_details, list) or len(option_details) != len(options)
         or not all(isinstance(value, str) for value in option_details)
@@ -150,6 +154,7 @@ def record_asked(
         **({"chat_id": int(chat_id)} if isinstance(chat_id, int) and not isinstance(chat_id, bool) else {}),
         **({"max_wait_minutes": int(max_wait_minutes)}
            if isinstance(max_wait_minutes, int) and not isinstance(max_wait_minutes, bool) else {}),
+        **({"host_facts": str(host_facts)} if str(host_facts or "") else {}),
     }
 
     refused: Dict[str, str] = {}
