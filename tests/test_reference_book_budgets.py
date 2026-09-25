@@ -162,7 +162,10 @@ CHAPTER_BYTE_BUDGETS: dict[str, int] = {
     "docs/architecture/06-agent-core.md": 310100,
     # 36991 -> 37300: the facade paragraph names the three loop constants runtime_limits.py
     # gained (events batch bound, budget-projection retry interval); no older text to displace.
-    "docs/architecture/07-configuration.md": 37300,
+    # 37300 -> 38400 (PR #1207): the Z.ai (`zai::`) direct provider gets its own route
+    # paragraph (plan-selected endpoint, low/high/max projection, 1113 billing) plus two
+    # settings rows; the base sat 95 bytes under the previous budget, no older text to displace.
+    "docs/architecture/07-configuration.md": 38400,
     # 18947 -> 19287: CI failure collection now documents diagnostic desktop builds while release remains gated.
     # 19287 -> 20560 (#1215): three contracts the chapter had no older text for — the
     # ONE reusable browser lane and the two triggers that share it (the unfiltered

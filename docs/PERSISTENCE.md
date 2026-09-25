@@ -22,7 +22,7 @@ scanned data-relative path to be covered by a row here (count-anchored both ways
   keys migrate). Governs subagent worktrees, headless/task drives, task trees,
   service logs, consumed schedule receipts,
   confirmed capability probes, delegate recovery/supervision sweeps, code_intel
-  and reconcile-failed prunes, memory-journal digesting and agent media.
+  reconcile-failed prunes, and agent media. Memory journals retain full new rows independently of this knob.
 - **Rotation** — `supervisor/state.py::rotate_jsonl_log_if_needed`: >800 KB →
   atomic rename to `archive/<prefix>_<ts>.jsonl` under the append lock.
   Applied on the supervisor tick to `chat.jsonl`, `progress.jsonl`,
@@ -143,10 +143,10 @@ scanned data-relative path to be covered by a row here (count-anchored both ways
 | `memory/scratchpad.md` + `scratchpad_blocks.json` | `ouroboros/memory.py` (derived, regenerated from blocks under lock) | none | bounded: 10 blocks, eviction journaled first (fail-closed) | regenerated; evicted history in journal |
 | `memory/WORLD.md` | `ouroboros/world_profiler.py` (write-once) | none | fixed | regenerates on restart — deletion IS the refresh mechanism |
 | `memory/registry.md`, `memory/deep_review.md` | `ouroboros/tools/memory_tools.py` (section RMW), `ouroboros/agent.py` (overwrite) | none | unbounded / last-wins — accepted | recreated lazily |
-| `memory/dialogue_blocks.json` + `dialogue_meta.json` | `ouroboros/consolidator.py` (locked atomic) | none | bounded by era compression (10 blocks, oldest 4 compressed) | blocks: compressed biography irreproducible; meta: full re-consolidation (cost, not loss) |
+| `memory/dialogue_blocks.json` + `dialogue_meta.json` | `ouroboros/consolidator.py`, `memory_nomination_receipts.py` (locked atomic) | `pending_knowledge_nominations` source-entry IDs; legacy `last_unpublished_nominations` preserved | blocks bounded by era compression (10 blocks, oldest 4); unresolved nomination index unbounded; no tool-level resolver yet, later success never retires old debt | blocks: compressed biography irreproducible; meta: cursor and unpublished-obligation evidence lost |
 | `memory/dialogue_summary.md` | none — legacy read-only (reader in context.py) | none | frozen | legacy artifact; nothing writes it |
 | `memory/knowledge/**` (topic .md + `index-full.md` + `patterns.md`) | `ouroboros/tools/knowledge.py`, `consolidator.py` (index rebuild), `reflection.py` (patterns CAS rewrite) | none | topic files unbounded — accepted (curated by consolidation); backlog topic merge-only fail-closed | recreated lazily; knowledge lost |
-| `memory/*_journal.jsonl`, `memory/knowledge_history.jsonl`, `memory/knowledge/patterns_history.jsonl` | `ouroboros/memory.py`, `tools/control_runtime.py`, `tools/knowledge.py`, `reflection.py` — every append through the `append_jsonl` sidecar-lock seam | scratchpad journal: `type` rows; others unversioned full-text snapshots; digested rows carry `content_digested: true` | full old+new text only inside GC retention: older identity/knowledge/patterns rows go digest-only (sha256+len) at startup (`memory_journal_compaction.py`, under the append lock, unreadable lines byte-preserved); scratchpad journal keeps its own eviction contract | undo/provenance record lost (live .md survives); eviction/rewrite paths fail closed when journal append fails; digested history is irreversible by design |
+| `memory/*_journal.jsonl`, `memory/knowledge_history.jsonl`, `memory/knowledge/patterns_history.jsonl` | `ouroboros/memory.py`, `tools/control_runtime.py`, `tools/knowledge.py`, `reflection.py` — every append through the `append_jsonl` sidecar-lock seam | scratchpad journal: `type` rows; others unversioned full-text snapshots; historical digested rows retain `content_digested: true` | complete new old+new snapshots are retained indefinitely; `memory_journal_compaction.py` is a read-only compatibility entry point, not a source rewriter; existing digest-only rows cannot be restored; the `memory_journal_observation` startup event gives byte sizes (or missing/unreadable) for the three named journals; scratchpad keeps its eviction journal | deleting the journals loses undo/provenance; eviction/rewrite paths fail closed when journal append fails; historically digested content remains irrecoverable |
 | `memory/owner_mailbox/<task>.jsonl` + `.acks.jsonl` | `ouroboros/owner_mailbox.py` (append-only; revocation appends, reader resolves) | `kind` discriminator | lifecycle-bounded: unlinked at task terminal; a startup sweep unlinks mailboxes whose task has a SETTLED durable result (no result / non-terminal keeps the mailbox fail-closed) | undelivered owner directives + restart-surviving hurry latch lost; acks lost ⇒ re-delivery |
 
 ## 7. Skills payloads, tasks, uploads, projects, services
@@ -180,13 +180,15 @@ scanned data-relative path to be covered by a row here (count-anchored both ways
 Always safe (pure caches, recreated): `state/pycache`, `state/code_intel`,
 `state/evolution_metrics_cache.json`, `playwright-browsers/`, `state/cx`,
 `state/betterleaks`, lock files, `state/server_port`.
-Safe with bounded cost: `WORLD.md` (regenerates), `dialogue_meta.json`
-(re-consolidation), `state/usage_import_watermark.json` (safe re-import),
+Safe with bounded cost: `WORLD.md` (regenerates),
+`state/usage_import_watermark.json` (safe re-import),
 `ui_preferences.json`, `auth_secret.key` (one re-login).
 Fail-closed losses (system stays correct, work/authority is forgone):
 skill state dirs, `advisory_review.json`, `capability_evidence.json`,
 `pending_restart_verify.json`.
 Dangerous (authority/history destruction): `settings.json`,
 `state/usage_attempts.jsonl`, `task_results/**`, `logs/events.jsonl`,
-`memory/**`, `archive/**`, `observability/**`, `state/subagent_worktrees.json`
+`memory/**` (including `dialogue_meta.json`: deletion erases cursor and pending
+nomination obligations; re-consolidation cannot reconstruct the old IDs),
+`archive/**`, `observability/**`, `state/subagent_worktrees.json`
 (leak), `claudexor/**`, `state/python-userbase` (real deps).

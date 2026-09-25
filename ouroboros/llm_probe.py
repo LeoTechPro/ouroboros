@@ -208,6 +208,10 @@ def controlled_probe_error(exc: BaseException) -> dict[str, Any]:
     """Map typed transport facts to one bounded, provider-neutral reason."""
     status, code, error_type = _error_facts(exc)
     credit_codes = {
+        # Z.ai answers plan exhaustion as HTTP 429 code 1113 "Insufficient
+        # balance" (billing, not rate limiting; a Coding Plan key on the
+        # pay-as-you-go endpoint lands here too).
+        "1113",
         "billing_hard_limit_reached",
         "credit_balance_too_low",
         "credits_exhausted",
@@ -325,7 +329,7 @@ def probe_provider_readiness(
 
         if provider in {
             "openrouter", "openai", "openai-compatible", "minimax", "cloudru",
-            "deepseek",
+            "deepseek", "zai",
         }:
             remote_client = client._new_remote_client(target)
 
