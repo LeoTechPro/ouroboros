@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import pytest
 
 from ouroboros.gateway import host_service
+from ouroboros.loop_llm_call import TRANSPORT_DEATHS_KEY
 from ouroboros.presence_admission import PresenceAdmissionError
 from ouroboros.presence_runner import PresenceTurnError
 from ouroboros.presence_runner import PresenceTurnGate, presence_turn_task_id, presence_retry_proof, run_presence_turn
@@ -554,14 +555,35 @@ def test_ambiguous_start_write_never_regenerates_after_error(tmp_path, monkeypat
     assert invoked == [] and ctx.presence_turns.live() == []
 
 
-def test_unknown_outcome_fallback_terminal_never_acknowledges_the_event(tmp_path, monkeypatch):
+_UNKNOWN_FENCE = pytest.mark.parametrize("usage", [
+    # The forced rail's own fallback text under the fence, worded provider_unavailable.
+    {"execution_status": "infra_failed", "reason_code": "provider_unavailable", "terminal_origin": "host_notice",
+     "_last_llm_error_kind": "provider_outcome_unknown",
+     "_pending_transport_outcome": {"operation_id": "op-1", "outcome": "unknown"}},
+    # A round-one draft the rail salvaged as model_final behind the same fence is not the answer.
+    {"execution_status": "infra_failed", "reason_code": "provider_unavailable", "terminal_origin": "model_final",
+     "_best_effort_extracted": True, "_last_llm_error_kind": "provider_outcome_unknown"},
+    # A round still holding a transport-death record forbids the resend whatever the later sticky kind.
+    {"execution_status": "infra_failed", "reason_code": "provider_unavailable", "terminal_origin": "model_final",
+     "_best_effort_extracted": True, "_last_llm_error_kind": "server_error",
+     TRANSPORT_DEATHS_KEY: {"round_id": "round-1", "count": 1, "backoff_sec": 2.0}},
+], ids=["host_fallback", "salvaged_draft", "death_record"])
+
+
+@_UNKNOWN_FENCE
+def test_unknown_outcome_fallback_terminal_never_acknowledges_the_event(tmp_path, monkeypatch, usage):
     """A quota-refused primary whose fallback died with an unknown outcome is not a silent answer.
 
     The forced rail words that terminal ``provider_unavailable`` (the unknown fence outranks the
-    refusal source), so the guard cannot key on the resource-refusal word alone: the durable
-    infrastructure terminal keeps the event with the transport on the first call and on replay,
-    preserves already scheduled work, and asks the owner once — never a retry certificate.
+    refusal source) and may salvage a round-one draft as ``model_final``, so the guard can key
+    neither on the reason word nor on authorship. The real pipeline stamps the loop's own
+    no-resend predicate on the row; that marker keeps the event with the transport on the first
+    call and on replay, preserves already scheduled work, and asks the owner once — never a
+    retry certificate.
     """
+    from ouroboros import agent_task_pipeline as pipeline
+    from ouroboros.tools.control_routing import _finish_swarm_handoff
+
     child_id = "scheduled-after-quota"
     invoked, notices = [], []
     monkeypatch.setattr("ouroboros.presence_runner._write_unresolved_notice",
@@ -570,17 +592,21 @@ def test_unknown_outcome_fallback_terminal_never_acknowledges_the_event(tmp_path
     class Agent:
         def handle_task(self, task):
             invoked.append(task["id"])
-            write_task_result(tmp_path, task["id"], "failed", result="[PROVIDER_UNAVAILABLE] host text",
-                              metadata={**task["metadata"], "presence_work_ref": child_id},
-                              reason_code="provider_unavailable", terminal_origin="host_notice",
-                              outcome_axes={"execution": {"status": "infra_failed",
-                                                          "reason_code": "provider_unavailable",
-                                                          "source": "provider_outcome_unknown_no_resend"}})
-            return [{"type": "presence_result", "outcome": "silent", "text": "", "work_ref": child_id}]
+            task["_skip_post_task_synthesis"] = True
+            agent_ctx = SimpleNamespace(task_contract=task["task_contract"], task_metadata=task["metadata"])
+            _finish_swarm_handoff(agent_ctx, {"task_id": child_id}, "Admission receipt", status="scheduled")
+            pending = []
+            pipeline.emit_task_results(
+                SimpleNamespace(drive_root=tmp_path, repo_dir=tmp_path), None, None, pending, task,
+                "half-written draft", dict(usage), {"tool_calls": [], "reasoning_notes": []}, 0.0,
+                tmp_path / "logs", ctx=agent_ctx,
+            )
+            return pending
 
     app, binding, ctx = _presence_app(tmp_path, lambda **kwargs: run_presence_turn(
         repo_dir=tmp_path, drive_root=tmp_path, agent_factory=lambda **_kw: Agent(),
         gate=PresenceTurnGate(1), **kwargs))
+    task_id = presence_turn_task_id(binding, "event")
     for _ in range(2):
         response = asyncio.run(_turn(app, binding, "event"))
         body = json.loads(response.body)
@@ -588,10 +614,19 @@ def test_unknown_outcome_fallback_terminal_never_acknowledges_the_event(tmp_path
         assert body["disposition"] == "retry" and not body.get("text")
         assert body["work_ref"] == child_id
         assert not ctx.presence_turns.live() and not any(ctx._inflight.values())
-    assert invoked == [presence_turn_task_id(binding, "event")]
-    assert notices == [presence_turn_task_id(binding, "event")] * 2
-    stored = load_task_result(tmp_path, presence_turn_task_id(binding, "event"))
-    assert "presence_retry_proof" not in (stored.get("metadata") or {})  # unknown is not not_started
+    assert invoked == [task_id] and notices == [task_id] * 2
+    stored = load_task_result(tmp_path, task_id)
+    assert stored["status"] == "failed" and stored["reason_code"] == "provider_unavailable"
+    assert stored["outcome_axes"]["execution"]["status"] == "infra_failed"
+    marker = stored["metadata"]["presence_unknown_outcome"]
+    assert marker["source"] == "provider_outcome_unknown_no_resend"
+    assert marker["error_kind"] == usage["_last_llm_error_kind"]
+    assert marker["operation_id"] == (usage.get("_pending_transport_outcome") or {}).get("operation_id", "")
+    assert stored["metadata"]["presence_work_ref"] == child_id and stored["metadata"]["presence_outcome"] == "deferred"
+    assert "presence_retry_proof" not in stored["metadata"]  # unknown is not not_started
+    # The deferred-work view of the same row hands out no draft either.
+    view = presence_result_from_stored(stored, task_id)
+    assert (view.outcome, view.text, view.work_ref) == ("silent", "", child_id)
 
 
 def test_lost_terminal_write_after_start_barrier_never_acknowledges_the_event(tmp_path, monkeypatch):
@@ -621,17 +656,22 @@ def test_lost_terminal_write_after_start_barrier_never_acknowledges_the_event(tm
     assert invoked == [presence_turn_task_id(binding, "event")] and ctx.presence_turns.live() == []
 
 
-@pytest.mark.parametrize("row", [
-    {"reason_code": "resource_refusal_no_resend"},
-    {"reason_code": "provider_unavailable",
-     "outcome_axes": {"execution": {"status": "infra_failed", "reason_code": "provider_unavailable"}}},
+_INFRA_OUTAGE = {"execution": {"status": "infra_failed", "reason_code": "provider_unavailable"}}
+
+
+@pytest.mark.parametrize("row,metadata", [
+    ({"reason_code": "resource_refusal_no_resend"}, {}),
+    ({"reason_code": "provider_unavailable", "outcome_axes": _INFRA_OUTAGE},
+     {"presence_unknown_outcome": {"source": "provider_outcome_unknown_no_resend",
+                                   "error_kind": "provider_outcome_unknown", "operation_id": ""}}),
 ])
-def test_deferred_work_view_never_delivers_a_salvaged_draft_of_a_refused_attempt(row):
+def test_deferred_work_view_never_delivers_a_salvaged_draft_of_a_refused_attempt(row, metadata):
     """A refused or unproven attempt has no reply: the forced rail may still stamp
-    ``model_final`` over the round-one draft it salvaged before the refusal, and the
-    ``/presence/work`` projection must not hand that draft to the correspondent."""
+    ``model_final`` over the round-one draft it salvaged before the refusal or behind the
+    unknown fence, and the ``/presence/work`` projection must not hand that draft to the
+    correspondent."""
     stored = {"status": "failed", "terminal_origin": "model_final", "result": "half-written draft",
-              "metadata": {"presence_outcome": "message", "presence_work_ref": "child-1"}, **row}
+              "metadata": {"presence_outcome": "message", "presence_work_ref": "child-1", **metadata}, **row}
     projected = presence_result_from_stored(stored, "work-1")
     assert (projected.outcome, projected.text, projected.work_ref) == ("silent", "", "child-1")
     # A model's own failed terminal (round limit, no infrastructure fault) still replays its answer.
@@ -639,3 +679,38 @@ def test_deferred_work_view_never_delivers_a_salvaged_draft_of_a_refused_attempt
                                        "reason_code": "round_limit", "metadata": {"presence_outcome": "message"},
                                        "outcome_axes": {"execution": {"status": "best_effort"}}}, "work-2")
     assert (own.outcome, own.text) == ("message", "final words")
+    # A CONFIRMED outage keeps the model's own salvaged partial and the admitted child (TZ2).
+    confirmed = presence_result_from_stored({
+        "status": "failed", "terminal_origin": "model_final", "result": "salvaged partial",
+        "reason_code": "provider_unavailable", "outcome_axes": _INFRA_OUTAGE,
+        "metadata": {"presence_outcome": "deferred", "presence_work_ref": "child-1"}}, "work-3")
+    assert (confirmed.outcome, confirmed.text, confirmed.work_ref) == ("deferred", "salvaged partial", "child-1")
+
+
+@pytest.mark.parametrize("row,expected", [
+    ({"status": "failed", "reason_code": "resource_refusal_no_resend"}, "presence_resources_unavailable"),
+    ({"status": "running"}, "presence_attempt_outcome_unknown"),
+    ({"status": "interrupted", "terminal_origin": "model_final"}, "presence_attempt_outcome_unknown"),
+    # The host reconciled a stale RUNNING row from its own already-failed axes: no terminal of its own.
+    ({"status": "failed", "status_reconciled_from": "running", "reason_code": "provider_unavailable",
+      "outcome_axes": _INFRA_OUTAGE}, "presence_attempt_outcome_unknown"),
+    ({"status": "failed", "terminal_origin": "model_final", "reason_code": "provider_unavailable",
+      "outcome_axes": _INFRA_OUTAGE, "metadata": {"presence_unknown_outcome": {
+          "source": "provider_outcome_unknown_no_resend"}}}, "presence_attempt_outcome_unknown"),
+    # Confirmed infrastructure terminals keep the deferred projection instead of a refusal.
+    ({"status": "failed", "terminal_origin": "host_notice", "reason_code": "provider_unavailable",
+      "outcome_axes": _INFRA_OUTAGE}, ""),
+    ({"status": "failed", "terminal_origin": "model_final", "reason_code": "provider_unavailable",
+      "outcome_axes": _INFRA_OUTAGE}, ""),
+    ({"status": "failed", "terminal_origin": "host_notice", "reason_code": "llm_api_error",
+      "outcome_axes": {"execution": {"status": "infra_failed", "reason_code": "llm_api_error",
+                                     "failure": {"kind": "provider", "error_kind": "context_overflow"}}}}, ""),
+    # A model final the axis reducer relabelled from a legacy diagnostic prefix is still the model's reply.
+    ({"status": "failed", "terminal_origin": "model_final", "reason_code": "provider_failure",
+      "result": "⚠️ Failed to get a response is what I would tell them.",
+      "outcome_axes": {"execution": {"status": "infra_failed", "reason_code": "provider_failure"}}}, ""),
+])
+def test_terminal_refusal_keys_on_provenance_not_on_the_infra_failed_axis(row, expected):
+    from ouroboros.presence_runner import _terminal_refusal
+
+    assert _terminal_refusal(row) == expected

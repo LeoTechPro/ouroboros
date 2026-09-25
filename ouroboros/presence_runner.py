@@ -402,6 +402,27 @@ def presence_retry_proof(task: Mapping[str, Any], usage: Mapping[str, Any],
             "reset_at": reset_at, "task_id": str(task.get("id") or "")}
 
 
+def presence_unknown_outcome(usage: Mapping[str, Any]) -> dict[str, str]:
+    """The durable marker of a dispatched attempt whose outcome the loop never resolved.
+
+    Spelled by the loop's own no-resend predicate (``provider_no_call_source``: the sticky
+    ``provider_outcome_unknown`` kind, or a round still holding a transport-death record;
+    a usable response clears both), so the forced rail and the Host guard answer one
+    question the same way. Neither the rail's fallback text nor a draft it salvaged as
+    ``model_final`` answers the event; the trace source alone cannot say so, because a
+    retained draft is recorded under its own source.
+    """
+    from ouroboros.loop_llm_call import provider_no_call_source
+
+    source, _wall = provider_no_call_source(dict(usage), False)
+    if source != "provider_outcome_unknown_no_resend":
+        return {}
+    pending = usage.get("_pending_transport_outcome")
+    pending = pending if isinstance(pending, Mapping) else {}
+    return {"source": source, "error_kind": str(usage.get("_last_llm_error_kind") or ""),
+            "operation_id": str(pending.get("operation_id") or "")}
+
+
 def _successor_id(task_id: str) -> str:
     return "presence-" + hashlib.sha256(f"presence-retry\0{task_id}".encode("utf-8")).hexdigest()[:24]
 
@@ -534,20 +555,25 @@ def _terminal_refusal(stored: Mapping[str, Any]) -> str:
 
     The durable terminal cause decides, never a draft or the in-memory envelope. A confirmed
     resource refusal keeps the event with the transport (``presence_resources_unavailable``).
-    A row without a canonical terminal (RUNNING/INTERRUPTED, a reconciled placeholder, a
-    terminal write that failed after the start barrier) and any host-authored infrastructure
-    terminal (provider death, an unknown outcome behind a quota refusal, overflow) is an
-    attempt whose external effect is unproven (``presence_attempt_outcome_unknown``): the
-    diagnostic reason word may say ``provider_unavailable``, but no model answered this
-    event, so completed/silent would let the adapter drop it. Empty: the row may answer.
+    A row without a canonical terminal of its own (RUNNING/INTERRUPTED, a terminal write that
+    failed after the start barrier, or the host's reconcile of such a row: the orphan
+    placeholder or a stale row marked from its own already-failed axes) and a terminal under
+    the unknown-outcome fence (the pipeline's ``presence_unknown_outcome`` marker, stamped from
+    the loop's own no-resend predicate: a dispatched attempt stayed unresolved; the forced rail
+    words it ``provider_unavailable`` and may salvage a round-one draft as ``model_final``) are
+    attempts whose external effect is unproven (``presence_attempt_outcome_unknown``): no model
+    answered this event, so completed/silent would let the adapter drop it. Every other
+    infrastructure terminal (a confirmed outage, an overflow) is not refused here: it keeps the
+    deferred projection, where ``_presence_delivery`` decides speech from terminal authorship
+    and an admitted child stays pollable. Empty: the row may answer.
     """
     if str(stored.get("reason_code") or "") == "resource_refusal_no_resend":
         return "presence_resources_unavailable"
-    if str(stored.get("status") or "") not in {STATUS_COMPLETED, STATUS_FAILED} or is_reconciled_presence_placeholder(stored):
+    if (str(stored.get("status") or "") not in {STATUS_COMPLETED, STATUS_FAILED}
+            or str(stored.get("status_reconciled_from") or "") in {STATUS_RUNNING, STATUS_INTERRUPTED}):
         return "presence_attempt_outcome_unknown"
-    axes = stored.get("outcome_axes") if isinstance(stored.get("outcome_axes"), dict) else {}
-    execution = axes.get("execution") if isinstance(axes.get("execution"), dict) else {}
-    if str(execution.get("status") or stored.get("execution_status") or "") == "infra_failed":
+    metadata = stored.get("metadata") if isinstance(stored.get("metadata"), dict) else {}
+    if isinstance(metadata.get("presence_unknown_outcome"), dict):
         return "presence_attempt_outcome_unknown"
     return ""
 

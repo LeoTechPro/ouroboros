@@ -521,6 +521,25 @@ def _custody_debt_event_fields(stored_result: Dict[str, Any]) -> Dict[str, Any]:
     debt = stored_result.get("delegated_runs_unreconciled")
     return {"delegated_runs_unreconciled": list(debt)} if isinstance(debt, list) else {}
 
+
+def _stamp_presence_terminal_facts(
+    task: Dict[str, Any], usage: Dict[str, Any], llm_trace: Dict[str, Any], ctx: Any, reason_code: str,
+) -> None:
+    """Typed Presence facts the Host guard reads back from the durable row's metadata."""
+    from ouroboros.presence_runner import presence_retry_proof, presence_unknown_outcome
+
+    metadata = task.get("metadata") if isinstance(task.get("metadata"), dict) else {}
+    if reason_code == "resource_refusal_no_resend":
+        proof = presence_retry_proof(task, usage, llm_trace, ctx)
+        if proof:
+            task["metadata"] = metadata = {**metadata, "presence_retry_proof": proof}
+    # The loop's own no-resend predicate, stamped where the Host guard reads the row back: a
+    # dispatched attempt left unresolved is not answered by the rail's text or a salvaged draft.
+    unknown = presence_unknown_outcome(usage)
+    if unknown:
+        task["metadata"] = {**metadata, "presence_unknown_outcome": unknown}
+
+
 def emit_task_results(
     env: Any, memory: Any, llm: Any,
     pending_events: List[Dict[str, Any]],
@@ -549,12 +568,8 @@ def emit_task_results(
     if ctx is not None and failed_or_forced:
         ctx._presence_completion_accepted = False
     reason_code = str(loop_outcome.get("reason_code") or "")
-    if is_presence_task(task) and reason_code == "resource_refusal_no_resend":
-        from ouroboros.presence_runner import presence_retry_proof
-
-        proof = presence_retry_proof(task, usage, llm_trace, ctx)
-        if proof:
-            task["metadata"] = {**task["metadata"], "presence_retry_proof": proof}
+    if is_presence_task(task):
+        _stamp_presence_terminal_facts(task, usage, llm_trace, ctx, reason_code)
     _root_outbox = _is_root_post_task(task)   # durable outbox (no model call): pre-marker predicate
     if getattr(ctx, "_skip_post_task_synthesis", False):   # "Stop now": paid root predicates see it
         task["_skip_post_task_synthesis"] = True
