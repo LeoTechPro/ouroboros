@@ -367,9 +367,10 @@ def write_knowledge_note(
         old_text = current.text if current else ""
         before = (Counter((heading.level, heading.title) for heading in current.source.headings)
                   if current and current.source else Counter())
-        after = Counter((heading.level, heading.title) for heading in updated.source.headings)
+        after = (Counter((heading.level, heading.title) for heading in updated.source.headings)
+                 if updated.source else Counter())
         removed_headings = (sorted("#" * level + " " + title for (level, title) in (before - after).elements())
-                            if current is None or current.source else None)
+                            if (current is None or current.source) and updated.source else None)
         delta = {"old_chars": len(old_text), "new_chars": len(updated.text),
                  "change_chars": len(updated.text) - len(old_text), "removed_headings": removed_headings}
         # Capture both complete versions before replacing source bytes, as the

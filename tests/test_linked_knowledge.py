@@ -335,6 +335,21 @@ def test_overwrite_malformed_legacy_source_discloses_unknown_heading_delta(tmp_p
     assert history(target)[-1]["delta"]["removed_headings"] is None
 
 
+def test_append_to_malformed_legacy_source_keeps_history_without_heading_claim(tmp_path):
+    target = address(tmp_path, "malformed-append")
+    target.path.parent.mkdir(parents=True)
+    target.path.write_bytes(b"---\ncustom: [unfinished\n---\n# Old heading\n")
+    original = store.read_knowledge_note(target)
+    assert original.parse_error and original.source is None
+    appended = store.write_knowledge_note(target, "New evidence.\n", mode="append")
+    assert appended.ok and appended.current.raw.endswith(b"# Old heading\nNew evidence.\n")
+    assert appended.delta["removed_headings"] is None
+    record = history(target)[-1]
+    assert record["old_content"] == original.text
+    assert record["new_content"] == appended.current.text
+    assert record["delta"] == appended.delta
+
+
 @pytest.mark.parametrize("value", ["null", "12", "[]", "''"])
 def test_new_formal_note_requires_string_type_without_a_type_catalog(tmp_path, value):
     target = address(tmp_path)
