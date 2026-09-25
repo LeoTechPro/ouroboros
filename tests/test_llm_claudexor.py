@@ -434,13 +434,16 @@ def test_unknown_outcome_keeps_its_generation_limit_claim(setup):
 
 def test_confirmed_provider_failure_settles_real_usage_before_raising(setup):
     root, gateway, client = setup
+    # Auto asks the engine once more; it reselects the refused account, which ends rotation.
     gateway.results = [result(outcome="failed", cash=0.13, knowledge="exact", problem={
         "code": "subscription_window_exhausted", "message": "window exhausted", "retryable": True,
         "context": {"resetsAt": "2099-01-01T00:00:00Z", "httpStatus": 429},
-    })]
+    })] * 2
+    gateway.dispatch = ["response_received"] * 2
     with pytest.raises(transport.ClaudexorModelError) as raised:
         client.chat([{"role": "user", "content": "hi"}], MODEL, model_role="vision")
     error = raised.value
+    assert error.account_rotation["stop"] == "engine_reselected_refused_account"
     assert error.code == "subscription_window_exhausted" and error.model_role == "vision"
     assert error.reset_at == "2099-01-01T00:00:00Z"
     assert error.physical_attempt_capture.state == "settled"

@@ -1385,7 +1385,8 @@ def send_with_budget(chat_id: int, text: str, log_text: Optional[str] = None,
                      progress_meta: Optional[Dict[str, Any]] = None,
                      ts: Optional[str] = None,
                      role: str = "", system_type: str = "",
-                     narration: Optional[bool] = None) -> None:
+                     narration: Optional[bool] = None,
+                     require_write: bool = False) -> None:
     """Send one owner-visible message through the shared host seam.
 
     ``narration`` is the note's VOICE, the same typed fact the worker stamps on
@@ -1440,6 +1441,7 @@ def send_with_budget(chat_id: int, text: str, log_text: Optional[str] = None,
             task_id=task_id,
             record_type=system_type,
             message_meta=progress_meta,
+            require_write=require_write,
         )
 
     if _text.strip() in ("", "\u200b"):

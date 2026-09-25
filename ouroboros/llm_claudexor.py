@@ -61,8 +61,8 @@ from ouroboros.gateways.claudexor import (
 )
 from ouroboros.llm_attempt import _attempt_request, _candidate_before_dispatch
 from ouroboros.llm_substitution import (
-    SubstitutionBudget, substitution_fact, failed_account_preference,
-    remember_failed_profile, take_failed_account_preference)
+    AccountRotation, SubstitutionBudget, substitution_fact, failed_account_preference,
+    take_failed_account_preference)
 from ouroboros.model_slots import MODEL_ACCOUNTS_KEY, model_role_option
 from ouroboros.model_wait import ModelWaitInterrupted, current_model_wait, prepared_call_scope
 from ouroboros.observability import persist_call
@@ -816,13 +816,13 @@ def _processing_retry_payload(payload: dict, error: ClaudexorModelNotDispatched)
 
 
 def chat_claudexor(target: dict, messages: list, tools: list | None, **parameters: Any) -> tuple[dict, dict]:
-    """One generation, with one no-start repair per continuation/processing axis."""
+    """One generation, one no-start repair per continuation/processing axis, quota re-asks on Auto."""
     target = prepare_processing_target(target)
     payload = _request(target, messages, tools, parameters)
     retry_preparation = None
     native_repaired = processing_repaired = False
-    substitution = SubstitutionBudget(ClaudexorModelError)
-    for _preparation in range(3 + substitution.redos):
+    substitution, rotation = SubstitutionBudget(ClaudexorModelError), AccountRotation()
+    for _preparation in range(3 + substitution.redos + rotation.CEILING):
         invocation = _ModelInvocation(target, payload, parameters)
         try:
             with prepared_call_scope(retry_preparation or {}) as prepared:
@@ -839,7 +839,7 @@ def chat_claudexor(target: dict, messages: list, tools: list | None, **parameter
                     continue
                 adopt_turn_state((prepared or parameters).get("model_turn_state"),
                                  invocation.payload, result)
-                return substitution.disclose(invocation.finish(result))
+                return rotation.disclose(substitution.disclose(invocation.finish(result)))
         except ClaudexorModelNotDispatched as error:
             if invocation.response_ref:
                 invocation.acknowledge()
@@ -852,13 +852,14 @@ def chat_claudexor(target: dict, messages: list, tools: list | None, **parameter
                 updated = _reset_native(payload, error, invocation)
                 native_repaired = updated is not None
             if updated is None:
-                remember_failed_profile(target, parameters, error)
+                rotation.refused_call(target, parameters, invocation, error)  # an engine verdict is never re-asked
                 raise
             payload = updated
             retry_preparation = _native_retry_preparation(target, payload, parameters, error)
         except ClaudexorModelError as error:
-            remember_failed_profile(target, parameters, error)
-            raise
+            if not rotation.refused_call(target, parameters, invocation, error):
+                raise
+            retry_preparation, parameters, payload = rotation.reask(parameters, payload)
         except PhysicalAttemptPreparationFailed as error:
             cause = error.__cause__
             if isinstance(cause, ClaudexorModelError):
@@ -938,8 +939,8 @@ async def chat_claudexor_async(target: dict, messages: list, tools: list | None,
     payload = _request(target, messages, tools, parameters)
     retry_preparation = None
     native_repaired = processing_repaired = False
-    substitution = SubstitutionBudget(ClaudexorModelError)
-    for _preparation in range(3 + substitution.redos):
+    substitution, rotation = SubstitutionBudget(ClaudexorModelError), AccountRotation()
+    for _preparation in range(3 + substitution.redos + rotation.CEILING):
         invocation = _ModelInvocation(target, payload, parameters)
         try:
             with prepared_call_scope(retry_preparation or {}) as prepared:
@@ -964,7 +965,7 @@ async def chat_claudexor_async(target: dict, messages: list, tools: list | None,
                     continue
                 adopt_turn_state((prepared or parameters).get("model_turn_state"),
                                  invocation.payload, result)
-                return substitution.disclose(await invocation.offload(invocation.finish, result))
+                return rotation.disclose(substitution.disclose(await invocation.offload(invocation.finish, result)))
         except ClaudexorModelNotDispatched as error:
             if invocation.response_ref:
                 await invocation.offload(invocation.acknowledge)
@@ -977,13 +978,14 @@ async def chat_claudexor_async(target: dict, messages: list, tools: list | None,
                 updated = _reset_native(payload, error, invocation)
                 native_repaired = updated is not None
             if updated is None:
-                remember_failed_profile(target, parameters, error)
+                rotation.refused_call(target, parameters, invocation, error)  # an engine verdict is never re-asked
                 raise
             payload = updated
             retry_preparation = _native_retry_preparation(target, payload, parameters, error)
         except ClaudexorModelError as error:
-            remember_failed_profile(target, parameters, error)
-            raise
+            if not rotation.refused_call(target, parameters, invocation, error):
+                raise
+            retry_preparation, parameters, payload = rotation.reask(parameters, payload)
         except PhysicalAttemptPreparationFailed as error:
             cause = error.__cause__
             if isinstance(cause, (ClaudexorModelError, asyncio.CancelledError)):

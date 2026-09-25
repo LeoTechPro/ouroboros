@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import json
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from types import SimpleNamespace
@@ -418,7 +419,12 @@ def test_five_open_turns_leave_receipts_and_inject_admitted(tmp_path):
     with ThreadPoolExecutor(max_workers=5) as pool:
         turns = [pool.submit(_turn, client, binding, index) for index in range(5)]
         try:
-            assert all(entered.acquire(timeout=10) for _ in range(5))
+            # One conversation: the Host gate runs one turn; the other four queue, holding their budget.
+            assert entered.acquire(timeout=10)
+            deadline = time.monotonic() + 10
+            while len(ctx.presence_turns.live()) < 5 and time.monotonic() < deadline:
+                time.sleep(0.01)
+            assert len(ctx.presence_turns.live()) == 5
             assert _turn(client, binding, 5).status_code == 429  # the turn budget itself still binds
             assert _post(client, _payload()).status_code == 200
             assert _inject(client).status_code == 202

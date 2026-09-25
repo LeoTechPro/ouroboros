@@ -25,7 +25,7 @@ from ouroboros.deadline_utils import (
 from ouroboros.llm import LLMClient, LocalContextTooLargeError, add_usage
 from ouroboros.llm_claudexor import propagate_model_error
 from ouroboros.llm_substitution import same_route_refusal, stamp_substitutions
-from ouroboros.model_wait import propagate_model_control
+from ouroboros.model_wait import current_model_wait, model_wait_reason, propagate_model_control
 from ouroboros.openai_chat_dispatch import CUSTOM_RECEIPTS_USAGE_KEY, pop_custom_validation_receipts
 from ouroboros.llm_attempt import PROVIDER_POLICY_REFUSAL, _is_provider_policy_refusal  # typed-refusal contract owner
 from ouroboros.observability import new_call_id, new_execution_id, persist_call
@@ -148,8 +148,8 @@ _COOLDOWN_ERROR_KINDS = _TRANSIENT_RETRY_KINDS | frozenset({"rate_limit"})
 # A subscription window that is spent but heals on a timer. SSOT for the name.
 # Deliberately NOT `quota_exhausted`: that class is classified PERMANENT, which is
 # correct for a billing refusal (402, no credits) and wrong for a plan window whose
-# only cure is waiting. Scheduling follows `reset_at`, not the 60s-capped exponential
-# backoff, so a six-hour window never becomes sixty one-minute retries.
+# only cure is waiting. Scheduling follows `reset_at` (never for a confirmed quota refusal, which
+# model_wait recovers, nor inline Presence), so a six-hour window never becomes sixty 1-minute retries.
 SUBSCRIPTION_WINDOW_EXHAUSTED = "subscription_window_exhausted"
 _TRANSIENT_RETRY_DEFAULT = 6
 _TRANSIENT_BACKOFF_CAP_SEC = NETWORK_WAIT_BACKOFF_MAX_SEC
@@ -305,9 +305,7 @@ def _cooldown_kind_for_empty_response(body_error: Dict[str, Any], event_type: st
     return body_kind if body_kind in _COOLDOWN_ERROR_KINDS else event_type
 
 
-def _retry_backoff_sec(
-    accumulated_usage: Dict[str, Any], error_kind: str, attempt: int, is_transient: bool,
-) -> float:
+def _retry_backoff_sec(accumulated_usage: Dict[str, Any], error_kind: str, attempt: int, is_transient: bool) -> float:
     """Seconds to wait before retrying the same request.
 
     A KNOWN reset instant wins over guesswork: a spent subscription window is scheduled
@@ -789,7 +787,7 @@ def classify_llm_exception(exc: Exception, safe_error: str = "") -> LlmErrorClas
         str(getattr(capture, "state", "") or "") == "released"
         and str(getattr(capture, "provider", "") or "") != "local"
         and not bool(getattr(capture, "route_is_loopback", False))
-        and is_pre_dispatch_transport_failure(exc)
+        and is_pre_dispatch_transport_failure(exc) and not model_wait_reason(exc)  # an engine resource verdict is no outage
     ):
         # Typed $0 fact: the request never left this host toward a REMOTE
         # provider (released custody + typed pre-dispatch transport failure).
@@ -983,7 +981,7 @@ def _record_llm_call_error(
         **{key: error_event[key] for key in ("ts", "llm_call_id", "model", "requested_profile", "observed_route")},
         "failure_code": classification.kind, "reset_at": classification.reset_at,
     })
-    ctx.accumulated_usage.update(_last_llm_error=_short_error_text(display_error),
+    ctx.accumulated_usage.update(_last_llm_error=_short_error_text(display_error), _last_llm_resource_refusal=model_wait_reason(error),
                                  _last_llm_error_kind=classification.kind, _last_llm_retry_same_request=will_retry)
     if classification.retry_after_sec is not None:
         ctx.accumulated_usage.update(_last_llm_retry_after_sec=classification.retry_after_sec,
@@ -1030,9 +1028,10 @@ def _stop_after_llm_error(ctx: _LlmErrorContext) -> bool:
     is_transient = error_kind in _TRANSIENT_RETRY_KINDS
     # Non-transient retryables: max_retries capped by the loop ceiling (primary: no-op).
     attempt_budget = ctx.transient_budget if is_transient else min(ctx.max_retries, ctx.transient_budget)
-    backoff = (
+    backoff = (  # a confirmed resource refusal and inline Presence neither resend nor sleep to a reset
         _retry_backoff_sec(accumulated_usage, error_kind, ctx.attempt, is_transient)
-        if ctx.attempt < attempt_budget - 1 else None
+        if ctx.attempt < attempt_budget - 1 and not accumulated_usage.get("_last_llm_resource_refusal")
+        and (error_kind != SUBSCRIPTION_WINDOW_EXHAUSTED or getattr(current_model_wait(), "waits_allowed", True)) else None
     )
     if backoff is not None:
         if _sleep_within_deadline(backoff, ctx.deadline_ts):
@@ -1062,6 +1061,7 @@ def provider_no_call_source(accumulated_usage: Dict[str, Any], deadline_exhauste
     cleared only by a usable response) forbids the resend whatever the sticky kind."""
     if str(accumulated_usage.get("_last_llm_error_kind") or "") == "provider_outcome_unknown" or isinstance(accumulated_usage.get(TRANSPORT_DEATHS_KEY), dict):
         return "provider_outcome_unknown_no_resend", False
+    if accumulated_usage.get("resource_refusal"): return "resource_refusal_no_resend", True  # typed temporary refusal: no route or owner wait recovered it
     if same_route_refusal(accumulated_usage): return "same_route_refusal_no_resend", False  # a salvage call is the same request on the same route, and the accounts that refused it were just marked
     if not deadline_exhausted and bool(accumulated_usage.get(RETRY_WALL_EXHAUSTED_KEY)):
         return "retry_wall_exhausted_no_repay", True
@@ -1436,7 +1436,7 @@ def call_llm_with_retry(
             context_fit_event_fields = _context_fit_event_fields(accumulated_usage) if physical_context is not None else {}
             _take_custom_receipts(usage, msg, accumulated_usage)
             for stale in ("_last_llm_error", "_last_llm_error_kind", "_last_llm_retry_same_request",
-                          "_last_llm_status_code", "_last_llm_provider_code"):
+                          "_last_llm_status_code", "_last_llm_provider_code", "_last_llm_resource_refusal"):
                 accumulated_usage.pop(stale, None)
             cost, display_model, provider, cost_estimated = _normalize_usage_cost(
                 usage, model=model, use_local=use_local,

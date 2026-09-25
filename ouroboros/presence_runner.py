@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import asyncio
+import concurrent.futures
+import contextvars
 import hashlib
 import logging
 import os
 import threading
 import time
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
@@ -17,6 +20,7 @@ from ouroboros.contracts.task_contract import attach_task_contract
 from ouroboros.presence_admission import PresenceAdmission
 from ouroboros.presence_authority import presence_ceiling_payload
 from ouroboros.task_results import (
+    STATUS_CANCELLED,
     STATUS_COMPLETED,
     STATUS_FAILED,
     STATUS_INTERRUPTED,
@@ -24,6 +28,7 @@ from ouroboros.task_results import (
     is_reconciled_presence_placeholder,
     load_task_result,
     reopen_reconciled_presence_placeholder,
+    task_result_path,
 )
 from ouroboros.utils import append_jsonl, atomic_write_json, iter_jsonl_objects, read_json_dict, utc_now_iso
 
@@ -37,9 +42,11 @@ class PresenceTurnError(ValueError):
         field: str,
         *,
         attachment_manifest: Sequence[Mapping[str, Any]] = (),
+        turn_ref: str = "",
     ) -> None:
         self.code = str(code or "presence_turn_failed")
         self.field = str(field or "presence_turn")
+        self.turn_ref = str(turn_ref or "")
         self.attachment_manifest = [
             dict(row) for row in attachment_manifest if isinstance(row, Mapping)
         ]
@@ -154,8 +161,40 @@ def build_presence_result_event(task: dict[str, Any], text: str, ctx: Any, *, te
     }
 
 
+_GATE_POLL_SEC = 0.05
+
+
+def _try_exclusive(fd: int) -> bool:
+    from ouroboros.platform_layer import file_lock_exclusive_nb
+
+    try:
+        file_lock_exclusive_nb(fd)
+    except OSError:
+        return False
+    return True
+
+
+class PresenceTurnLease:
+    """The gate resources one admitted turn holds; its owner releases them exactly once."""
+
+    def __init__(self, conversation_key: str, resources: ExitStack) -> None:
+        self.conversation_key = conversation_key
+        self._resources: ExitStack | None = resources
+        self._lock = threading.Lock()
+
+    def release(self) -> None:
+        with self._lock:
+            resources, self._resources = self._resources, None
+        if resources is not None:
+            resources.close()
+
+
 class PresenceTurnGate:
-    """Cross-process cap plus one active turn for each conversation."""
+    """Cross-process cap plus one active turn for each conversation.
+
+    ``run`` waits on a thread (the tool path); ``admit`` takes the same resources as a
+    coroutine for the Host, whose queued turns must hold no thread while they wait.
+    """
 
     def __init__(self, max_active: int = 2, *, state_root: Path | None = None) -> None:
         self._max_active = max(1, int(max_active))
@@ -165,11 +204,25 @@ class PresenceTurnGate:
         self._state_root = Path(state_root).resolve(strict=False) if state_root is not None else None
         self._claimed_slots: set[int] = set()
 
+    def _gate_file(self, name: str) -> Path:
+        root = self._state_root / "presence_turn_gate"
+        root.mkdir(parents=True, exist_ok=True)
+        return root / name
+
+    def _conversation(self, conversation_key: str) -> tuple[str, threading.Lock]:
+        key = str(conversation_key or "").strip()
+        if not key:
+            raise PresenceTurnError("presence_conversation_key_required", "conversation_key")
+        with self._guard:
+            return key, self._conversations.setdefault(key, threading.Lock())
+
+    def _conversation_file(self, key: str) -> Path:
+        return self._gate_file(f"conversation-{hashlib.sha256(key.encode('utf-8')).hexdigest()}.lock")
+
     @contextmanager
     def _file_lock(self, path: Path):
         from ouroboros.platform_layer import file_lock_exclusive, file_unlock
 
-        path.parent.mkdir(parents=True, exist_ok=True)
         fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o600)
         try:
             file_lock_exclusive(fd)
@@ -180,58 +233,83 @@ class PresenceTurnGate:
             finally:
                 os.close(fd)
 
-    @contextmanager
-    def _file_slot(self):
-        from ouroboros.platform_layer import file_lock_exclusive_nb, file_unlock
-
+    def _try_slot(self) -> Callable[[], None] | None:
+        """Claim one free active slot without waiting: its release, or None while all are taken."""
         if self._state_root is None:
-            with self._slots:
-                yield
-            return
-        slot_root = self._state_root / "presence_turn_gate"
-        slot_root.mkdir(parents=True, exist_ok=True)
-        while True:
-            for index in range(self._max_active):
+            return self._slots.release if self._slots.acquire(blocking=False) else None
+        from ouroboros.platform_layer import file_unlock
+
+        for index in range(self._max_active):
+            with self._guard:
+                if index in self._claimed_slots:
+                    continue
+                self._claimed_slots.add(index)
+            try:
+                fd = os.open(self._gate_file(f"slot-{index}.lock"), os.O_CREAT | os.O_RDWR, 0o600)
+            except BaseException:  # an unopenable slot is an error, never a slot left claimed
                 with self._guard:
-                    if index in self._claimed_slots:
-                        continue
-                    self._claimed_slots.add(index)
-                path = slot_root / f"slot-{index}.lock"
-                fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o600)
+                    self._claimed_slots.discard(index)
+                raise
+            if not _try_exclusive(fd):  # another process holds it
+                os.close(fd)
+                with self._guard:
+                    self._claimed_slots.discard(index)
+                continue
+
+            def release(index: int = index, fd: int = fd) -> None:
                 try:
-                    file_lock_exclusive_nb(fd)
-                except OSError:
+                    file_unlock(fd)
+                finally:
                     os.close(fd)
                     with self._guard:
                         self._claimed_slots.discard(index)
-                    continue
-                try:
-                    yield
-                finally:
-                    try:
-                        file_unlock(fd)
-                    finally:
-                        os.close(fd)
-                        with self._guard:
-                            self._claimed_slots.discard(index)
-                return
-            time.sleep(0.05)
+
+            return release
+        return None
+
+    @contextmanager
+    def _file_slot(self):
+        while (release := self._try_slot()) is None:
+            time.sleep(_GATE_POLL_SEC)
+        try:
+            yield
+        finally:
+            release()
 
     def run(self, conversation_key: str, callback: Callable[[], PresenceTurnResult]) -> PresenceTurnResult:
-        key = str(conversation_key or "").strip()
-        if not key:
-            raise PresenceTurnError("presence_conversation_key_required", "conversation_key")
-        with self._guard:
-            conversation_lock = self._conversations.setdefault(key, threading.Lock())
+        key, conversation_lock = self._conversation(conversation_key)
         with conversation_lock:
             if self._state_root is None:
+                with self._slots:
+                    return callback()
+            with self._file_lock(self._conversation_file(key)):
                 with self._file_slot():
                     return callback()
-            digest = hashlib.sha256(key.encode("utf-8")).hexdigest()
-            conversation_path = self._state_root / "presence_turn_gate" / f"conversation-{digest}.lock"
-            with self._file_lock(conversation_path):
-                with self._file_slot():
-                    return callback()
+
+    async def admit(self, conversation_key: str) -> PresenceTurnLease:
+        """Take what ``run`` takes, in the same order, as a coroutine.
+
+        Every attempt is non-blocking and every wait is an asyncio sleep, so a turn queued
+        behind its conversation or the active cap parks no thread. Cancellation releases
+        whatever was already taken; success hands it all to the returned lease.
+        """
+        from ouroboros.platform_layer import file_unlock
+
+        key, conversation_lock = self._conversation(conversation_key)
+        with ExitStack() as held:
+            while not conversation_lock.acquire(blocking=False):
+                await asyncio.sleep(_GATE_POLL_SEC)
+            held.callback(conversation_lock.release)
+            if self._state_root is not None:
+                fd = os.open(self._conversation_file(key), os.O_CREAT | os.O_RDWR, 0o600)
+                held.callback(os.close, fd)
+                while not _try_exclusive(fd):
+                    await asyncio.sleep(_GATE_POLL_SEC)
+                held.callback(file_unlock, fd)
+            while (release_slot := self._try_slot()) is None:
+                await asyncio.sleep(_GATE_POLL_SEC)
+            held.callback(release_slot)
+            return PresenceTurnLease(key, held.pop_all())
 
 
 _GATES_LOCK = threading.Lock()
@@ -260,23 +338,88 @@ def _configured_gate(drive_root: Path | None = None) -> PresenceTurnGate:
         return _GATES.setdefault(key, PresenceTurnGate(limit, state_root=state_root))
 
 
+async def admit_configured_gate(drive_root: Path, conversation_key: str) -> PresenceTurnLease:
+    """Coroutine admission into the configured gate ``run_presence_turn`` would otherwise take."""
+    return await _configured_gate(Path(drive_root)).admit(conversation_key)
+
+
 def _stable_numeric_id(prefix: str, value: str) -> int:
     digest = hashlib.sha256(f"{prefix}\0{value}".encode("utf-8")).digest()
     return (1 << 40) + (int.from_bytes(digest[:6], "big") & ((1 << 40) - 1))
 
 
-def _task_id(admission: PresenceAdmission, event: PresenceTurnEvent) -> str:
-    digest = hashlib.sha256(
-        f"{admission.binding_id}\0{event.source_event_id}".encode("utf-8")
-    ).hexdigest()
+def presence_turn_task_id(binding_id: str, source_event_id: str) -> str:
+    """The durable id of one turn; the Host joins a retry to its live execution by it."""
+    digest = hashlib.sha256(f"{binding_id}\0{source_event_id}".encode("utf-8")).hexdigest()
     return f"presence-{digest[:24]}"
 
 
+def _task_id(admission: PresenceAdmission, event: PresenceTurnEvent) -> str:
+    return presence_turn_task_id(admission.binding_id, event.source_event_id)
+
+
+def _stored_turn(drive_root: Path, task_id: str) -> dict[str, Any]:
+    """Read Presence authority without converting an unreadable row into a new event.
+
+    A generic fail-soft read can quarantine a malformed task result and return None.
+    That is correct for a list, but a transport retry must not treat an already
+    admitted event as never started. Quarantine keeps the original id occupied.
+    """
+    from ouroboros.task_result_schema import TASK_RESULT_QUARANTINE_DIR
+
+    path = task_result_path(drive_root, task_id, create=False)
+    quarantined = path.parent / TASK_RESULT_QUARANTINE_DIR
+    try:
+        if (quarantined / path.name).exists() or any(quarantined.glob(f"{task_id}.*.json")):
+            raise PresenceTurnError("presence_result_unreadable", "source_event_id", turn_ref=task_id)
+        return load_task_result(drive_root, task_id, strict=True) or {}
+    except (OSError, ValueError) as exc:
+        if isinstance(exc, PresenceTurnError):
+            raise
+        raise PresenceTurnError("presence_result_unreadable", "source_event_id", turn_ref=task_id) from exc
+
+
 def _cached_result(drive_root: Path, task_id: str) -> PresenceTurnResult | None:
-    stored = load_task_result(drive_root, task_id) or {}
+    stored = _stored_turn(drive_root, task_id)
     if str(stored.get("status") or "") not in {"completed", "failed"} or is_reconciled_presence_placeholder(stored):
-        return None  # a host-lost turn is not a result: the transport's retry runs it again
+        return None  # a host-lost turn is not a result; the later admission guard refuses regeneration
     return presence_result_from_stored(stored, task_id)
+
+
+def _notify_unresolved_turn(drive_root: Path, task_id: str) -> None:
+    """Tell the owner once without speaking to the correspondent or granting a retry.
+
+    The running result is the existing recovery record. A chat write precedes the
+    best-effort notified stamp: a crash in between can repeat the question, never
+    silently mark an undelivered question as delivered. This is not a new work queue.
+    """
+    stored = load_task_result(drive_root, task_id) or {}
+    if stored.get("presence_recovery_owner_notified"):
+        return
+    try:
+        from ouroboros.contracts.chat_id_policy import WEB_UI_CHAT_ID
+        from supervisor import message_bus
+
+        # Unit callers and unrelated installations must not write via a process-global
+        # bridge bound to another data root. The real Host shares this canonical root.
+        if message_bus.DATA_DIR is None or Path(message_bus.DATA_DIR).resolve() != drive_root.resolve():
+            return
+        if message_bus.try_get_bridge() is None:
+            return
+        message_bus.send_with_budget(
+            WEB_UI_CHAT_ID,
+            f"Presence turn {task_id} has an unconfirmed previous effect. Its original "
+            "event remains with the transport; I will not start another model or tool "
+            "attempt automatically. Please answer in Main after checking the prior "
+            "operation and external delivery, so we can decide how to recover it.",
+            role="system", system_type="presence_recovery_required", require_write=True,
+        )
+        from ouroboros.task_results import write_task_result
+
+        write_task_result(drive_root, task_id, str(stored["status"]), strict_existing_dict=True,
+                          presence_recovery_owner_notified=utc_now_iso())
+    except Exception:
+        log.warning("Presence recovery question could not be recorded for %s", task_id, exc_info=True)
 
 
 def _live_task_rows(drive_root: Path, task_id: str, conversation_key: str) -> list[dict[str, Any]]:
@@ -363,6 +506,12 @@ def _pointer_behind(drive_root: Path, conversation_key: str, task_id: str) -> bo
     pointer = _read_previous_turn(drive_root, conversation_key)
     return pointer is None or (
         pointer.get("task_id") != task_id and str(pointer.get("finished_at") or "") <= str(stored.get("ts") or ""))
+
+
+def presence_turn_replay(drive_root: Path, task_id: str, conversation_key: str) -> PresenceTurnResult | None:
+    """A settled turn's durable answer, returned without the gate; None when the turn must (re)run."""
+    cached = _cached_result(Path(drive_root), task_id)
+    return None if cached is None or _pointer_behind(Path(drive_root), conversation_key, task_id) else cached
 
 
 def _delivery_state(reporting_version: int, sends: Sequence[str] | None, text: str) -> str:
@@ -571,12 +720,17 @@ def run_presence_turn(
     event_queue: Any = None,
     agent_factory: Callable[..., Any] | None = None,
     gate: PresenceTurnGate | None = None,
+    admitted: PresenceTurnLease | None = None,
 ) -> PresenceTurnResult:
-    """Run one bounded turn; adapters retain durable provider custody."""
+    """Run one bounded turn; adapters retain durable provider custody.
+
+    ``admitted`` is a lease the caller already took for this conversation (``PresenceTurnGate.admit``):
+    the turn runs under it instead of waiting on ``gate``, and the caller keeps releasing it.
+    """
 
     task_id = _task_id(admission, event)
-    cached = _cached_result(Path(drive_root), task_id)
-    if cached is not None and not _pointer_behind(Path(drive_root), event.conversation_key, task_id):
+    cached = presence_turn_replay(Path(drive_root), task_id, event.conversation_key)
+    if cached is not None:
         return cached
 
     def execute() -> PresenceTurnResult:
@@ -605,9 +759,22 @@ def run_presence_turn(
     def _execute_live() -> PresenceTurnResult:
         # Both locks are held: no other execution of this conversation runs, so a running or
         # interrupted row of this task (not yet reconciled) belongs to a lost attempt too.
-        stored = load_task_result(Path(drive_root), task_id) or {}
+        stored = _stored_turn(Path(drive_root), task_id)
+        if str(stored.get("status") or "") == STATUS_CANCELLED:
+            # An owner's Stop is not an absent turn. Never regenerate work after it,
+            # nor acknowledge the original transport event as completed/silent.
+            raise PresenceTurnError("presence_turn_cancelled", "source_event_id", turn_ref=task_id)
         lost_attempt = is_reconciled_presence_placeholder(stored) or str(stored.get("status") or "") in {
             STATUS_RUNNING, STATUS_INTERRUPTED}
+        if lost_attempt:
+            # A dead local stack is not evidence the provider or an external tool never acted.
+            # In particular a dispatched operation administratively settled as "abandoned"
+            # retains an unknown effect. Retain the original event with its transport, and
+            # leave this row untouched: no new inbound row, agent, or paid generation. A
+            # positively pre-thread failure wrote no running row and reaches the normal path;
+            # a later canonical terminal result wins the cached-replay check above.
+            _notify_unresolved_turn(Path(drive_root), task_id)
+            raise PresenceTurnError("presence_attempt_outcome_unknown", "source_event_id", turn_ref=task_id)
         def chat_generation() -> tuple[int, int] | None:  # rotation renames the live file: a new inode
             try:
                 stat = os.stat(Path(drive_root) / "logs" / "chat.jsonl")
@@ -691,15 +858,161 @@ def run_presence_turn(
                              delivery=_delivery_state(event.delivery_reporting_version, sends, result.text))
         return result
 
+    if admitted is not None:
+        if admitted.conversation_key != str(event.conversation_key or "").strip():
+            raise PresenceTurnError("presence_admission_conversation_mismatch", "conversation_key")
+        return execute()
     return (gate or _configured_gate(Path(drive_root))).run(event.conversation_key, execute)
+
+
+class PresenceTurnNotStarted(RuntimeError):
+    """Nothing ran: admission was interrupted or no thread could start; retry the same event."""
+
+
+class PresenceTurnExecution:
+    """One live host turn: the result every waiter shares and the admission that starts it."""
+
+    __slots__ = ("turn_id", "result", "admission")
+
+    def __init__(self, turn_id: str) -> None:
+        self.turn_id = turn_id
+        self.result: concurrent.futures.Future = concurrent.futures.Future()
+        # RUNNING from birth: a cancelled waiter's wrapper calls Future.cancel(), which a running
+        # future refuses, so no HTTP waiter can cancel the result other waiters share.
+        self.result.set_running_or_notify_cancel()
+        self.admission: asyncio.Task | None = None
+
+
+class PresenceTurnExecutions:
+    """The Host's live presence turns by durable turn id: start one, or join the one already running.
+
+    A turn is work, not its request. It queues on the gate as a coroutine (no thread, shared or
+    owned), then runs on its own daemon thread with the admitting request's context variables
+    (settings, usage and wait scopes), as ``asyncio.to_thread`` carried them. ``reserve``d
+    capacity returns only at true settlement: a cancelled or disconnected waiter leaves the turn
+    and its capacity in place, and a retry of the same event joins it. A turn the process exits
+    under stays host-lost for the transport's retry; the daemon thread never extends a drain.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._live: dict[str, PresenceTurnExecution] = {}
+
+    def live(self) -> list[str]:
+        with self._lock:
+            return list(self._live)
+
+    def start_or_join(
+        self,
+        turn_id: str,
+        *,
+        reserve: Callable[[], bool],
+        release: Callable[[], None],
+        admit: Callable[[], Any],
+        run: Callable[[PresenceTurnLease], Any],
+    ) -> tuple[PresenceTurnExecution | None, bool]:
+        """``(execution, started)``; ``(None, False)`` when ``reserve`` refuses a new turn.
+
+        A live turn is joined before capacity is consulted: a retry never needs a new slot.
+        Call from the event loop; ``admit`` is a coroutine function returning the lease.
+        """
+        with self._lock:
+            live = self._live.get(turn_id)
+            if live is not None:
+                return live, False
+            if not reserve():
+                return None, False
+            execution = self._live[turn_id] = PresenceTurnExecution(turn_id)
+        admission = self._admit_and_start(execution, admit, run, release)
+        try:
+            execution.admission = asyncio.get_running_loop().create_task(admission)
+        except BaseException:
+            admission.close()
+            self._settle(execution, release, error=PresenceTurnNotStarted("presence turn admission did not start"))
+            raise
+        execution.admission.add_done_callback(lambda task: self._admission_ended(execution, release, task))
+        return execution, True
+
+    def _admission_ended(self, execution: PresenceTurnExecution, release: Callable[[], None],
+                         task: asyncio.Task) -> None:
+        # Cancellation lands only before the thread starts — in ``admit`` or before the first step,
+        # where the coroutine's own handlers never run (e.g. a loop shutting down).
+        if task.cancelled() and not execution.result.done():
+            self._settle(execution, release, error=PresenceTurnNotStarted("presence turn admission was interrupted"))
+
+    async def _admit_and_start(self, execution: PresenceTurnExecution, admit: Callable[[], Any],
+                               run: Callable[[PresenceTurnLease], Any], release: Callable[[], None]) -> None:
+        try:
+            lease = await admit()
+        except asyncio.CancelledError:
+            raise  # settled by _admission_ended
+        except BaseException as exc:
+            self._settle(execution, release, error=exc)
+            if not isinstance(exc, Exception):
+                raise
+            return
+        try:
+            thread = threading.Thread(
+                target=contextvars.copy_context().run, args=(self._execute, execution, run, lease, release),
+                name=f"presence-turn-{execution.turn_id}", daemon=True,
+            )
+            thread.start()
+        except BaseException as exc:  # e.g. "can't start new thread": nothing ran, so nothing stays held
+            self._release_lease(execution, lease)
+            error = PresenceTurnNotStarted("presence turn thread could not start")
+            error.__cause__ = exc
+            self._settle(execution, release, error=error)
+            if not isinstance(exc, Exception):
+                raise
+
+    def _execute(self, execution: PresenceTurnExecution, run: Callable[[PresenceTurnLease], Any],
+                 lease: PresenceTurnLease, release: Callable[[], None]) -> None:
+        outcome: Any = None
+        error: BaseException | None = None
+        try:
+            outcome = run(lease)
+        except BaseException as exc:  # relayed unchanged to every waiter
+            error = exc
+        self._release_lease(execution, lease)
+        self._settle(execution, release, result=outcome, error=error)
+
+    @staticmethod
+    def _release_lease(execution: PresenceTurnExecution, lease: PresenceTurnLease) -> None:
+        try:
+            lease.release()
+        except Exception:  # every release callback still ran; settlement must not be lost with it
+            log.warning("presence turn %s could not release its gate lease", execution.turn_id, exc_info=True)
+
+    def _settle(self, execution: PresenceTurnExecution, release: Callable[[], None], *,
+                result: Any = None, error: BaseException | None = None) -> None:
+        # Capacity first, then every waiter sees the outcome, then the id retires: a retry that
+        # lands before retirement joins the settled result instead of paying for another turn.
+        try:
+            release()
+        except Exception:
+            log.warning("presence turn %s could not return its capacity", execution.turn_id, exc_info=True)
+        if error is None:
+            execution.result.set_result(result)
+        else:
+            execution.result.set_exception(error)
+        with self._lock:
+            if self._live.get(execution.turn_id) is execution:
+                del self._live[execution.turn_id]
 
 
 __all__ = [
     "PresenceTurnError",
     "PresenceTurnEvent",
+    "PresenceTurnExecution",
+    "PresenceTurnExecutions",
     "PresenceTurnGate",
+    "PresenceTurnLease",
+    "PresenceTurnNotStarted",
     "PresenceTurnResult",
+    "admit_configured_gate",
     "build_presence_result_event",
     "presence_turn_is_live",
+    "presence_turn_replay",
+    "presence_turn_task_id",
     "run_presence_turn",
 ]

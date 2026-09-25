@@ -571,7 +571,10 @@ def scan_data_paths(root: pathlib.Path = REPO) -> frozenset[str]:
 # one rebuildable projection per conversation written by presence_runner at the end of an executed
 # turn; it has its own row in section 2.
 # 293 -> 295: the disposable test-environment caches (``cache/pip``, ``cache/uv``; test root only).
-EXPECTED_SCAN_PATHS = 295
+# 295 -> 296: Presence recovery inspects the retained quarantine members before
+# deciding whether an event ever started; a quarantined task id cannot become
+# a fresh model generation on a transport retry.
+EXPECTED_SCAN_PATHS = 296
 
 # Scanned paths that must always be present — guards the scanner itself
 # against a silent regression that would shrink coverage while keeping counts
