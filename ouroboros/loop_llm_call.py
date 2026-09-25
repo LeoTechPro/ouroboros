@@ -917,10 +917,8 @@ def _record_llm_call_error(
     """
     safe_error = sanitize_tool_result_for_log(repr(error))
     classification = classify_llm_exception(error, safe_error)
-    if ctx.task_type == "presence":
-        ctx.accumulated_usage["_presence_pre_dispatch_only"] = bool(
-            ctx.accumulated_usage.get("_presence_pre_dispatch_only", True)
-            and presence_refusal_unstarted(error, ctx.round_idx))
+    if ctx.task_type == "presence":  # stays True only while every attempt so far provably never started
+        ctx.accumulated_usage["_presence_pre_dispatch_only"] = bool(ctx.accumulated_usage.get("_presence_pre_dispatch_only", True) and presence_refusal_unstarted(error, ctx.round_idx))
     provider_message = _exception_provider_message(error, safe_error)
     # Display metadata must not enter the classifier's text heuristics.
     display_message = getattr(error, "display_message", None)

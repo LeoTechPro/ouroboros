@@ -79,7 +79,7 @@ TERMINAL_WRITERS = {
     # Presence recovery asks the owner only after a transport retry has found
     # an existing, unresolved turn. This field projection preserves the exact
     # stored status; it cannot terminalize or regenerate the lost attempt.
-    ('ouroboros/presence_runner.py::_notify_unresolved_turn', 'str(stored["status"])'): 'dynamic',
+    ('ouroboros/presence_runner.py::_write_unresolved_notice', 'str(stored["status"])'): 'dynamic',
     # Same terminal status under the locked projector; this records only the
     # deterministic successor link after a positive first-round no-effect proof.
     ('ouroboros/presence_runner.py::_retry_target', 'STATUS_FAILED'): 'terminal',
