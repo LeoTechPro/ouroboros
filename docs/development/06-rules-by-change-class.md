@@ -702,10 +702,22 @@ and what enforces each.
   root subtree (never `$0` on a read failure); no second ledger, no reconciliation LLM.
 - Runtime notices after the first user/assistant/tool turn are `[SYSTEM NOTICE]` user
   notices, not new `role=system` messages; `LLMClient` demotes non-leading system
-  messages at the provider boundary.
+  messages at the provider boundary. On the OpenAI family and the Claudexor route the LEADING
+  system message's declared mutable blocks also travel as one `[SYSTEM NOTICE]` user notice
+  BEFORE the first user turn (`llm_messages.split_leading_system_prefix`), so the
+  marker has these two meanings.
 - **Cache-friendliness invariant.** Keep stable governance/task contracts before
   mutable evidence; timestamps, hashes, counters and task IDs never belong in a
-  cached prefix. Builders place bare breakpoints (four at most in review,
+  cached prefix. "Stable before mutable" is the Anthropic-breakpoint rule; on the
+  OpenAI family (dated 2026-09-25 observation: the whole leading system section plus
+  tools is one cache unit, reused under one routing key) mutable evidence may not
+  share the leading system section at all — the Main builder DECLARES its stable
+  prefix (`_stable_prefix_blocks`, `context_fit.ContextFitProjection.system_message`)
+  and only the transport projects it (`llm_messages.split_leading_system_prefix` on
+  `llm_attempt.openai_family_route` and in `llm_claudexor._request`, whose backend
+  reuses a donor's prefix only up to an input-item boundary); never project in a builder, never widen the
+  family by name resemblance, and keep the notice header byte-stable (no clocks,
+  hashes, ids). Builders place bare breakpoints (four at most in review,
   `review_substrate.assert_cache_breakpoint_cap`); only
   `LLMClient._normalize_payload_cache_ttl` finalizes them. Preserve existing
   provider hints and recovery; do not add a generic cache/retry framework.
@@ -714,9 +726,11 @@ and what enforces each.
   cached input; a main-loop payload option lives in `main_loop_wire_options`, never
   in one lane after its builder (`tests/test_wrapup_real_send_parity.py`). Preserve `context_fit.seal_task_transcript`'s single message
   marker as it moves between task and tool result; direct Anthropic and
-  OpenRouter keep their supported wire markers. OpenRouter's derived identity
-  excludes cache/host metadata, preserving real task/model differences and
-  explicit affinity. Claudexor's `cache_key_for_model` is shared per install/model
+  OpenRouter keep their supported wire markers. OpenRouter's derived session is
+  per family (`llm_routing._openrouter_session_identity`): OpenAI family = one per
+  model + governance prefix; every other family = conversation-stable from stable
+  policy/model plus the first-user projection, excluding cache/host metadata;
+  explicit affinity and reroute rotation keep precedence. Claudexor's `cache_key_for_model` is shared per install/model
   across tasks, children and wakes: Codex reuses cross-conversation prefixes
   only under the same session. Other API routes retain their prefix identity.
   A wake shares an owner turn's schemas/governance; autonomy and wake reason
@@ -728,6 +742,8 @@ and what enforces each.
   send; image eviction is unchanged. Mechanisms: ARCHITECTURE §6 "Context fitting,
   retry, and compaction" / "Task lifecycle" / "Caller-owned subscription model
   calls". Enforce with `tests/test_review_prompt_caching.py`,
+  `tests/test_openai_system_prefix_split.py` (projection, placement, per-family
+  session), `tests/test_prompt_cache_v664.py` (derived identity, one exact retry),
   `tests/test_transcript_prefix.py` (real Main loop, plain/multipart) and
   `tests/test_transcript_provider_shapes.py` (local/GigaChat); CHECKLISTS item 22.
 - Only sealed reasoning artifacts bind fallback to their endpoint

@@ -645,7 +645,11 @@ answer keep both forms readable. Anatomy, top to bottom:
    contain paragraphs, lists, checklists, tables and code; those blocks keep
    the shared rich-content gutter, rhythm and bounded code scrolling. The card
    does not infer a title from the first line or rewrite authored Markdown to
-   make it fit.
+   make it fit, and the question has no quiz-specific length cap. Directly under
+   it, a muted plain-text host line (`.chat-quiz-host-facts`, `--type-meta`,
+   `--text-meta`) states what only the host knows: the asking task, how its run
+   started and when the owner last wrote in this chat, with unknown facts said
+   as unknown; the line is absent when the card carries no `host_facts`.
 3. **Stake** — optional one-liner (`At stake: …`), `--type-meta`, `--text-meta`.
 4. **Options** — real owner actions: buttons with `--text-primary` labels,
    legible at rest; an optional per-option detail steps down to meta ink.
@@ -1008,6 +1012,10 @@ desktop window size merely because a step has several fields.
 - Field labels are sentence case at meta ink — a wizard step shows a dozen at
   once, and its job is to get one value typed, not to present a grid of
   headings.
+
+### Advanced settings
+
+The panels a new owner opens first (Models, Providers, Agents, Behavior) show only what an owner touches in the first week. Anything a typical owner never needs, or would have to look up before using it safely, lives under Advanced: deployment plumbing (bind hosts, process pools, runtime limits), transport and trust knobs such as the extra CA bundle, MCP servers, and the rarely used provider cards, which stay on the Providers page but fold under "More providers". A control that needs a paragraph of explanation before it can be used safely is an Advanced control by definition. The engineering seam is the `advanced` settings panel and the `advanced: true` card flag in `web/modules/settings_ui.js` (DEVELOPMENT "Onboarding and Settings surfaces").
 
 ## 8. Migration state
 

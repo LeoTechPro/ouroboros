@@ -12,6 +12,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 
 from ouroboros.config import load_settings
+from ouroboros.net_transport import ExtraCaBundleError, extra_ca_bundle, verify_kwargs
 from ouroboros.gateway._helpers import json_error, json_exception
 from ouroboros.observability import redact_projection
 from ouroboros.provider_models import (
@@ -190,6 +191,9 @@ async def _fetch_gigachat_model_catalog(
     from gigachat import GigaChatAsyncClient
 
     kwargs: dict = {"scope": scope or "GIGACHAT_API_PERS", "verify_ssl_certs": verify_ssl_certs}
+    bundle = extra_ca_bundle()
+    if bundle:
+        kwargs["ca_bundle_file"] = bundle
     if credentials:
         kwargs["credentials"] = credentials
     if user:
@@ -523,11 +527,19 @@ async def api_model_catalog(_request: Request) -> JSONResponse:
     specs = _provider_specs(settings)
 
     timeout = httpx.Timeout(_CATALOG_HTTP_TIMEOUT_SEC)
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        results = await asyncio.gather(*[
-            _load_provider(client, provider_id, loader)
-            for provider_id, loader in specs
-        ])
+    try:
+        verify = verify_kwargs()
+    except ExtraCaBundleError as exc:
+        # A misconfigured trust bundle is a fact for the owner to read, not a bare 500:
+        # keep the engine catalog, name the setting, skip the API providers this turn.
+        errors.append({"provider_id": "extra_ca_bundle", "error": str(exc), "stage": "trust", "duration_ms": 0})
+        results = []
+    else:
+        async with httpx.AsyncClient(timeout=timeout, **verify) as client:
+            results = await asyncio.gather(*[
+                _load_provider(client, provider_id, loader)
+                for provider_id, loader in specs
+            ])
 
     for provider_id, provider_items, error, stage, duration_ms in results:
         if error:
@@ -643,7 +655,7 @@ async def api_openai_compatible_models(request: Request) -> JSONResponse:
         api_key = str(body.get("apiKey", "") or "").strip()
         if not base_url:
             return json_error("baseUrl is required", 400)
-        async with httpx.AsyncClient(timeout=10.0) as client:
+        async with httpx.AsyncClient(timeout=10.0, **verify_kwargs()) as client:
             models = await _fetch_openai_compatible_model_catalog(
                 client, "openai-compatible", "OpenAI-compatible", api_key, base_url
             )
@@ -682,7 +694,7 @@ def _discover_provider_test_model(provider_id: str, settings: dict) -> str:
         loader = dict(_provider_specs(settings)).get(provider_id)
         if loader is None:
             return ""
-        async with httpx.AsyncClient(timeout=httpx.Timeout(_CATALOG_HTTP_TIMEOUT_SEC)) as client:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(_CATALOG_HTTP_TIMEOUT_SEC), **verify_kwargs()) as client:
             items = await loader(client)
         return str((items[0] if items else {}).get("value") or "").strip()
 

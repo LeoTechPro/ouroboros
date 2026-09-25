@@ -957,8 +957,12 @@ class LocalChatBridge:
         state: str = "open",
         task_id: str = "",
         wait_for_answer: bool = False,
+        host_facts: str = "",
     ) -> Tuple[bool, str]:
-        """Send an owner quiz card to the UI and host event subscribers."""
+        """Send an owner quiz card to the UI and host event subscribers.
+
+        ``host_facts`` (the host's sentence under the question) rides the frame, the
+        event and the chat row when non-empty; ``project_name`` rides the EVENT only."""
         if is_a2a_chat_id(chat_id):
             return True, "ok"
         qid = str(quiz_id or "").strip()
@@ -988,7 +992,18 @@ class LocalChatBridge:
             "chat_id": int(chat_id or 0),
             "task_id": str(task_id or ""),
         }
+        if host_facts:
+            msg["host_facts"] = str(host_facts)  # the envelope literal keeps constant keys (contract scan)
         stamp_project_thread(DATA_DIR, msg)
+        project = None
+        if msg.get("project_thread"):
+            try:
+                from ouroboros.projects_registry import list_reserved_projects
+
+                project = next((row for row in list_reserved_projects(DATA_DIR)
+                                if row.get("chat_id") == int(chat_id)), None)
+            except Exception:
+                log.debug("Quiz project lookup failed", exc_info=True)
         if self._broadcast_fn:
             self._broadcast_fn(msg)
         quiz_transport = dict(self._chat_transports.get(int(chat_id or 0), {}) or {})
@@ -1004,6 +1019,8 @@ class LocalChatBridge:
             "assumption": payload["assumption"],
             "state": str(state or "open"),
             "ts": ts,
+            **({"host_facts": str(host_facts)} if host_facts else {}),
+            **({"project_name": str(project["name"])} if project and project.get("name") else {}),
         })
         try:
             owner_id = int(load_state().get("owner_id") or 0)
@@ -1019,6 +1036,7 @@ class LocalChatBridge:
                 "stake": payload["stake"],
                 "assumption": payload["assumption"],
                 "state": str(state or "open"),
+                **({"host_facts": str(host_facts)} if host_facts else {}),
             },
         )
         _advance_project_visible_revision(chat_id)
@@ -1026,10 +1044,7 @@ class LocalChatBridge:
             try:
                 from ouroboros.owner_quiz import quiz_states
                 from ouroboros.project_dialogue import project_question_pointer
-                from ouroboros.projects_registry import list_reserved_projects
 
-                project = next((row for row in list_reserved_projects(DATA_DIR)
-                                if row.get("chat_id") == int(chat_id)), None)
                 pointer = project_question_pointer(msg, quiz_states(DATA_DIR, task_id).get(qid), project)
                 if pointer:
                     frame = {
@@ -1045,7 +1060,7 @@ class LocalChatBridge:
                     # The complete pointer row (ChatOutbound mirrors): present only when known.
                     for key in ("question", "options", "option_details", "stake", "assumption", "recommended_index",
                                 "answered_index", "comment", "wait_for_answer", "wait_ended_at",
-                                "owner_wait_resume_reason"):
+                                "owner_wait_resume_reason", "host_facts"):
                         if key in pointer:
                             frame[key] = pointer[key]
                     self._broadcast_fn(frame)

@@ -1,7 +1,7 @@
 ---
 name: telegram
 description: Owner-only Telegram text bridge and Mini App gateway for the existing Ouroboros interface.
-version: 1.2.4
+version: 1.2.5
 type: extension
 entry: plugin.py
 plugin_api: "2.0"
@@ -52,6 +52,10 @@ form shows saved values before Save, and shortens the four long option labels.
 Version 1.2.4 always sends one short line when a task does not finish cleanly, with
 the same status word and reason sentence the task card shows; the task-completion
 toggle now only adds the clean finishes.
+Version 1.2.5 shows the whole quiz card: its project, the host's facts about the
+asking task, and every option's detail, with localized field names; a card too
+long for one Telegram message arrives as ordered parts followed by the keyboard
+message, and nothing authored is cut.
 
 The Mini App exposes the unchanged Ouroboros SPA through the established
 owner-authenticated sidecar and a pinned Cloudflare Quick Tunnel. It is enabled

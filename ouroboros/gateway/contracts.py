@@ -148,6 +148,7 @@ class ChatOutbound(TypedDict):
     recommended_index: NotRequired[int]
     answered_index: NotRequired[int]
     comment: NotRequired[str]
+    host_facts: NotRequired[str]  # the mirrored card's host sentence (QuizOutbound.host_facts)
     task_incident: NotRequired[str]
     # A cancellation fault names the PHYSICAL task it could not settle when it differs from the logical task id.
     cancel_physical_task_id: NotRequired[str]
@@ -387,8 +388,7 @@ class QuizOutbound(TypedDict):
     Optional questions continue under ``assumption``; ``wait_for_answer`` marks
     required waiting without an implied answer. ``state`` carries lifecycle.
     Replay merges the stored ``answered_index`` and verbatim ``comment``; a
-    comment without an index is the owner's whole answer, not an option choice.
-    """
+    comment without an index is the owner's whole answer, not an option choice."""
 
     type: Literal["quiz"]
     role: Literal["assistant"]
@@ -402,6 +402,7 @@ class QuizOutbound(TypedDict):
     ts: str
     answered_index: NotRequired[int]
     comment: NotRequired[str]
+    host_facts: NotRequired[str]  # host-written, never the model's: asking task, run start, owner's last message
     chat_id: NotRequired[int]
     task_id: NotRequired[str]
     project_thread: NotRequired[bool]

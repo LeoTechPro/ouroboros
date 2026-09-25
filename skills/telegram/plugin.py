@@ -1307,14 +1307,10 @@ def _make_quiz(api):
                 return
             question = str(event.get("question") or "").strip()
             raw_options = event.get("options") if isinstance(event.get("options"), list) else []
-            labels = []
-            for option in raw_options:
-                if isinstance(option, dict):
-                    label = str(option.get("label") or "").strip()
-                    if label:
-                        labels.append(f"★ {label}" if option.get("recommended") is True else label)
             # Shared quiz contract cap: ouroboros.tools.core._MAX_QUIZ_OPTIONS.
-            labels = labels[:6]
+            plain_labels, details, recommended_index = telegram_quiz.card_options(raw_options, limit=6)
+            # Buttons and the remembered record keep the starred caption.
+            labels = telegram_quiz.button_labels(plain_labels, recommended_index)
             if not question or len(labels) < 2:
                 return
             task_id = str(event.get("task_id") or "").strip()
@@ -1326,21 +1322,36 @@ def _make_quiz(api):
             assumption = str(event.get("assumption") or "").strip()
             lang = _poller_preferences(api)[4]
             wait_for_answer = event.get("wait_for_answer") is True
+            # Both optional: events from an older host carry neither.
+            project_name = str(event.get("project_name") or "").strip()
+            host_facts = str(event.get("host_facts") or "").strip()
+            card = {
+                "project_name": project_name, "option_details": details,
+                "recommended_index": recommended_index, "host_facts": host_facts, "lang": lang,
+            }
             body = telegram_quiz.render_quiz_text(
-                question, labels, stake, assumption, wait_for_answer=wait_for_answer)
+                question, plain_labels, stake, assumption, wait_for_answer=wait_for_answer, **card)
+            compact = telegram_quiz.render_compact_text(
+                plain_labels, project_name=project_name, recommended_index=recommended_index, lang=lang)
             token = telegram_quiz.mint_token(task_id, quiz_id)
             # One button per option; a reply to the card is a free-form answer.
-            # Both reach the host's decision ingress (#472).
-            message_id = await client.send_message_with_inline_keyboard(
-                chat_id, f"{body}\n{telegram_quiz.hint(lang)}",
-                telegram_quiz.quiz_keyboard(token, labels), parse_mode="",
+            # Both reach the host's decision ingress (#472). An overflowing card
+            # arrives as plain parts followed by the compact keyboard message.
+            message_id, overflowed = await telegram_quiz.send_quiz_card(
+                client, chat_id, body=body, compact=compact, hint_text=telegram_quiz.hint(lang),
+                keyboard=telegram_quiz.quiz_keyboard(token, labels),
             )
+            if overflowed:
+                settled_text = compact
+            elif wait_for_answer:
+                # The answer edit keeps optional history, not a live waiting claim.
+                settled_text = telegram_quiz.render_quiz_text(question, plain_labels, stake, "", **card)
+            else:
+                settled_text = body
             telegram_quiz.remember_quiz(api, token, {
                 "task_id": task_id, "quiz_id": quiz_id, "chat_id": chat_id,
                 "message_id": int(message_id or 0), "options": labels,
-                # The answer edit keeps optional history, not a live waiting claim.
-                "text": (telegram_quiz.render_quiz_text(question, labels, stake, "")
-                         if wait_for_answer else body),
+                "text": settled_text,
             })
         except Exception as exc:
             api.log("error", f"Telegram quiz error: {exc}")
