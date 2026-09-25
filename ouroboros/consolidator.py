@@ -38,11 +38,22 @@ def _consolidation_route() -> Tuple[str, bool]:
 
 
 def _light_route() -> Any:
-    """The configured Light route as a history/meta stamp; unknown when it cannot be resolved."""
+    """The CONFIGURED Light route — the route a call would dispatch on now.
+
+    A dispatch key, never a provenance stamp: what actually answered is
+    ``knowledge.observed_route_stamp`` over the returned usage (a model-wait
+    override or account rotation changes the answer, not the configuration)."""
     try:
         return dict(zip(("model", "use_local"), _consolidation_route()))
     except Exception:
         return "unknown"
+
+
+def _route_stamp(usage: Any) -> Any:
+    """The route the usage says answered, for a history stamp; unknown without a physical fact."""
+    from ouroboros.knowledge import observed_route_stamp
+
+    return observed_route_stamp(usage)
 
 
 def _emit_event(logs_dir: pathlib.Path, kind: str, **fields: Any) -> None:
@@ -155,7 +166,8 @@ def consolidate(
             room_registry_root=room_registry_root)
         if (compact_chronicle and not (usage or {}).get("_consolidation_errors")
                 and not (pressure_fits is not None and pressure_fits())):
-            reduced = _compact_chronicle(blocks_path, llm_client, identity_text, knowledge_context)
+            reduced = _compact_chronicle(blocks_path, llm_client, identity_text, knowledge_context,
+                                         meta_path=meta_path)
             merged = _merge_consolidation_usage(*([usage] if usage else []), reduced)
             # A fixed-key merge would drop this receipt; a chronicle-only pass wrote no block.
             merged["_blocks_written"] = (usage or {}).get("_blocks_written", 0)
@@ -347,7 +359,8 @@ def _run_block_consolidation(
             break
         new_blocks.append({
             "ts": utc_now_iso(), "type": "summary", "message_count": len(chunk), **block,
-            **({"knowledge_entries": usage["_knowledge_entries"]} if usage.get("_knowledge_entries") else {})})
+            **({"knowledge_entries": usage["_knowledge_entries"], "_nomination_route": _route_stamp(usage)}
+               if usage.get("_knowledge_entries") else {})})
         processed += len(chunk)
 
     # Set after the last merge of this stretch: _merge_consolidation_usage forwards
@@ -363,6 +376,9 @@ def _run_block_consolidation(
         atomic_write_json(meta_path, meta)
         return total_usage
 
+    # The route that nominated a block's entries is a history stamp for the
+    # writes below, never a persisted block field; receipts keep their pairs.
+    nomination_routes = {id(block): block.pop("_nomination_route", "unknown") for block in new_blocks}
     pending_knowledge = [(block, block.pop("knowledge_entries")) for block in new_blocks
                          if block.get("knowledge_entries")]
     if pending_knowledge:
@@ -391,24 +407,27 @@ def _run_block_consolidation(
     all_blocks = existing_blocks + new_blocks
 
     if len(all_blocks) > MAX_SUMMARY_BLOCKS and block is not None:
-        compress_count = min(ERA_COMPRESS_COUNT, len(all_blocks) - 1)
-        old_blocks = all_blocks[:compress_count]
         # Gap markers are DURABLE discontinuity facts (BIBLE P1) that keep their
         # chronological positions, and an earlier era is a boundary too: an era
         # compresses ONE CONTIGUOUS run of ordinary summary blocks, never a span
-        # bridging a discontinuity and never a summary of its own summary.
-        run_start = next((i for i, b in enumerate(old_blocks) if not _is_run_boundary(b)), None)
+        # bridging a discontinuity and never a summary of its own summary. The
+        # run is the OLDEST run of up to ERA_COMPRESS_COUNT summary blocks anywhere
+        # before the newest block — eras and gaps ahead of it are skipped, not a
+        # reason to stop compressing (a window of the first four blocks went blind
+        # once those four were eras).
+        run_start = next((i for i, b in enumerate(all_blocks[:-1]) if not _is_run_boundary(b)), None)
         era = None
         if run_start is not None:
             run_end = run_start
-            while run_end < len(old_blocks) and not _is_run_boundary(old_blocks[run_end]):
+            while (run_end < len(all_blocks) - 1 and run_end - run_start < ERA_COMPRESS_COUNT
+                   and not _is_run_boundary(all_blocks[run_end])):
                 run_end += 1
-            era, era_usage = _era_for_run(old_blocks[run_start:run_end], meta, source_path.parent,
+            era, era_usage = _era_for_run(all_blocks[run_start:run_end], meta, source_path.parent,
                                           llm_client, identity_text, knowledge_context)
             if era_usage is not None:
                 total_usage = _merge_consolidation_usage(total_usage, era_usage)
         if era is not None:
-            all_blocks = [*old_blocks[:run_start], era, *old_blocks[run_end:], *all_blocks[compress_count:]]
+            all_blocks = [*all_blocks[:run_start], era, *all_blocks[run_end:]]
 
     _write_locked_json(blocks_path, all_blocks)
 
@@ -418,7 +437,7 @@ def _run_block_consolidation(
             block["knowledge_writes"] = _write_knowledge_entries(
                 pathlib.Path(knowledge_context.drive_root) / "memory" / "knowledge",
                 entries, context=knowledge_context, stamp={
-                    "writer": "consolidation", "route": _light_route(),
+                    "writer": "consolidation", "route": nomination_routes.get(id(block), "unknown"),
                     "writer_input_ref": block["knowledge_source_ref"]})
             published.extend(block["knowledge_writes"])
             if any(not outcome["ok"] for outcome in block["knowledge_writes"]):
@@ -459,12 +478,19 @@ def _light_call(llm_client: Any, knowledge_context: Any, model_route: Dict[str, 
 
 def _merge_consolidation_usage(*usages: Dict[str, Any]) -> Dict[str, Any]:
     """Combine helper usage without turning absent spend/counters into zero."""
+    from ouroboros.knowledge import observed_route_stamp
+
     merged: Dict[str, Any] = {}
     for key in ("prompt_tokens", "completion_tokens", "total_tokens", "cost"):
         values = [usage.get(key) for usage in usages]
         merged[key] = None if None in values else sum(values)
     for key in ("ledger_attempt_ids", "_consolidation_errors"):
         merged[key] = [value for usage in usages for value in usage.get(key, [])]
+    # The route that answered the LAST physical send of this unit; a physical
+    # usage carries provider/resolved_model, a merged one its forwarded stamp.
+    routes = [route for route in (observed_route_stamp(usage) for usage in usages) if isinstance(route, dict)]
+    if routes:
+        merged["_observed_route"] = routes[-1]
     return merged
 
 
@@ -949,9 +975,10 @@ def _era_for_run(run: List[Dict[str, Any]], meta: Dict[str, Any], logs_dir: path
 
     Per-room sections and the length-adaptive correction can make an era longer than
     its blocks; keeping the blocks loses nothing. The refusal is ``era_retry`` in meta
-    (source hash + Light route, after ``consolidation_retry``): the same source on the
-    same route is not paid for again, and every refusal, attempted or not, is an
-    ``era_not_shorter`` event. Returns ``(era or None, usage or None without a call)``."""
+    (source hash + the route that ANSWERED, after ``consolidation_retry``): the same
+    source is not paid for again while the route a call would dispatch on now is the
+    one that refused, and every refusal, attempted or not, is an ``era_not_shorter``
+    event. Returns ``(era or None, usage or None without a call)``."""
     fact = {"source_sha256": hashlib.sha256(json.dumps(run, ensure_ascii=False, sort_keys=True).encode()).hexdigest(),
             "route": _light_route(), "blocks": len(run), "source_chars": sum(len(b.get("content", "")) for b in run)}
     retry = meta.get("era_retry") or {}
@@ -961,8 +988,12 @@ def _era_for_run(run: List[Dict[str, Any]], meta: Dict[str, Any], logs_dir: path
     era, usage = _compress_blocks_to_era(run, llm_client, identity_text,
                                          **({"knowledge_context": context} if context is not None else {}))
     if era is not None and len(era.get("content", "")) >= fact["source_chars"]:
-        meta["era_retry"] = {"source_sha256": fact["source_sha256"], "route": fact["route"]}
-        _emit_event(logs_dir, "era_not_shorter", attempted=True, era_chars=len(era["content"]), **fact)
+        # ``route`` is the dispatch key the next attempt compares against; the
+        # observed route is what actually produced the not-shorter era.
+        meta["era_retry"] = {"source_sha256": fact["source_sha256"], "route": fact["route"],
+                             "observed_route": _route_stamp(usage)}
+        _emit_event(logs_dir, "era_not_shorter", attempted=True, era_chars=len(era["content"]),
+                    observed_route=_route_stamp(usage), **fact)
         return None, usage
     if era is not None:
         meta.pop("era_retry", None)
@@ -970,9 +1001,24 @@ def _era_for_run(run: List[Dict[str, Any]], meta: Dict[str, Any], logs_dir: path
 
 
 def _compact_chronicle(blocks_path: pathlib.Path, llm_client: Any,
-                       identity_text: str, context: Any) -> Dict[str, Any]:
-    """Reduce every contiguous run of summary blocks, preserving gaps, earlier eras and exact sources."""
+                       identity_text: str, context: Any, *, meta_path: Optional[pathlib.Path] = None) -> Dict[str, Any]:
+    """Reduce every contiguous run of summary blocks, preserving gaps, earlier eras and exact sources.
+
+    The pressure pass consults and records the SAME ``era_retry`` as the ordinary
+    run (``meta_path``): a run that was not shorter on this route is not paid for
+    again by the next pressure pass on unchanged input. Without a meta path (a
+    caller that has none) the pass attempts and records nothing."""
     blocks = _load_blocks(blocks_path)
+    meta: Dict[str, Any] = {}
+    if meta_path is not None:
+        try:
+            meta = _load_meta(meta_path)
+        except Exception:
+            # An unreadable meta is the caller's typed maintenance gap; the
+            # chronicle pass must not write a rebuilt meta over it.
+            log.warning("Chronicle pass cannot read dialogue meta; era_retry not consulted", exc_info=True)
+            meta_path = None
+    retry_before = json.dumps(meta.get("era_retry"), sort_keys=True)
     reduced, usages, start = [], [], 0
     while start < len(blocks):
         if _is_run_boundary(blocks[start]):
@@ -983,17 +1029,19 @@ def _compact_chronicle(blocks_path: pathlib.Path, llm_client: Any,
         while end < len(blocks) and not _is_run_boundary(blocks[end]):
             end += 1
         run = blocks[start:end]
-        # A measured-pressure pass always attempts: its throwaway meta consults no retry record.
-        era, usage = _era_for_run(run, {}, blocks_path.parent.parent / "logs", llm_client, identity_text, context)
-        usages.append(usage)
+        era, usage = _era_for_run(run, meta, blocks_path.parent.parent / "logs", llm_client, identity_text, context)
+        if usage is not None:  # a recorded refusal makes no call and has no usage
+            usages.append(usage)
         reduced.extend([era] if era is not None else run)
-        if usage.get("_consolidation_errors"):
+        if (usage or {}).get("_consolidation_errors"):
             reduced.extend(blocks[end:])
             break
         start = end
     if reduced != blocks:
         _mutate_locked_json_list(blocks_path, lambda live:
             reduced + live[len(blocks):] if live[:len(blocks)] == blocks else live)
+    if meta_path is not None and json.dumps(meta.get("era_retry"), sort_keys=True) != retry_before:
+        atomic_write_json(meta_path, meta)
     return _merge_consolidation_usage(*usages)
 
 
@@ -1073,7 +1121,7 @@ def maintain_memory_pressure(memory: Any, llm_client: Any, context: Any, *,
             try:
                 entries = knowledge.bind_entries(json.loads(raw).get("knowledge_entries"))
                 action["writes"] = _write_knowledge_entries(shelf, entries, context=context, stamp={
-                    "writer": "knowledge_maintenance", "route": _light_route(), "writer_input_ref": source_ref})
+                    "writer": "knowledge_maintenance", "route": _route_stamp(usage), "writer_input_ref": source_ref})
             except (ValueError, TypeError, AttributeError) as exc:
                 action["error"] = str(exc)
         actions.append(action)
@@ -1405,7 +1453,7 @@ Respond with JSON only (no fences), after any useful knowledge reads:
             return usage
         compressed_block["metadata"] = {"source_ref": source_ref}
         writes = _write_knowledge_entries(knowledge_dir, entries, context=context, stamp={
-            "writer": "scratchpad_consolidation", "route": _light_route(), "writer_input_ref": source_ref})
+            "writer": "scratchpad_consolidation", "route": _route_stamp(usage), "writer_input_ref": source_ref})
         if writes:
             compressed_block["metadata"]["knowledge_writes"] = writes
             if any(not row["ok"] for row in writes):

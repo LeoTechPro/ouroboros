@@ -164,12 +164,13 @@ def _knowledge_write(
                 raise ValueError("The improvement-backlog requires parseable ### ibl-<id> blocks with - summary: lines; the global backlog was preserved")
             _record_backlog_history(backlog_path(root), sanitized, mode, str(getattr(ctx, "task_id", "") or ""))
             return f"✅ Knowledge '{sanitized}' merged into the global backlog ({merged} item(s))."
-        # The turn is the writer; its observed model route is the loop's fact when
-        # the lane reported one, otherwise the stamp stays honestly unknown.
+        # The turn is the writer; the route stamp is the route that ANSWERED the
+        # loop's last round (provider + resolved model, account when Claudexor
+        # served it), recorded by the loop, otherwise honestly unknown.
         result = knowledge_store.write_knowledge_note(
             _address(ctx, sanitized, scope), content, mode, expected_revision,
             str(getattr(ctx, "task_id", "") or ""), old_str, writer="turn",
-            route=(getattr(ctx, "_accumulated_usage", None) or {}).get("_model_route") or None,
+            route=(getattr(ctx, "_accumulated_usage", None) or {}).get("_observed_route") or None,
         )
     except ValueError as exc:
         return _publish_tool_result(ctx, ToolResult(

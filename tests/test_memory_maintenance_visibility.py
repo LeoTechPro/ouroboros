@@ -109,19 +109,36 @@ def test_an_earlier_era_bounds_the_run_and_is_never_recompressed(tmp_path, fit, 
     chat, blocks_path, meta_path = _seed_run(tmp_path, old)
     seen = _fake_era(monkeypatch, shorter=True)
     assert c._run_block_consolidation(chat, blocks_path, meta_path, _LLM(), "", force_tail=True)
-    assert seen == [old[1:c.ERA_COMPRESS_COUNT]]  # the window's summary blocks, the era excluded
+    run = old[1:1 + c.ERA_COMPRESS_COUNT]
+    assert seen == [run]  # the oldest run of summary blocks, the era ahead of it excluded
     stored = json.loads(blocks_path.read_text(encoding="utf-8"))
     assert stored[0] == old[0]  # the old era keeps its place and bytes
     assert stored[1]["type"] == "era" and stored[1]["content"] != old[0]["content"]
-    assert stored[2:2 + len(old) - c.ERA_COMPRESS_COUNT] == old[c.ERA_COMPRESS_COUNT:]  # the rest untouched
+    assert stored[2:2 + len(old) - 1 - c.ERA_COMPRESS_COUNT] == old[1 + c.ERA_COMPRESS_COUNT:]  # the rest untouched
 
 
-def test_a_window_of_eras_only_makes_no_call_and_keeps_every_block(tmp_path, fit, monkeypatch):
+def test_eras_ahead_of_the_run_never_hide_the_later_summaries(tmp_path, fit, monkeypatch):
+    # Once the oldest four blocks were eras, a fixed four-block window found no
+    # summary to compress and the later summaries were never compressed (review F1).
     old = [_era_block(str(i)) for i in range(c.ERA_COMPRESS_COUNT)] + _summary_blocks(6)
     chat, blocks_path, meta_path = _seed_run(tmp_path, old)
     seen = _fake_era(monkeypatch, shorter=True)
     assert c._run_block_consolidation(chat, blocks_path, meta_path, _LLM(), "", force_tail=True)
-    assert seen == []
+    run = old[c.ERA_COMPRESS_COUNT:2 * c.ERA_COMPRESS_COUNT]
+    assert seen == [run]
+    stored = json.loads(blocks_path.read_text(encoding="utf-8"))
+    assert stored[:c.ERA_COMPRESS_COUNT] == old[:c.ERA_COMPRESS_COUNT]  # the old eras keep their bytes
+    assert stored[c.ERA_COMPRESS_COUNT]["type"] == "era" and stored[c.ERA_COMPRESS_COUNT] not in old
+    assert stored[c.ERA_COMPRESS_COUNT + 1:-1] == old[2 * c.ERA_COMPRESS_COUNT:]
+    assert len(stored) == len(old) + 1 - c.ERA_COMPRESS_COUNT + 1
+
+
+def test_a_history_of_eras_alone_makes_no_call_and_keeps_every_block(tmp_path, fit, monkeypatch):
+    old = [_era_block(str(i)) for i in range(c.MAX_SUMMARY_BLOCKS)]
+    chat, blocks_path, meta_path = _seed_run(tmp_path, old)
+    seen = _fake_era(monkeypatch, shorter=True)
+    assert c._run_block_consolidation(chat, blocks_path, meta_path, _LLM(), "", force_tail=True)
+    assert seen == []  # the newest summary block is never its own era; nothing else is compressible
     stored = json.loads(blocks_path.read_text(encoding="utf-8"))
     assert stored[:len(old)] == old and len(stored) == len(old) + 1
 
@@ -141,6 +158,35 @@ def test_the_chronicle_pass_treats_eras_and_gaps_as_boundaries(tmp_path, fit, mo
     assert [b["type"] for b in stored] == ["era", "era", "gap", "era"]
 
 
+def test_the_chronicle_pass_consults_and_records_the_same_era_retry(tmp_path, fit, monkeypatch):
+    # Review F2: a throwaway meta let every pressure pass pay again for a run that was not
+    # shorter, and a recorded refusal (no call, no usage) would have crashed the pass.
+    blocks_path = tmp_path / "memory" / "dialogue_blocks.json"
+    meta_path = tmp_path / "memory" / "dialogue_meta.json"
+    blocks_path.parent.mkdir(parents=True)
+    blocks = _summary_blocks(3)
+    blocks_path.write_text(json.dumps(blocks), encoding="utf-8")
+    c.atomic_write_json(meta_path, {"last_consolidated_offset": 7})
+    seen = _fake_era(monkeypatch, shorter=False)
+
+    first = c._compact_chronicle(blocks_path, _LLM(), "", None, meta_path=meta_path)
+    assert len(seen) == 1 and first["cost"] == 0.01
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    assert meta["last_consolidated_offset"] == 7  # the rest of meta survives the record
+    assert meta["era_retry"]["route"] == {"model": "test/model", "use_local": False}
+    assert json.loads(blocks_path.read_text(encoding="utf-8")) == blocks
+
+    second = c._compact_chronicle(blocks_path, _LLM(), "", None, meta_path=meta_path)
+    assert len(seen) == 1  # the recorded refusal made no second paid call
+    assert second["cost"] == 0 and second["_consolidation_errors"] == []  # no call was made
+    assert [e["attempted"] for e in _events(tmp_path, "era_not_shorter")] == [True, False]
+    assert json.loads(blocks_path.read_text(encoding="utf-8")) == blocks
+
+    # A pass without a meta path attempts and records nothing, as before.
+    assert c._compact_chronicle(blocks_path, _LLM(), "", None)["cost"] == 0.01
+    assert len(seen) == 2 and json.loads(meta_path.read_text(encoding="utf-8")) == meta
+
+
 # --- a not-shorter era is recorded, visible, and not paid for twice -----------------
 
 
@@ -153,9 +199,10 @@ def test_a_not_shorter_era_records_era_retry_and_the_event(tmp_path, fit, monkey
     stored = json.loads(blocks_path.read_text(encoding="utf-8"))
     assert stored[:c.MAX_SUMMARY_BLOCKS] == old and not any(b["type"] == "era" for b in stored)
     retry = json.loads(meta_path.read_text(encoding="utf-8"))["era_retry"]
-    assert retry == {"source_sha256": retry["source_sha256"], "route": {"model": "test/model", "use_local": False}}
+    assert retry == {"source_sha256": retry["source_sha256"], "route": {"model": "test/model", "use_local": False},
+                     "observed_route": store.UNKNOWN_STAMP}  # the fake era usage names no physical route
     events = _events(tmp_path, "era_not_shorter")
-    assert len(events) == 1 and events[0]["attempted"] is True
+    assert len(events) == 1 and events[0]["attempted"] is True and events[0]["observed_route"] == store.UNKNOWN_STAMP
     assert events[0]["source_sha256"] == retry["source_sha256"] and events[0]["blocks"] == c.ERA_COMPRESS_COUNT
     assert events[0]["era_chars"] > events[0]["source_chars"]
 
@@ -213,7 +260,8 @@ class _Scratch:
         self.content = content
 
     def chat(self, **_kwargs):
-        return {"content": self.content}, {"prompt_tokens": 10, "completion_tokens": 5, "cost": 0.02}
+        return {"content": self.content}, {"prompt_tokens": 10, "completion_tokens": 5, "cost": 0.02,
+                                           "provider": "openrouter", "resolved_model": "light/served"}
 
 
 def _scratchpad(tmp_path, count=4):
@@ -337,29 +385,57 @@ def test_an_unnamed_writer_and_a_named_one_both_stamp_the_capture_row(tmp_path):
     assert "writer" not in result.current.text  # the stamp lives on the history row, never in the note
 
 
+def test_the_route_stamp_is_what_answered_never_the_configuration():
+    # Review F3: a model-wait override or account rotation changes what ANSWERED;
+    # the configured Light route cannot say which model wrote the note.
+    assert store.observed_route_stamp({"cost": 0.01}) == store.UNKNOWN_STAMP  # no physical fact at all
+    assert store.observed_route_stamp(None) == store.UNKNOWN_STAMP
+    assert store.observed_route_stamp({"provider": "openrouter", "resolved_model": "openai/gpt-x"}) == {
+        "provider": "openrouter", "model": "openai/gpt-x"}
+    assert store.observed_route_stamp({"provider": "local"}, model="cfg/model", use_local=True) == {
+        "provider": "local", "model": "cfg/model"}
+    served = {"provider": "claudexor", "resolved_model": "claude-fable",
+              "claudexor": {"route": {"source": "claude", "model": "claude-fable", "account": "acct-B"}}}
+    assert store.observed_route_stamp(served) == {
+        "provider": "claudexor", "model": "claude-fable", "source": "claude", "account": "acct-B"}
+    # A merged consolidation usage forwards the LAST physical route of the unit.
+    merged = c._merge_consolidation_usage({"cost": 0.01, "provider": "openrouter", "resolved_model": "a"},
+                                          {"cost": 0.01, "provider": "openrouter", "resolved_model": "b"})
+    assert merged["_observed_route"] == {"provider": "openrouter", "model": "b"}
+    assert store.observed_route_stamp(merged) == {"provider": "openrouter", "model": "b"}
+    assert "_observed_route" not in c._merge_consolidation_usage({"cost": 0.01})
+
+
 def test_a_direct_turn_stamps_itself_and_its_observed_route_when_the_loop_recorded_one(tmp_path):
     ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id="turn-1")
     assert "✅" in knowledge_tools._knowledge_write(ctx, "notes/a", "Plain observation.")
     first = _history(tmp_path)[-1]
     assert (first["writer"], first["route"], first["task_id"]) == ("turn", store.UNKNOWN_STAMP, "turn-1")
 
-    ctx._accumulated_usage = {"_model_route": {"source": "claude", "model": "fable"}}
+    # The loop records what answered its last round on every lane, not only Claudexor.
+    ctx._accumulated_usage = {"_observed_route": {"provider": "openrouter", "model": "openai/gpt-x"}}
     assert "✅" in knowledge_tools._knowledge_write(ctx, "notes/b", "Another observation.")
     second = _history(tmp_path)[-1]
-    assert second["writer"] == "turn" and second["route"] == {"source": "claude", "model": "fable"}
+    assert second["writer"] == "turn" and second["route"] == {"provider": "openrouter", "model": "openai/gpt-x"}
 
 
 def test_dialogue_consolidation_stamps_its_seam_route_and_source(tmp_path, fit):
+    class _RoutedNominating(_Nominating):
+        def chat(self, **kwargs):
+            msg, usage = super().chat(**kwargs)
+            return msg, {**usage, "provider": "openrouter", "resolved_model": "light/served"}
+
     chat, blocks, meta = _paths(tmp_path)
     _write_chat(chat, count=100, text_size=0)
     ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id="consolidate")
-    c.consolidate(chat, blocks, meta, _Nominating(), knowledge_context=ctx)
+    c.consolidate(chat, blocks, meta, _RoutedNominating(), knowledge_context=ctx)
     capture = next(row for row in _history(tmp_path) if row.get("publication") == "source_capture")
     assert capture["writer"] == "consolidation"
-    assert capture["route"] == {"model": "test/model", "use_local": False}
+    assert capture["route"] == {"provider": "openrouter", "model": "light/served"}  # what answered, not config
     block = json.loads(blocks.read_text(encoding="utf-8"))[0]
     assert capture["writer_input_ref"] == block["knowledge_source_ref"]
     assert capture["writer_input_ref"]["entry_id"]
+    assert "_nomination_route" not in block  # a history stamp, never a persisted block field
 
 
 def test_scratchpad_consolidation_stamps_its_journal_source(tmp_path):
@@ -369,6 +445,7 @@ def test_scratchpad_consolidation_stamps_its_journal_source(tmp_path):
         "compressed_block": "compressed"})))
     capture = next(row for row in _history(tmp_path) if row.get("publication") == "source_capture")
     assert capture["writer"] == "scratchpad_consolidation"
+    assert capture["route"] == {"provider": "openrouter", "model": "light/served"}
     assert capture["writer_input_ref"] == memory.load_scratchpad_blocks()[0]["metadata"]["source_ref"]
     assert _events(tmp_path, "scratchpad_consolidation")[0]["knowledge_writes"] == {"ok": 1, "failed": 0}
 
@@ -376,8 +453,9 @@ def test_scratchpad_consolidation_stamps_its_journal_source(tmp_path):
 def test_project_reflection_action_uses_actor_readable_exact_source(tmp_path):
     from ouroboros.artifacts import read_actor_source_bytes
     env = SimpleNamespace(drive_root=tmp_path, budget_drive_root=tmp_path, repo_dir=tmp_path)
-    entry = {"task_id": "t3", "ts": "2026-01-01T00:00:00Z", "memory_actions": [
-        {"type": "knowledge_write", "topic": "lessons/project", "content": "Grounded.", "task_id": "t3"}]}
+    entry = {"task_id": "t3", "ts": "2026-01-01T00:00:00Z", "route": {"provider": "claudexor", "model": "claude-fable"},
+             "memory_actions": [
+                 {"type": "knowledge_write", "topic": "lessons/project", "content": "Grounded.", "task_id": "t3"}]}
     reflection.append_reflection_routed(env, {"id": "t3", "project_id": "proj_x",
                                               "budget_drive_root": str(tmp_path)}, entry)
     action = entry["memory_actions"][0]
@@ -389,6 +467,7 @@ def test_project_reflection_action_uses_actor_readable_exact_source(tmp_path):
     row = json.loads(history.read_text(encoding="utf-8").splitlines()[-1])
     assert row["writer_input_ref"]["sha256"] == source["sha256"]
     assert row["writer_input_ref"]["task_id"] == "t3"
+    assert row["route"] == {"provider": "claudexor", "model": "claude-fable"}  # the reflection's answering route
 
 
 def test_reflection_stamps_the_reflection_row_it_came_from(tmp_path):

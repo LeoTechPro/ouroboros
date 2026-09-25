@@ -554,6 +554,8 @@ def generate_reflection(
             reasoning_effort=resolve_effort("task"))  # the owner's Task / Chat level: one SSOT, no literal
         raw_reflection_text = raw_reflection_text.strip()
         memory_operation_errors = refl_usage.get("_consolidation_errors") or []
+        from ouroboros.knowledge import observed_route_stamp
+        reflection_route = observed_route_stamp(refl_usage)
         if not raw_reflection_text and memory_operation_errors:
             raw_reflection_text = "(reflection generation failed: " + str(memory_operation_errors[-1].get("message") or "unknown") + ")"
         task_id_str = str(task.get("id", "") or "")
@@ -614,6 +616,7 @@ def generate_reflection(
         reflection_text = f"(reflection generation failed: {e})"
         backlog_candidates = []
         memory_actions = []
+        reflection_route = "unknown"
 
     return {
         "ts": utc_now_iso(),
@@ -644,6 +647,10 @@ def generate_reflection(
         "reflection": reflection_text,
         "backlog_candidates": backlog_candidates,
         "memory_actions": memory_actions,
+        # The route that ANSWERED the Light call (provider/resolved model, account
+        # when served by Claudexor), never the configured route: a model-wait
+        # override rebinds the call, and the history stamp must name what wrote.
+        "route": reflection_route,
         **({"source_ref": source_ref} if source_ref else {}),
         **({"memory_operation_errors": memory_operation_errors} if memory_operation_errors else {}),
     }
@@ -729,7 +736,8 @@ def apply_memory_actions(env: Any, actions: List[Dict[str, Any]], *, project_id:
                                   project_id=pid, task_id=str(action.get("task_id") or ""))
                 outcomes = _write_knowledge_entries(
                     root / "memory" / "knowledge", [action], context=ctx,
-                    stamp={"writer": "reflection", "writer_input_ref": {**input_ref(action), "task_id": ctx.task_id}})
+                    stamp={"writer": "reflection", "route": action.get("_reflection_route") or "unknown",
+                           "writer_input_ref": {**input_ref(action), "task_id": ctx.task_id}})
                 applied += sum(row["ok"] for row in outcomes)
                 if any(not row["ok"] for row in outcomes):
                     log.warning("Reflection knowledge update was not published: %s", outcomes)
@@ -851,10 +859,13 @@ def append_reflection_routed(env: Any, task: Dict[str, Any], entry: Dict[str, An
 
 
 def _bind_reflection_action_source(canonical: pathlib.Path, entry: Dict[str, Any]) -> None:
-    """Give the later action writer an exact actor-readable source, not a protected project path."""
+    """Give the later action writer an exact actor-readable source and the route that nominated it."""
     actions = entry.get("memory_actions") or []
     if not actions:
         return
+    for action in actions:
+        if isinstance(action, dict):
+            action["_reflection_route"] = entry.get("route") or "unknown"
     try:
         from types import SimpleNamespace
 

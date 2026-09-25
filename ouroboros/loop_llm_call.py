@@ -22,6 +22,7 @@ from ouroboros.deadline_utils import (
     seconds_until,
     main_transport_timeout_sec as _main_transport_timeout,
 )
+from ouroboros.knowledge import observed_route_stamp
 from ouroboros.llm import LLMClient, LocalContextTooLargeError, add_usage
 from ouroboros.llm_claudexor import propagate_model_error
 from ouroboros.llm_substitution import same_route_refusal, stamp_substitutions
@@ -1441,6 +1442,11 @@ def call_llm_with_retry(
             cost, display_model, provider, cost_estimated = _normalize_usage_cost(
                 usage, model=model, use_local=use_local,
             )
+            # The route that ANSWERED this round, for the turn's history stamps
+            # (knowledge writes): provider + resolved model on every lane, the
+            # served account when Claudexor answered; ``_model_route`` above stays
+            # the Claudexor-only account/rotation fact.
+            accumulated_usage["_observed_route"] = observed_route_stamp(usage, model=model, use_local=use_local)
             add_usage(accumulated_usage, usage)
             fold_retrieval_usage(accumulated_usage, usage)
             response_ref = persist_observed_call(
