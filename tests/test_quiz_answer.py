@@ -693,8 +693,10 @@ def test_own_answer_needs_no_option_index(tmp_path, monkeypatch):
 
     entries = drain_owner_entries(tmp_path, "task-1", set())
     frame_text = [e for e in entries if e.get("kind") == KIND_QUIZ_ANSWER][0]["text"]
-    assert ("The owner rejected all offered options and answered verbatim: "
-            "neither — use duckdb") in frame_text
+    assert ("The owner answered in their own words without choosing an offered "
+            "option. Verbatim: neither — use duckdb") in frame_text
+    # The host never words the free answer as a rejection the owner did not state.
+    assert "rejected" not in frame_text
     assert "chose option" not in frame_text
 
 

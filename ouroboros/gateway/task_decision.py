@@ -107,33 +107,12 @@ def _quiz_answer_frame(
 ) -> str:
     """Host-authored structural frame around the owner's VERBATIM choice.
 
-    The asked/answered timestamps ride inside so the MODEL judges freshness
-    itself (owner decision 30=A — no host staleness verdict). With no
-    ``option_index`` the owner took none of the offered options and wrote
-    their own answer — say exactly that, so the model never reads the free
-    answer as a gloss on a chosen option."""
-    options = block.get("options") if isinstance(block.get("options"), list) else []
-    lines = [
-        f"[Owner quiz answer] quiz {block.get('quiz_id')} — asked {block.get('asked_at')}, "
-        f"answered {block.get('answered_at')}.",
-        f"Question was: {block.get('question')}",
-    ]
-    if option_index is None:
-        lines.append(
-            "The owner rejected all offered options and answered verbatim: "
-            f"{comment}"
-        )
-    else:
-        label = str(options[option_index]) if 0 <= option_index < len(options) else ""
-        lines.append(f"The owner chose option {option_index + 1}: {label}")
-        if comment:
-            lines.append(f"Owner comment (verbatim): {comment}")
-    if str(block.get("assumption") or "") and not block.get("wait_for_answer"):
-        lines.append(
-            f"You continued under the assumption: {block.get('assumption')} — "
-            "judge yourself whether work has moved past the answered fork."
-        )
-    return "\n".join(lines)
+    Thin alias of the ONE shared builder ``owner_quiz.quiz_answer_frame``, so
+    the live mailbox control here and the late-answer delivery in the drain
+    render the same words."""
+    from ouroboros.owner_quiz import quiz_answer_frame
+
+    return quiz_answer_frame(block, option_index, comment)
 
 
 def _refused(message: str, status: int, **extra: Any) -> Tuple[int, Dict[str, Any]]:
@@ -224,8 +203,14 @@ def _forward_late_quiz_answer(
     is the acceptance receipt and whose ``client_message_id`` is the
     idempotency key (a crash after acceptance never authorizes another
     enqueue), so a retry of this request re-enters the same delivery instead of
-    duplicating it. The text is the same full ``_quiz_answer_frame`` the live
-    mailbox control carries — nothing is trimmed.
+    duplicating it.
+
+    The canonical chat row and the owner's bubble carry the HUMAN's words only
+    (``owner_quiz.late_answer_owner_text``: the verbatim comment, else the
+    pressed option as ``{n}. {label}``), never the host frame. The typed
+    ``late_answer`` provenance rides the message's metadata; the receiving turn
+    rebuilds the FULL frame from the stored block for the model
+    (``owner_quiz.late_answer_model_text``), so the model still reads the card.
 
     Disclosed property: in a PROJECT room that currently has exactly one live
     steerable root task, the ordinary routing delivers this message into THAT
@@ -237,21 +222,32 @@ def _forward_late_quiz_answer(
     chat_id, reason = _late_answer_destination(drive_root, task_id, block)
     if chat_id is None:
         return False, reason
-    index = block.get("answered_index")
-    text = _quiz_answer_frame(
-        block, index if isinstance(index, int) else None,
-        str(block.get("comment") or ""),
-    )
+    from ouroboros.owner_quiz import late_answer_owner_text
+
+    text = late_answer_owner_text(block)
+    if not text:
+        # An answered block always has a comment or a valid index; a block
+        # that has neither cannot be spoken as the owner's words.
+        return False, "answer_unreadable"
     client_message_id = f"quiz_late_answer:{task_id}:{quiz_id}"
     bridge = message_bus.get_bridge()
-    row, rejoined = message_bus.accept_local_message(
-        bridge, drive_root, text,
-        chat_id=chat_id, user_id=1, source=str(source or "web"),
-        client_message_id=client_message_id,
-        # Provenance rides its OWN field; the real transport (the web card, or
-        # the skill that relayed the owner's tap) is the message's source.
-        task_metadata={"late_answer": {"task_id": task_id, "quiz_id": quiz_id}},
-    )
+    try:
+        row, rejoined = message_bus.accept_local_message(
+            bridge, drive_root, text,
+            chat_id=chat_id, user_id=1, source=str(source or "web"),
+            client_message_id=client_message_id,
+            # Provenance rides its OWN field; the real transport (the web card, or
+            # the skill that relayed the owner's tap) is the message's source.
+            task_metadata={"late_answer": {"task_id": task_id, "quiz_id": quiz_id}},
+        )
+    except ValueError:
+        # This id was already accepted, but under other bytes: a delivery
+        # accepted before the row carried only the owner's words (it carried
+        # the host frame then). It WAS delivered once; a retry rejoins it
+        # instead of failing forever or enqueueing a second owner turn.
+        if message_bus.accepted_chat_message(drive_root, chat_id, client_message_id) is None:
+            raise
+        return True, ""
     if not rejoined:
         # The named ingress accepts and enqueues but does not echo; give the
         # owner the SAME user bubble their own typing produces (a rejoin
