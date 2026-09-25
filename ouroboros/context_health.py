@@ -233,14 +233,28 @@ def _memory_health_lines(env: Any) -> List[str]:
         pass
 
     try:
-        meta = read_json_dict(env.drive_path("memory/dialogue_meta.json")) or {}
+        from ouroboros.memory_nomination_receipts import load_meta
+
+        meta = load_meta(env.drive_path("memory/dialogue_meta.json"))
+        pending = meta.get("pending_knowledge_nominations")
+        if pending:
+            # load_meta already validates the whole list; malformed state raises.
+            sample = ", ".join(row["id"].split(":")[0][:12] + ":" +
+                               ":".join(row["id"].split(":")[-2:])
+                               for row in pending[:3])
+            lines.append(
+                f"WARNING: DIALOGUE KNOWLEDGE PUBLICATION OPEN — {len(pending)} source-addressed "
+                f"nominations (first {min(3, len(pending))}: {sample}; omitted {max(0, len(pending)-3)}). "
+                "Read memory/dialogue_meta.json and memory/knowledge_history.jsonl for full source. "
+                "No automatic or tool-level discharge exists yet; later successes cannot retire older entries."
+            )
         receipt = meta.get("last_unpublished_nominations")
         if isinstance(receipt, dict) and int(receipt.get("failed") or 0) > 0:
             # The recovery route is named because the reader may hold no read_file:
             # an external-channel turn has the cognitive memory tools and nothing else.
             lines.append(
                 f"WARNING: LAST DIALOGUE KNOWLEDGE PUBLICATION INCOMPLETE — {receipt.get('failed')} of "
-                f"{receipt.get('total')} nominations from the latest consolidation batch were not published "
+                f"{receipt.get('total')} nominations in a legacy consolidation batch remain unresolved "
                 f"(entry_id {receipt.get('entry_id')}); from the main chat, read_file(root='runtime_data', "
                 "path='memory/knowledge_history.jsonl') and publish what still holds"
             )
@@ -251,7 +265,10 @@ def _memory_health_lines(env: Any) -> List[str]:
                 f"at cursor {error.get('cursor_offset')}"
             )
     except Exception:
-        pass
+        # A broken existing meta file is NOT an empty nomination/cursor state.
+        # Consolidation refuses to overwrite it; its reader must name the gap.
+        lines.append("WARNING: DIALOGUE META UNREADABLE — memory/dialogue_meta.json; "
+                     "consolidation withheld to preserve existing bytes")
     return lines
 
 
