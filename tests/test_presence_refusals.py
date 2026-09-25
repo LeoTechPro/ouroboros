@@ -1,20 +1,26 @@
 """Recovery disposition is a producer fact, not a guess from an HTTP status."""
 import asyncio
 import json
+import queue
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
+import httpx
 import pytest
 
+import ouroboros.loop_llm_call as call_mod
+from ouroboros import loop, usage_accounting as ua
 from ouroboros.gateway import host_service
 from ouroboros.loop_llm_call import TRANSPORT_DEATHS_KEY
 from ouroboros.presence_admission import PresenceAdmissionError
 from ouroboros.presence_runner import PresenceTurnError
 from ouroboros.presence_runner import PresenceTurnGate, presence_turn_task_id, presence_retry_proof, run_presence_turn
-from ouroboros.presence_runner import _notify_unresolved_turn, presence_result_from_stored
+from ouroboros.presence_runner import _notify_unresolved_turn, presence_result_from_stored, presence_unknown_outcome
 from ouroboros.task_results import load_task_result, task_result_path, write_task_result
+from ouroboros.tools.registry import ToolRegistry
 from tests.test_host_service_responsiveness import _answer, _event, _presence_app, _request, _turn
 from tests.test_presence_delivery import _payload
+from tests.test_transport_death_retry import _LedgerLLM, _events, _ledger, _no_chain
 
 
 def test_auth_block_and_origin_rejection_share_status_not_disposition(tmp_path):
@@ -654,6 +660,115 @@ def test_lost_terminal_write_after_start_barrier_never_acknowledges_the_event(tm
     again = asyncio.run(_turn(app, binding, "event"))
     assert again.status_code == 409 and json.loads(again.body)["code"] == "presence_attempt_outcome_unknown"
     assert invoked == [presence_turn_task_id(binding, "event")] and ctx.presence_turns.live() == []
+
+
+def test_inline_turn_repeats_a_dispatched_transport_death_as_a_no_effect_attempt(tmp_path, monkeypatch):
+    """The bounded same-round transport-death repeat is not the forbidden event retry.
+
+    An inline Presence turn is a direct-chat task, so its PRIMARY round keeps the paid repeat
+    rail (``loop_llm_call._TRANSPORT_DEATH_RETRIES``): a DISPATCHED request whose socket died
+    with a typed transport death is sent once more in the same round as a NEW physical attempt
+    with its own ledger row. That repeat has no prior effect BY CONSTRUCTION: the host executes
+    tools and the transport speaks only after a model response has landed, and none landed. So
+    the owner rule (the same event is retried only with positive proof of no prior effect and a
+    new physical identity) is met, and the unknown-outcome refusal (empty 409 plus owner notice)
+    applies only once the round's repeats are exhausted. Real Host endpoint, runner, loop, round
+    dispatcher, terminal pipeline and attempt ledger: the socket is scripted, the backoff sleep is
+    recorded instead of slept, and the fallback chain is a tripwire.
+    """
+    from ouroboros import agent_task_pipeline as pipeline
+
+    monkeypatch.setenv("OUROBOROS_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("OUROBOROS_SETTINGS_PATH", str(tmp_path / "settings.json"))
+    monkeypatch.setenv("TOTAL_BUDGET", "100")
+    monkeypatch.setenv("OUROBOROS_TASK_REVIEW_MODE", "off")
+    monkeypatch.setenv("OUROBOROS_MODEL_FALLBACKS", "other/model")  # a configured chain the rail must never walk
+    monkeypatch.delenv("USE_LOCAL_FALLBACK", raising=False)
+    (tmp_path / "state").mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(loop, "_run_cross_model_fallback_chain", _no_chain)
+    sleeps, notices, executed, sends = [], [], [], []
+    monkeypatch.setattr(call_mod, "_sleep_within_deadline", lambda sec, _deadline, **_kw: (sleeps.append(sec), True)[1])
+    monkeypatch.setattr("ouroboros.presence_runner._write_unresolved_notice",
+                        lambda _root, task_id: notices.append(task_id))
+
+    def spoken():
+        path = tmp_path / "logs" / "chat.jsonl"
+        rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()] if path.exists() else []
+        return [row["text"] for row in rows if row.get("direction") == "out"]
+
+    class ObservedLLM(_LedgerLLM):
+        """Every send records the host state it left from: what ran and what was spoken before it."""
+
+        def chat(self, **kwargs):
+            sends.append({"messages": [dict(row) for row in kwargs["messages"]],
+                          "tools_executed": list(executed), "spoken": spoken()})
+            return super().chat(**kwargs)
+
+    llm = ObservedLLM(tmp_path, lambda: httpx.ReadError("socket died after dispatch"), "ok")
+    captured = {}
+
+    class Agent:
+        def handle_task(self, task):
+            task["_skip_post_task_synthesis"] = True
+            registry = ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path)
+            agent_ctx = registry._ctx
+            agent_ctx.is_direct_chat = bool(task["_is_direct_chat"])  # the runner's own flag → ToolContext.is_direct_chat
+            agent_ctx.task_metadata = dict(task["metadata"])
+            agent_ctx.task_contract = dict(task["task_contract"])
+            real_execute = registry.execute_result
+            monkeypatch.setattr(registry, "execute_result",
+                                lambda name, args: (executed.append(name), real_execute(name, args))[1])
+            text, usage, trace = loop.run_llm_loop(
+                [{"role": "user", "content": task["text"]}], registry, llm, tmp_path / "logs",
+                lambda *_a, **_kw: None, queue.Queue(), task_type=task["type"], task_id=task["id"],
+                drive_root=tmp_path)
+            events = []
+            pipeline.emit_task_results(SimpleNamespace(drive_root=tmp_path, repo_dir=tmp_path), None, None, events,
+                                       task, text, usage, trace, 0.0, tmp_path / "logs", ctx=agent_ctx)
+            captured.update(text=text, usage=usage, trace=trace)
+            return events
+
+    app, binding, host = _presence_app(tmp_path, lambda **kwargs: run_presence_turn(
+        repo_dir=tmp_path, drive_root=tmp_path, gate=PresenceTurnGate(1),
+        agent_factory=lambda **_kw: Agent(), **kwargs))
+    task_id = presence_turn_task_id(binding, "event")
+    response = asyncio.run(_turn(app, binding, "event"))
+    body = json.loads(response.body)
+    assert response.status_code == 200 and body["ok"] is True and body["turn_ref"] == task_id
+    assert body["outcome"] == "message" and body["text"] == "done"
+
+    # Exactly two physical attempts: the dead send stays unresolved at its bound, the repeat settles.
+    assert llm.calls == 2
+    by_attempt = {}
+    for row in _ledger(tmp_path):
+        by_attempt.setdefault(row["attempt_id"], []).append(row["state"])
+    assert list(by_attempt.values()) == [["reserved", "dispatched", "unresolved"], ["reserved", "dispatched", "settled"]]
+    assert ua.usage_projection(tmp_path)["unresolved_upper_bound_usd"] == 1.0
+    # No effect between them: the repeat is the same logical request, and before either send
+    # no tool had run and nothing had been spoken; the transport heard the answer once, after it landed.
+    assert sends[1]["messages"] == sends[0]["messages"]
+    assert [send["tools_executed"] for send in sends] == [[], []] and executed == []
+    assert [send["spoken"] for send in sends] == [[], []] and spoken() == ["done"]
+    assert sleeps == [4.0]  # the first-death backoff; no wait episode, no chain, no forced final
+    api_errors = _events(tmp_path / "logs", "llm_api_error")
+    assert [(row["error_kind"], row["retry_same_request"], row["transport_cause_type"]) for row in api_errors] == [
+        ("provider_outcome_unknown", True, "ReadError")]
+    assert api_errors[0]["physical_attempt_id"] == next(iter(by_attempt))
+    assert _events(tmp_path / "logs", "llm_non_retryable_same_request") == []
+    assert _events(tmp_path / "logs", "llm_retry_deadline_exhausted") == []
+    usage, trace = captured["usage"], captured["trace"]
+    assert captured["text"] == "done" and trace.get("forced_finalization") is None
+    assert TRANSPORT_DEATHS_KEY not in usage and "_last_llm_error_kind" not in usage  # the usable response cleared both
+    assert usage.get("reason_code") is None and usage.get("execution_status") != "infra_failed"
+    assert presence_unknown_outcome(usage) == {}
+    # The durable row the Host reads back is a completed turn, not an unknown outcome: no marker,
+    # no owner notice, no retry certificate, and a replay serves the answer without a third send.
+    stored = load_task_result(tmp_path, task_id)
+    assert stored["status"] == "completed" and stored["reason_code"] == "final_message"
+    assert "presence_unknown_outcome" not in stored["metadata"] and "presence_retry_proof" not in stored["metadata"]
+    assert notices == [] and host.presence_turns.live() == []
+    again = asyncio.run(_turn(app, binding, "event"))
+    assert again.status_code == 200 and json.loads(again.body)["text"] == "done" and llm.calls == 2
 
 
 _INFRA_OUTAGE = {"execution": {"status": "infra_failed", "reason_code": "provider_unavailable"}}
