@@ -506,6 +506,71 @@ def _send_links(
     return "OK: link buttons queued for delivery to owner."
 
 
+def _quiz_host_facts(ctx: ToolContext, canonical_root: pathlib.Path, task_id: str, chat_id: int) -> str:
+    """The host's one-sentence account under a root's owner card: which task asks,
+    how its run started, and when the owner last wrote in this chat. Read from
+    typed records only (the task record's ``run_origin`` provenance and the chat
+    log tail), never from the question text; an unrecorded fact says unknown."""
+    import datetime
+
+    from ouroboros.consciousness_authority import CONSCIOUSNESS_INITIATOR
+    from ouroboros.dialogue_provenance import run_origin
+    from ouroboros.task_results import load_task_result
+    from ouroboros.tools.followup import FOLLOWUP_SOURCE
+    from ouroboros.utils import iter_jsonl_objects
+
+    def moment(value: Any) -> Optional[datetime.datetime]:
+        try:
+            parsed = datetime.datetime.fromisoformat(str(value or ""))
+        except ValueError:
+            return None
+        return (parsed if parsed.tzinfo else parsed.replace(tzinfo=datetime.timezone.utc)).astimezone(
+            datetime.timezone.utc)
+
+    def shown(when: datetime.datetime) -> str:
+        return when.strftime("%Y-%m-%d %H:%M UTC")
+
+    meta = getattr(ctx, "task_metadata", {}) if isinstance(getattr(ctx, "task_metadata", {}), dict) else {}
+    try:
+        record = load_task_result(canonical_root, task_id) or {}
+    except Exception:
+        record = {}
+    # The live metadata (which carries the owner door's stamp) laid over the
+    # persisted record's own, as the post-task synthesis reads the same origin.
+    metadata = {**(record.get("metadata") if isinstance(record.get("metadata"), dict) else {}), **meta}
+    origin = run_origin({**record, "metadata": metadata})
+    ref = metadata.get("origin_message_ref") or record.get("origin_message_ref")
+    origin_task = str(origin.get("origin_task_id") or "")
+    if origin.get("owner_ingress"):
+        sent = moment(ref.get("ts")) if isinstance(ref, dict) else None
+        started = "started by your message" + (f" of {shown(sent)}" if sent else "")
+    elif origin.get("source") == FOLLOWUP_SOURCE and origin_task:
+        started = f"started as a scheduled follow-up of task {origin_task}"
+    elif origin.get("initiator") == CONSCIOUSNESS_INITIATOR:
+        started = "started by background consciousness"
+    elif origin.get("source") == "promote_chat_to_task":
+        started = "started by promotion" + (f" from task {origin_task}" if origin_task else "")
+    elif origin.get("schedule_id"):
+        started = f"started by schedule {origin['schedule_id']}"
+    elif origin_task:
+        started = f"started from task {origin_task}"
+    else:
+        started = "origin unknown" + (f" (recorded source: {origin['source']})" if origin.get("source") else "")
+    last = None
+    try:
+        for entry in iter_jsonl_objects(canonical_root / "logs" / "chat.jsonl", tail_bytes=512_000):
+            if entry.get("direction") == "in" and str(entry.get("chat_id")) == str(chat_id):
+                last = moment(entry.get("ts")) or last
+    except Exception:
+        last = None
+    if last is None:
+        seen = "your last message in this chat: unknown"
+    else:
+        minutes = max(0, int((datetime.datetime.now(datetime.timezone.utc) - last).total_seconds() // 60))
+        seen = f"your last message in this chat: {shown(last)} ({minutes} minutes before this question)"
+    return f"Asked by task {task_id}, {started}; {seen}."
+
+
 def _escalate(
     ctx: ToolContext,
     question: str,
@@ -651,6 +716,7 @@ def _escalate(
         card_chat_id = int(getattr(ctx, "current_chat_id", None) or 0)
     except (TypeError, ValueError):
         card_chat_id = 0
+    host_facts = _quiz_host_facts(ctx, canonical_root, task_id, card_chat_id)
     asked = record_asked(
         canonical_root, task_id,
         quiz_id=quiz_id, question=payload["question"],
@@ -660,6 +726,7 @@ def _escalate(
         stake=payload["stake"], assumption=payload["assumption"],
         wait_for_answer=wait_for_answer, chat_id=card_chat_id,
         max_wait_minutes=payload.get("max_wait_minutes"),
+        host_facts=host_facts,
     )
     if asked.get("refused"):
         if wait_for_answer:
@@ -680,6 +747,7 @@ def _escalate(
         "assumption": payload["assumption"],
         "state": "open",
         "task_id": task_id,
+        "host_facts": host_facts,
         **({"wait_for_answer": True} if wait_for_answer else {}),
     })
     delivered = "delivered to the owner" if mode == "live" else "queued for the owner"

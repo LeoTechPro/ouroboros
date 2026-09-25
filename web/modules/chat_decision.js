@@ -156,7 +156,7 @@ export function createChatDecision({
     const MIRROR_SETTLE_MS = 5000;
     // Display fields a narrower delivery (the census, a lifecycle frame) may lack: an empty value
     // there never blanks what a complete row already carried.
-    const MIRROR_FIELDS = ['question', 'options', 'option_details', 'stake', 'project_name', 'assumption', 'recommended_index'];
+    const MIRROR_FIELDS = ['question', 'options', 'option_details', 'stake', 'project_name', 'assumption', 'recommended_index', 'host_facts'];
     const MIRROR_SIGNATURE = ['quiz_state', ...MIRROR_FIELDS, 'answered_index', 'comment', ...WAIT_FIELDS];
     // The pointer row in the shape of the Project's quiz row, so one normalizer reads both.
     const mirrorQuiz = (row) => ({ ...row, type: 'quiz', role: 'assistant', state: row.quiz_state });
@@ -373,6 +373,8 @@ export function createChatDecision({
             options,
             stake: String(src.stake || ''),
             assumption: String(src.assumption || ''),
+            // The host's sentence (asking task, run start, the owner's last message): plain text.
+            hostFacts: String(src.host_facts || ''),
             // The wait facts the header and the signature line read (waitFacts): the
             // original required flag, the closed bound, and the task's wait record when
             // history or a detail read attached it.
@@ -390,6 +392,13 @@ export function createChatDecision({
             comment: String(src.comment || ''),
             detailsUnavailable: src.option_details === undefined && raw.every((option) => typeof option === 'string'),
         };
+    }
+
+    function hostFactsLine(text) {
+        const line = document.createElement('div');
+        line.className = 'chat-quiz-host-facts';
+        line.textContent = text;
+        return line;
     }
 
     function appendRecommendedBadge(button) {
@@ -588,6 +597,10 @@ export function createChatDecision({
         const wait = waitFacts(current);
         const existing = quizViews.get(key);
         if (existing) {
+            // A narrower first delivery may have lacked the host's sentence; a later one adds it.
+            if (quiz.hostFacts && !existing.querySelector('.chat-quiz-host-facts')) {
+                existing.querySelector('.chat-quiz-question')?.nextElementSibling?.before(hostFactsLine(quiz.hostFacts));
+            }
             if (quiz.comment) existing.dataset.ownerComment = quiz.comment;
             else if (Object.hasOwn(current, 'comment')) delete existing.dataset.ownerComment;
             if (!quiz.detailsUnavailable) {
@@ -648,6 +661,7 @@ export function createChatDecision({
         if (mountMarkdown) mountMarkdown(question, questionText);
         else question.textContent = questionText;
         card.append(question);
+        if (quiz.hostFacts) card.append(hostFactsLine(quiz.hostFacts));
 
         if (quiz.stake) {
             const stake = document.createElement('div');
