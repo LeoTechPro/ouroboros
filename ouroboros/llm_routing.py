@@ -209,7 +209,10 @@ class _ProviderRoutingMixin:
         system text block and dynamic evidence last.  Hash only that stable
         prefix plus the normalized model identity, so changing task evidence
         does not fragment the provider cache while different policies cannot
-        collide.  Routes without a leading system prefix simply opt out.
+        collide.  Routes without a leading system prefix simply opt out. For
+        the OpenAI family this prefix is also the whole OpenRouter session
+        identity (``_openrouter_session_identity``) and the block its send copy
+        keeps in the leading system message.
         """
         if not messages or str(messages[0].get("role") or "") != "system":
             return ""
@@ -256,10 +259,21 @@ class _ProviderRoutingMixin:
         model_id: str,
         messages: List[Dict[str, Any]],
     ) -> str:
-        """Conversation-stable OpenRouter affinity, bounded well below 256 chars."""
+        """Sticky OpenRouter affinity, bounded well below 256 chars.
+
+        Conversation-stable for every family but OpenAI's, whose public API reuses a
+        prompt cache only under one routing key and only for the whole leading system
+        section (measured 2026-09-25): there the session is one per model and governance
+        prefix, so a new task, child or wake is served the prefix its predecessors cached.
+        """
+        from ouroboros.llm_attempt import openai_family_model
+
         prefix_identity = cls._prompt_cache_identity(model_id, messages)
         if not prefix_identity:
             return ""
+        if openai_family_model(model_id):
+            digest = hashlib.sha256(f"{prefix_identity}\0openai-family".encode("utf-8")).hexdigest()[:32]
+            return f"ouroboros-session-{digest}"
         first_user: Any = ""
         for message in messages:
             if str(message.get("role") or "") == "user":

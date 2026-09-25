@@ -161,9 +161,13 @@ CHAPTER_BYTE_BUDGETS: dict[str, int] = {
     # 309800 -> 310100 (TZ2 + #1262 merge, measured 309985): the Presence task-message
     # own-binding boundary and forced declaration remain beside #1262's name-miss
     # contract; both are independent rules in the same chapter, not duplicate prose.
-    # 310100 -> 310700 (PR #1300): the transport paragraph gains the trust-bundle seam every first-party
-    # client shares; no older text to displace.
-    "docs/architecture/06-agent-core.md": 310700,
+    # 310100 -> 313400 (OpenAI-family cache layout incl. the Claudexor route and the review-round wording, measured 313212): the prompt-caching
+    # paragraph gains the dated cache-unit fact, the declared-prefix projection, the
+    # per-family session rule, the wire_layout/sealed-candidate disclosure and the
+    # residuals; a mechanism the chapter lacked, so only its two stale clauses were replaced.
+    # 313400 -> 314000 (PR #1300; measured 313858 on the merged tree): the transport paragraph gains
+    # the trust-bundle seam every first-party client shares; no older text to displace.
+    "docs/architecture/06-agent-core.md": 314000,
     # 36991 -> 37300: the facade paragraph names the three loop constants runtime_limits.py
     # gained (events batch bound, budget-projection retry interval); no older text to displace.
     # 37300 -> 38400 (PR #1207): the Z.ai (`zai::`) direct provider gets its own route
@@ -255,7 +259,11 @@ CHAPTER_BYTE_BUDGETS: dict[str, int] = {
     # descendant is a Presence caller (inherited binding authority, never speaker metadata).
     # 95150 -> 95200 (TZ2 repair, measured 95191): the promotion/follow-up clause names the
     # one carrier it copies instead of "the Presence metadata".
-    "docs/development/06-rules-by-change-class.md": 95200,
+    # 95200 -> 96700 (OpenAI-family cache layout incl. the Claudexor route, measured 96596): the cache-friendliness
+    # bullet states the declare-in-builder / project-in-transport rule, the per-family
+    # OpenRouter session and the two enforcing tests; the notice bullet gains the second
+    # meaning of the `[SYSTEM NOTICE]` marker. The derived-identity sentence is replaced.
+    "docs/development/06-rules-by-change-class.md": 96700,
     "docs/development/07-managed-update-rule.md": 4166,
     "docs/development/08-mutation-attribution-rule.md": 2899,
     "docs/development/09-process-custody-rule.md": 10028,
