@@ -6,6 +6,7 @@ import asyncio
 import concurrent.futures
 import contextvars
 import hashlib
+import json
 import logging
 import os
 import threading
@@ -27,7 +28,6 @@ from ouroboros.task_results import (
     STATUS_RUNNING,
     is_reconciled_presence_placeholder,
     load_task_result,
-    reopen_reconciled_presence_placeholder,
     task_result_path,
 )
 from ouroboros.utils import append_jsonl, atomic_write_json, iter_jsonl_objects, read_json_dict, utc_now_iso
@@ -358,7 +358,40 @@ def _task_id(admission: PresenceAdmission, event: PresenceTurnEvent) -> str:
     return presence_turn_task_id(admission.binding_id, event.source_event_id)
 
 
-def _stored_turn(drive_root: Path, task_id: str) -> dict[str, Any]:
+def presence_event_identity(binding_id: str, event: PresenceTurnEvent) -> str:
+    """Stable source-event identity; retry-local file paths and reporting negotiation are not identity."""
+    facts = (binding_id, event.source_event_id, event.provider, event.account_id,
+             event.conversation_id, event.thread_id,
+             str(event.actor.get("platform_actor_id") or event.actor.get("id") or ""), event.text)
+    return hashlib.sha256(json.dumps(facts, ensure_ascii=False).encode("utf-8")).hexdigest()
+
+
+def _assert_event_identity(stored: Mapping[str, Any], task_id: str, identity: str) -> None:
+    if not stored or not identity:
+        return
+    metadata = stored.get("metadata") if isinstance(stored.get("metadata"), dict) else {}
+    prior = str(metadata.get("presence_event_identity") or "")
+    presence = metadata.get("presence") if isinstance(metadata.get("presence"), dict) else {}
+    old = presence.get("event") if isinstance(presence.get("event"), dict) else {}
+    if not prior and old and all(old.get(key) is not None for key in (
+            "source_event_id", "provider", "account_id", "conversation_id", "thread_id", "actor")):
+        # Older turns already stored the exact event and observed text, before a separate
+        # digest was introduced. Reconstruct its identity instead of stranding valid replies.
+        prior = presence_event_identity(str(presence.get("binding_id") or ""), PresenceTurnEvent(
+            source_event_id=str(old["source_event_id"]), provider=str(old["provider"]),
+            account_id=str(old["account_id"]), conversation_id=str(old["conversation_id"]),
+            thread_id=str(old["thread_id"]), conversation_key=str(old.get("conversation_key") or ""),
+            actor=old["actor"] if isinstance(old["actor"], Mapping) else {},
+            conversation={}, message={}, text=str(presence.get("observed_text") or "")))
+    if prior and prior != identity:
+        raise PresenceTurnError("presence_event_identity_conflict", "source_event_id", turn_ref=task_id)
+    if (not prior and not is_reconciled_presence_placeholder(stored)
+            and str(stored.get("status") or "") in {STATUS_COMPLETED, STATUS_FAILED}):
+        # An incomplete legacy terminal cannot authorize cross-room replay.
+        raise PresenceTurnError("presence_event_identity_unproven", "source_event_id", turn_ref=task_id)
+
+
+def _stored_turn(drive_root: Path, task_id: str, identity: str = "") -> dict[str, Any]:
     """Read Presence authority without converting an unreadable row into a new event.
 
     A generic fail-soft read can quarantine a malformed task result and return None.
@@ -370,17 +403,28 @@ def _stored_turn(drive_root: Path, task_id: str) -> dict[str, Any]:
     path = task_result_path(drive_root, task_id, create=False)
     quarantined = path.parent / TASK_RESULT_QUARANTINE_DIR
     try:
+        current = load_task_result(drive_root, task_id, strict=True) or {}
         if (quarantined / path.name).exists() or any(quarantined.glob(f"{task_id}.*.json")):
-            raise PresenceTurnError("presence_result_unreadable", "source_event_id", turn_ref=task_id)
-        return load_task_result(drive_root, task_id, strict=True) or {}
+            # A strictly admitted, source-bound late terminal is newer authority than an old
+            # quarantined attempt. Nothing else, including an unrelated or running row, clears it.
+            if str(current.get("status") or "") not in {STATUS_COMPLETED, STATUS_FAILED} or not identity:
+                raise PresenceTurnError("presence_result_unreadable", "source_event_id", turn_ref=task_id)
+            _assert_event_identity(current, task_id, identity)
+        _assert_event_identity(current, task_id, identity)
+        return current
     except (OSError, ValueError) as exc:
         if isinstance(exc, PresenceTurnError):
             raise
         raise PresenceTurnError("presence_result_unreadable", "source_event_id", turn_ref=task_id) from exc
 
 
-def _cached_result(drive_root: Path, task_id: str) -> PresenceTurnResult | None:
-    stored = _stored_turn(drive_root, task_id)
+def _cached_result(drive_root: Path, task_id: str, identity: str = "") -> PresenceTurnResult | None:
+    stored = _stored_turn(drive_root, task_id, identity)
+    if str(stored.get("reason_code") or "") == "resource_refusal_no_resend":
+        # A failed quota/fallback attempt is not a completed/silent transport answer;
+        # retain the event with its adapter and never replay a draft as external speech.
+        _notify_unresolved_turn(drive_root, task_id)
+        raise PresenceTurnError("presence_resources_unavailable", "source_event_id", turn_ref=task_id)
     if str(stored.get("status") or "") not in {"completed", "failed"} or is_reconciled_presence_placeholder(stored):
         return None  # a host-lost turn is not a result; the later admission guard refuses regeneration
     return presence_result_from_stored(stored, task_id)
@@ -408,11 +452,15 @@ def _notify_unresolved_turn(drive_root: Path, task_id: str) -> None:
             return
         message_bus.send_with_budget(
             WEB_UI_CHAT_ID,
-            f"Presence turn {task_id} has an unconfirmed previous effect. Its original "
-            "event remains with the transport; I will not start another model or tool "
-            "attempt automatically. Please answer in Main after checking the prior "
-            "operation and external delivery, so we can decide how to recover it.",
+            (f"Presence turn {task_id} has no available model route. Its original event remains "
+             "with the transport; check the subscription account or configured fallback in Main."
+             if str(stored.get("reason_code") or "") == "resource_refusal_no_resend" else
+             f"Presence turn {task_id} has an unconfirmed previous effect. Its original "
+             "event remains with the transport; I will not start another model or tool "
+             "attempt automatically. Please answer in Main after checking the prior "
+             "operation and external delivery, so we can decide how to recover it."),
             role="system", system_type="presence_recovery_required", require_write=True,
+            ensure_record_boundary=True,
         )
         from ouroboros.task_results import write_task_result
 
@@ -508,9 +556,10 @@ def _pointer_behind(drive_root: Path, conversation_key: str, task_id: str) -> bo
         pointer.get("task_id") != task_id and str(pointer.get("finished_at") or "") <= str(stored.get("ts") or ""))
 
 
-def presence_turn_replay(drive_root: Path, task_id: str, conversation_key: str) -> PresenceTurnResult | None:
+def presence_turn_replay(drive_root: Path, task_id: str, conversation_key: str,
+                         identity: str = "") -> PresenceTurnResult | None:
     """A settled turn's durable answer, returned without the gate; None when the turn must (re)run."""
-    cached = _cached_result(Path(drive_root), task_id)
+    cached = _cached_result(Path(drive_root), task_id, identity)
     return None if cached is None or _pointer_behind(Path(drive_root), conversation_key, task_id) else cached
 
 
@@ -556,6 +605,7 @@ def _log_dialogue(
             "sender_label": str(event.actor.get("display_name") or event.actor.get("username") or ""),
             "sender_session_id": str(event.actor.get("platform_actor_id") or event.actor.get("id") or ""),
             "client_message_id": event.source_event_id,
+            "presence_event_identity": presence_event_identity(str(task["metadata"]["presence"]["binding_id"]), event),
             "transport": {
                 "provider": event.provider,
                 "account_id": event.account_id,
@@ -639,6 +689,7 @@ def _build_task(
     metadata: dict[str, Any] = {
         "source": "presence",
         "client_message_id": event.source_event_id,
+        "presence_event_identity": presence_event_identity(admission.binding_id, event),
         "inline_max_rounds": admission.inline_max_rounds,
         "presence": presence_context,
     }
@@ -729,12 +780,13 @@ def run_presence_turn(
     """
 
     task_id = _task_id(admission, event)
-    cached = presence_turn_replay(Path(drive_root), task_id, event.conversation_key)
+    identity = presence_event_identity(admission.binding_id, event)
+    cached = presence_turn_replay(Path(drive_root), task_id, event.conversation_key, identity)
     if cached is not None:
         return cached
 
     def execute() -> PresenceTurnResult:
-        second_cached = _cached_result(Path(drive_root), task_id)
+        second_cached = _cached_result(Path(drive_root), task_id, identity)
         if second_cached is not None:
             # A turn lost between its terminal write and its pointer write replays from the durable
             # row; its pointer is rebuilt here, under the conversation lock, so no newer turn is undone.
@@ -759,7 +811,7 @@ def run_presence_turn(
     def _execute_live() -> PresenceTurnResult:
         # Both locks are held: no other execution of this conversation runs, so a running or
         # interrupted row of this task (not yet reconciled) belongs to a lost attempt too.
-        stored = _stored_turn(Path(drive_root), task_id)
+        stored = _stored_turn(Path(drive_root), task_id, identity)
         if str(stored.get("status") or "") == STATUS_CANCELLED:
             # An owner's Stop is not an absent turn. Never regenerate work after it,
             # nor acknowledge the original transport event as completed/silent.
@@ -784,6 +836,9 @@ def run_presence_turn(
 
         generation = chat_generation()  # the live file this execution's rows land in, read before the rows
         prior_rows = _live_task_rows(Path(drive_root), task_id, event.conversation_key)
+        for prior in prior_rows:
+            if prior.get("direction") == "in" and prior.get("presence_event_identity") not in (None, identity):
+                raise PresenceTurnError("presence_event_identity_conflict", "source_event_id", turn_ref=task_id)
         task = _build_task(
             admission,
             event,
@@ -822,9 +877,30 @@ def run_presence_turn(
             drive_root=str(drive_root),
             event_queue=event_queue,
         )
-        # The host mark moves aside only now: a rejected build or a failed factory leaves it intact.
-        reopen_reconciled_presence_placeholder(Path(drive_root), task_id)
+        # The generic agent's RUNNING writer logs and continues on failure. Presence cannot:
+        # after a crash, absence of that row would otherwise authorize a second model/tool effect.
+        # This existing task-result authority is published and read back BEFORE handle_task.
+        from ouroboros.task_results import write_task_result
+
+        try:
+            write_task_result(Path(drive_root), task_id, STATUS_RUNNING,
+                              create_only=True, strict_existing_dict=True,
+                              metadata=task["metadata"], chat_id=chat_id,
+                              _is_direct_chat=True, source="presence", result="Task is running.")
+            start = _stored_turn(Path(drive_root), task_id, identity)
+            if str(start.get("status") or "") != STATUS_RUNNING or (
+                    start.get("metadata") or {}).get("presence_event_identity") != identity:
+                raise ValueError("Presence start record was not bound to this event")
+        except (OSError, ValueError) as exc:
+            raise PresenceTurnError("presence_start_unwritable", "source_event_id", turn_ref=task_id) from exc
         events = agent.handle_task(task)
+        # The model can have a draft reply before every allowed route refuses quota.
+        # The durable terminal cause, not that draft or the presence_result envelope,
+        # determines whether the transport may acknowledge the original event.
+        terminal = _stored_turn(Path(drive_root), task_id, identity)
+        if str(terminal.get("reason_code") or "") == "resource_refusal_no_resend":
+            _notify_unresolved_turn(Path(drive_root), task_id)
+            raise PresenceTurnError("presence_resources_unavailable", "source_event_id", turn_ref=task_id)
         row = next((item for item in events if item.get("type") == "presence_result"), None)
         if not isinstance(row, dict):
             raise PresenceTurnError("presence_result_missing", "presence_result")
@@ -872,10 +948,11 @@ class PresenceTurnNotStarted(RuntimeError):
 class PresenceTurnExecution:
     """One live host turn: the result every waiter shares and the admission that starts it."""
 
-    __slots__ = ("turn_id", "result", "admission")
+    __slots__ = ("turn_id", "identity", "result", "admission")
 
-    def __init__(self, turn_id: str) -> None:
+    def __init__(self, turn_id: str, identity: str = "") -> None:
         self.turn_id = turn_id
+        self.identity = identity
         self.result: concurrent.futures.Future = concurrent.futures.Future()
         # RUNNING from birth: a cancelled waiter's wrapper calls Future.cancel(), which a running
         # future refuses, so no HTTP waiter can cancel the result other waiters share.
@@ -906,6 +983,7 @@ class PresenceTurnExecutions:
         self,
         turn_id: str,
         *,
+        identity: str = "",
         reserve: Callable[[], bool],
         release: Callable[[], None],
         admit: Callable[[], Any],
@@ -919,10 +997,12 @@ class PresenceTurnExecutions:
         with self._lock:
             live = self._live.get(turn_id)
             if live is not None:
+                if identity and live.identity and identity != live.identity:
+                    raise PresenceTurnError("presence_event_identity_conflict", "source_event_id", turn_ref=turn_id)
                 return live, False
             if not reserve():
                 return None, False
-            execution = self._live[turn_id] = PresenceTurnExecution(turn_id)
+            execution = self._live[turn_id] = PresenceTurnExecution(turn_id, identity)
         admission = self._admit_and_start(execution, admit, run, release)
         try:
             execution.admission = asyncio.get_running_loop().create_task(admission)

@@ -203,6 +203,10 @@ class HostServiceContext:
         self.rate_limiter = _RateLimiter(on_burst_end=self._ws_relay_burst_ended)
         self._inflight: Dict[str, int] = defaultdict(int)
         self._inflight_lock = threading.Lock()
+        # Auth reads/hashes skill payloads before any per-skill rate limit.
+        # A loop-neutral permit limits concurrent default-executor auth calls;
+        # queued requests hold no thread, and physical completion returns it.
+        self._auth_capacity = threading.BoundedSemaphore(2)
         self._counter_lock = threading.Lock()
         self.presence_deliveries = PresenceDeliveryRecorder(self.data_dir)
         from ouroboros.presence_runner import PresenceTurnExecutions
@@ -369,7 +373,17 @@ async def _authenticated(
             ctx.require_permission(skill_name, token_payload, permission)
         return skill_name, token_payload
 
-    return await asyncio.to_thread(resolve)
+    while not ctx._auth_capacity.acquire(blocking=False):
+        await asyncio.sleep(0.01)
+    try:
+        work = asyncio.get_running_loop().run_in_executor(None, resolve)
+    except BaseException:
+        ctx._auth_capacity.release()
+        raise
+    # Shield the physical read: a disconnected caller may stop awaiting it but
+    # cannot return the permit while that worker is still occupying a thread.
+    work.add_done_callback(lambda _done: ctx._auth_capacity.release())
+    return await asyncio.shield(work)
 
 
 def _token_from_websocket(websocket: WebSocket) -> str:
@@ -714,10 +728,12 @@ def _presence_exception(exc: Exception, status: int) -> JSONResponse:
     disposition = "blocked"
     if code in {"chat_log_unwritable", "presence_result_missing", "presence_bindings_unreadable",
                 "presence_resources_unavailable", "presence_attempt_outcome_unknown",
-                "presence_result_unreadable"}:
+                "presence_result_unreadable", "presence_event_identity_unproven",
+                "presence_start_unwritable"}:
         disposition = "retry"
     elif code in {"presence_attachment_admission_rejected", "presence_binding_wrong_transport",
-                  "presence_conversation_key_required", "presence_admission_conversation_mismatch"}:
+                  "presence_conversation_key_required", "presence_admission_conversation_mismatch",
+                  "presence_event_identity_conflict"}:
         disposition = "rejected"
     facts = {"field": getattr(exc, "field", "presence")}
     if getattr(exc, "turn_ref", ""):
@@ -766,6 +782,7 @@ async def _api_presence_turn(request: Request) -> JSONResponse:
         PresenceTurnNotStarted,
         presence_turn_replay,
         presence_turn_task_id,
+        presence_event_identity,
     )
 
     try:
@@ -824,12 +841,13 @@ async def _api_presence_turn(request: Request) -> JSONResponse:
                                    "presence_identity_missing", "rejected")
         staged_files = await asyncio.to_thread(_presence_staged_files, ctx, skill_name, payload.get("staged_files"))
         turn_id = presence_turn_task_id(admission.binding_id, event.source_event_id)
+        identity = presence_event_identity(admission.binding_id, event)
         # A settled turn answers from its durable row without queueing behind its conversation.
-        result = await asyncio.to_thread(presence_turn_replay, ctx.data_dir, turn_id, event.conversation_key)
+        result = await asyncio.to_thread(presence_turn_replay, ctx.data_dir, turn_id, event.conversation_key, identity)
         if result is None:
             budget = f"{skill_name}:presence"
             execution, _started = ctx.presence_turns.start_or_join(
-                turn_id,
+                turn_id, identity=identity,
                 reserve=functools.partial(ctx._enter_inflight, budget),
                 release=functools.partial(ctx._leave_inflight, budget),
                 admit=functools.partial(ctx.admit_presence_gate, event.conversation_key),

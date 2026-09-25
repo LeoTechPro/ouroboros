@@ -148,7 +148,8 @@ def test_unresolved_turn_asks_owner_once_and_never_addresses_correspondent(tmp_p
     assert len(deliveries) == 1
     args, kwargs = deliveries[0]
     assert args[0] == 1 and task_id in args[1]
-    assert kwargs == {"role": "system", "system_type": "presence_recovery_required", "require_write": True}
+    assert kwargs == {"role": "system", "system_type": "presence_recovery_required", "require_write": True,
+                      "ensure_record_boundary": True}
     assert load_task_result(tmp_path, task_id)["presence_recovery_owner_notified"]
 
 
@@ -190,3 +191,145 @@ def test_unreadable_or_quarantined_result_never_becomes_a_new_turn(tmp_path, qua
         assert body["disposition"] == "retry" and body["turn_ref"] == task_id
         assert invoked == [] and ctx.presence_turns.live() == [] and not any(ctx._inflight.values())
         assert result_path.read_text(encoding="utf-8") == "{broken"
+
+
+def test_failed_durable_start_never_calls_agent_then_same_event_may_retry(tmp_path, monkeypatch):
+    from ouroboros import task_results
+    from ouroboros.presence_runner import PresenceTurnEvent, presence_event_identity
+    from ouroboros.presence_bindings import conversation_key
+
+    invoked = []
+
+    class Agent:
+        def handle_task(self, task):
+            invoked.append(task["id"])
+            task_results.write_task_result(tmp_path, task["id"], "completed",
+                                           metadata=task["metadata"], terminal_origin="model_final",
+                                           result="real reply")
+            return [{"type": "presence_result", "outcome": "message", "text": "real reply"}]
+
+    def runner(**kwargs):
+        return run_presence_turn(repo_dir=tmp_path, drive_root=tmp_path,
+                                 agent_factory=lambda **_kw: Agent(),
+                                 gate=PresenceTurnGate(1), **kwargs)
+
+    app, binding, _ctx = _presence_app(tmp_path, runner)
+    original = task_results.write_task_result
+
+    def refuse_start(*args, **kwargs):
+        if kwargs.get("create_only"):
+            raise OSError("disk refused durable start")
+        return original(*args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(task_results, "write_task_result", refuse_start)
+        failed = asyncio.run(_turn(app, binding, "event"))
+    assert failed.status_code == 409
+    assert json.loads(failed.body)["code"] == "presence_start_unwritable"
+    assert invoked == [] and load_task_result(tmp_path, presence_turn_task_id(binding, "event")) is None
+    succeeded = asyncio.run(_turn(app, binding, "event"))
+    assert succeeded.status_code == 200 and invoked == [presence_turn_task_id(binding, "event")]
+    assert json.loads(succeeded.body)["text"] == "real reply"
+    stored = load_task_result(tmp_path, invoked[0])
+    event = _event("event")
+    event["conversation_key"] = conversation_key(event["provider"], event["account_id"],
+                                                  event["conversation_id"], event["thread_id"])
+    assert stored["metadata"]["presence_event_identity"] == presence_event_identity(binding, PresenceTurnEvent(**event))
+
+
+def test_resource_refusal_never_returns_a_prepared_reply_as_completed(tmp_path):
+    invoked = []
+
+    class Agent:
+        def handle_task(self, task):
+            invoked.append(task["id"])
+            write_task_result(tmp_path, task["id"], "failed", metadata=task["metadata"],
+                              reason_code="resource_refusal_no_resend", result="draft external speech")
+            return [{"type": "presence_result", "outcome": "message", "text": "draft external speech"}]
+
+    app, binding, ctx = _presence_app(tmp_path, lambda **kwargs: run_presence_turn(
+        repo_dir=tmp_path, drive_root=tmp_path, agent_factory=lambda **_kw: Agent(),
+        gate=PresenceTurnGate(1), **kwargs))
+    for _ in range(2):
+        refused = asyncio.run(_turn(app, binding, "event"))
+        body = json.loads(refused.body)
+        assert refused.status_code == 409 and body["code"] == "presence_resources_unavailable"
+        assert body["disposition"] == "retry" and not body.get("text")
+        assert not ctx.presence_turns.live() and not any(ctx._inflight.values())
+    assert len(invoked) == 1  # retry cannot regenerate work behind an already terminal row
+
+
+def test_late_source_bound_terminal_outweighs_old_quarantine(tmp_path):
+    from ouroboros.presence_runner import PresenceTurnEvent, presence_event_identity
+    from ouroboros.presence_bindings import conversation_key
+
+    app, binding, _ctx = _presence_app(tmp_path, lambda **kw: run_presence_turn(
+        repo_dir=tmp_path, drive_root=tmp_path, gate=PresenceTurnGate(1),
+        agent_factory=lambda **_unused: pytest.fail("no model re-execution"), **kw))
+    task_id = presence_turn_task_id(binding, "event")
+    bad = task_result_path(tmp_path, task_id).parent / "quarantine" / f"{task_id}.json"
+    bad.parent.mkdir(parents=True)
+    bad.write_text("{old invalid record", encoding="utf-8")
+    event = _event("event")
+    event["conversation_key"] = conversation_key(
+        event["provider"], event["account_id"], event["conversation_id"], event["thread_id"])
+    write_task_result(tmp_path, task_id, "completed", terminal_origin="model_final", result="late answer",
+                      metadata={"source": "presence", "presence": {"binding_id": binding},
+                                "presence_event_identity": presence_event_identity(binding, PresenceTurnEvent(**event))})
+    response = asyncio.run(_turn(app, binding, "event"))
+    assert response.status_code == 200 and json.loads(response.body)["text"] == "late answer"
+    assert bad.read_text(encoding="utf-8") == "{old invalid record"
+
+
+def test_required_jsonl_boundary_read_error_refuses_append(tmp_path, monkeypatch):
+    from pathlib import Path
+    from ouroboros.utils import append_jsonl
+
+    path = tmp_path / "logs" / "chat.jsonl"
+    path.parent.mkdir()
+    original_bytes = b'{"torn": 1}'
+    path.write_bytes(original_bytes)
+    opener = Path.open
+
+    def fail_probe(self, mode="r", *args, **kwargs):
+        if self == path and mode == "rb":
+            raise OSError("tail is unreadable")
+        return opener(self, mode, *args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(Path, "open", fail_probe)
+        assert append_jsonl(path, {"new": 2}, ensure_record_boundary=True, require_lock=True) is False
+    assert path.read_bytes() == original_bytes
+    assert append_jsonl(path, {"new": 2}, ensure_record_boundary=True, require_lock=True) is True
+    assert path.read_bytes().splitlines()[1] == b'{"new": 2}'
+
+
+def test_ambiguous_start_write_never_regenerates_after_error(tmp_path, monkeypatch):
+    from ouroboros import task_results
+
+    invoked = []
+
+    class Agent:
+        def handle_task(self, task):
+            invoked.append(task["id"])
+            return []
+
+    app, binding, ctx = _presence_app(tmp_path, lambda **kwargs: run_presence_turn(
+        repo_dir=tmp_path, drive_root=tmp_path, gate=PresenceTurnGate(1),
+        agent_factory=lambda **_kw: Agent(), **kwargs))
+    original = task_results.write_task_result
+
+    def wrote_then_lost_ack(*args, **kwargs):
+        saved = original(*args, **kwargs)
+        if kwargs.get("create_only"):
+            raise OSError("write acknowledged nowhere")
+        return saved
+
+    with monkeypatch.context() as patch:
+        patch.setattr(task_results, "write_task_result", wrote_then_lost_ack)
+        first = asyncio.run(_turn(app, binding, "event"))
+    assert first.status_code == 409 and json.loads(first.body)["code"] == "presence_start_unwritable"
+    assert load_task_result(tmp_path, presence_turn_task_id(binding, "event"))["status"] == "running"
+    again = asyncio.run(_turn(app, binding, "event"))
+    assert again.status_code == 409 and json.loads(again.body)["code"] == "presence_attempt_outcome_unknown"
+    assert invoked == [] and ctx.presence_turns.live() == []

@@ -371,3 +371,84 @@ def test_an_admitted_turn_runs_only_under_its_own_conversation(tmp_path):
         assert refused.value.code == "presence_admission_conversation_mismatch"
     finally:
         lease.release()
+
+
+def test_same_source_id_with_different_room_or_text_never_joins_or_replays(tmp_path):
+    entered, release = threading.Event(), threading.Event()
+    calls = []
+
+    def runner(**kwargs):
+        from ouroboros.presence_runner import presence_event_identity, presence_turn_task_id
+        from ouroboros.task_results import write_task_result
+
+        calls.append(kwargs["event"].text)
+        entered.set()
+        assert release.wait(10)
+        event = kwargs["event"]
+        answer = _answer(**kwargs)
+        write_task_result(tmp_path, presence_turn_task_id(binding, event.source_event_id), "completed",
+                          metadata={"source": "presence", "presence": {"binding_id": binding},
+                                    "presence_event_identity": presence_event_identity(binding, event),
+                                    "presence_result_text": answer.text},
+                          terminal_origin="model_final", result=answer.text)
+        return answer
+
+    app, binding, ctx = _presence_app(tmp_path, runner, account_wide=True)
+
+    async def scenario():
+        first = asyncio.create_task(_turn(app, binding, "same-id"))
+        await _until(entered.is_set)
+        other_room = await _turn(app, binding, "same-id", "room-2")
+        different = _event("same-id")
+        different["text"] = "changed message"
+        other_text = await host_service._api_presence_turn(_request(app, {"binding_id": binding, "event": different}))
+        for response in (other_room, other_text):
+            body = json.loads(response.body)
+            assert response.status_code == 409 and body["code"] == "presence_event_identity_conflict"
+            assert body["disposition"] == "rejected" and not body.get("text")
+        assert calls == ["Hello"]
+        release.set()
+        assert (await first).status_code == 200
+        # The durable result is also bound, even though the original worker retired.
+        again = await _turn(app, binding, "same-id", "room-2")
+        assert again.status_code == 409 and json.loads(again.body)["code"] == "presence_event_identity_conflict"
+        assert ctx.presence_turns.live() == []
+
+    asyncio.run(scenario())
+
+
+def test_many_slow_auth_probes_do_not_fill_the_default_executor(tmp_path, monkeypatch):
+    app, _binding, ctx = _presence_app(tmp_path, _answer)
+    entered, release = threading.Event(), threading.Event()
+    lock, active, peak = threading.Lock(), [0], [0]
+    original = ctx.authenticate_token_payload
+
+    def slow_auth(token):
+        with lock:
+            active[0] += 1
+            peak[0] = max(peak[0], active[0])
+            if active[0] == 2:
+                entered.set()
+        try:
+            assert release.wait(10)
+            return original(token)
+        finally:
+            with lock:
+                active[0] -= 1
+
+    monkeypatch.setattr(ctx, "authenticate_token_payload", slow_auth)
+
+    async def scenario():
+        shared = ThreadPoolExecutor(max_workers=3, thread_name_prefix="auth-saturation")
+        asyncio.get_running_loop().set_default_executor(shared)
+        probes = [asyncio.create_task(host_service._api_identity(_request(app))) for _ in range(12)]
+        try:
+            await _until(entered.is_set)
+            assert await asyncio.wait_for(asyncio.to_thread(lambda: "admin-free"), 2) == "admin-free"
+            assert peak[0] == 2 and not any(probe.done() for probe in probes)
+        finally:
+            release.set()
+        assert all(response.status_code == 200 for response in await asyncio.wait_for(asyncio.gather(*probes), 10))
+        shared.shutdown(wait=True)
+
+    asyncio.run(scenario())

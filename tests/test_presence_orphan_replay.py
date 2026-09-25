@@ -36,6 +36,7 @@ from ouroboros.presence_runner import (
     _task_id,
     _turn_sends,
     presence_result_from_stored,
+    presence_event_identity,
     presence_turn_is_live,
     run_presence_turn,
 )
@@ -262,7 +263,8 @@ def test_ordinary_failed_turn_still_replays_and_stays_failed(tmp_path):
     write_task_result(tmp_path, task_id, STATUS_FAILED, result="Authored partial reply",
                       terminal_origin="model_final", reason_code="round_limit",
                       metadata={**_PRESENCE_METADATA, "presence_outcome": "message",
-                                "presence_result_text": "Authored partial reply"})
+                                "presence_result_text": "Authored partial reply",
+                                "presence_event_identity": presence_event_identity(_admission().binding_id, _event())})
     calls: list = []
     result = run_presence_turn(admission=_admission(), event=_event(), repo_dir=tmp_path, drive_root=tmp_path,
                                agent_factory=lambda **_kw: _answering_agent(calls, "New answer", tmp_path),

@@ -137,6 +137,7 @@ BAND_PATHS = {
     "ouroboros/mcp_client.py": "F3.1 typed-organ producer cutover (D05 entry 7b) plus E5+s2r2 (#447): the MCP transport keeps the SDK-owned error bit as a typed ToolResult, follows nextCursor pagination with injective 12-hex slugs, and discloses collision/pagination omissions; grew into the band from 984 lines, shrink-only otherwise.",
     "ouroboros/memory.py": "ibl-2b09abdadd25: scratchpad content-size cap added alongside the existing block-count cap in append_scratchpad_block's eviction loop",
     "ouroboros/preflight_runner.py": None,
+    "ouroboros/presence_runner.py": "Presence turn admission, durable retry identity and transport custody remain one owner; separating them now would duplicate the gate and receipt seam.",
     "ouroboros/projects_registry.py": "Entered the band from 999 lines: the stuck-Working liveness sprint homed the project-thread membership lens (mtime-cached) and its broadcast-choke marker here \u2014 registry semantics belong to the registry, not to message_bus.",
     "ouroboros/request_wire_receipts.py": "Wire candidates and semantic-success receipts share one exact serializer digest owner.",
     "ouroboros/request_wire_recovery.py": "E4 (#447): typed CustomToolProjectionError fallback keeps the wire-recovery ladder alive; includes the one-site-sufficient decision record at both retry catch sites",

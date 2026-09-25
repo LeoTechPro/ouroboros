@@ -183,7 +183,10 @@ CHAPTER_BYTE_BUDGETS: dict[str, int] = {
     # conversation key, placeholder re-run and its lost-attempt facts, presence-local liveness,
     # previous-turn pointer and its replay repair, split in-flight budgets, silent orphaned work,
     # presence room label); the base sat 2 bytes under.
-    "docs/architecture/12-host-service-companions-and-chat-ids.md": 12500,
+    # 12500 -> 14300 (TZ3): the source-bound pre-effect Presence start and event
+    # identity, auth saturation, and retry/receipt boundary add contracts the old
+    # chapter could not describe. Existing transport and companion rules remain.
+    "docs/architecture/12-host-service-companions-and-chat-ids.md": 14300,
     # 7764 -> 8600 (#1195): the fresh selected-subject + immutable peer projection
     # execution check (`skill_peer_inventory.py`, `skill_conflicts.py`) replaces
     # whole-inventory hashing; the chapter had no description of that seam to swap out.
