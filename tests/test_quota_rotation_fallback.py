@@ -338,6 +338,48 @@ def test_presence_keeps_intermediate_fallback_refusal_after_later_bad_request(ma
     assert provider_no_call_source(usage, False)[0] == "resource_refusal_no_resend"
 
 
+def test_ordinary_task_keeps_intermediate_fallback_quota_for_owner_wait(main_call, monkeypatch):
+    """A non-quota primary and a later bad route must not erase an earlier fallback's quota."""
+    ctx, _gateway, owner, _events, _decide, _observations = main_call
+    tools = _loop_tools(ctx, owner)
+    monkeypatch.setenv("OUROBOROS_MODEL_FALLBACKS", "openai::one,openai::two")
+    monkeypatch.setattr(fallback_cooldown, "is_cooling_down", lambda *_args: False)
+    monkeypatch.setattr(loop, "_rebind_context_fit_plan", lambda plan, *_a, **_kw: (plan, "max"))
+    waiter = SimpleNamespace(waits_allowed=True, overrides={})
+    monkeypatch.setattr(model_wait, "current_model_wait", lambda: waiter)
+    seen, asked = [], []
+
+    def candidate(call):
+        seen.append((call.active_model, call.defer_resource_wait))
+        call.tools._ctx._deferred_resource_refusal = None
+        if call.active_model == "openai::one":
+            if asked:
+                assert asked == [waiter]
+                return {"role": "assistant", "content": "after owner wait"}, 0.0, "max"
+            call.tools._ctx._deferred_resource_refusal = SimpleNamespace(
+                fact={"reason": "quota", "reset_at": RESET},
+                ask_owner=lambda _waiter: asked.append(_waiter),
+                terminal=lambda **fields: {"reason": "quota", "reset_at": RESET, **fields})
+            call.accumulated_usage["_last_llm_error_kind"] = "quota_exhausted"
+            return None, 0.0, "max"
+        assert call.active_model == "openai::two"
+        call.accumulated_usage["_last_llm_error_kind"] = "bad_request"
+        return None, 0.0, "max"
+
+    monkeypatch.setattr(loop, "_call_round_model", candidate)
+    usage = {"_last_llm_error_kind": "bad_request"}
+    message, *_ = loop._run_cross_model_fallback_chain(
+        llm=ctx.llm, ctx=tools._ctx, tools=tools, messages=ctx.messages, active_model=ctx.active_model,
+        active_use_local=False, tool_schemas=[], active_effort="medium", max_retries=1,
+        drive_logs=ctx.drive_logs, task_id=ctx.task_id, round_idx=1, event_queue=None,
+        accumulated_usage=usage, task_type="task", emit_progress=lambda *_a, **_kw: None,
+        context_fit_plan=ctx.context_fit_plan, active_context_mode="max")
+    assert message["content"] == "after owner wait"
+    assert seen == [("openai::one", True), ("openai::two", True), ("openai::one", False)]
+    assert tools._ctx.active_model == "openai::one"
+    assert RESOURCE_REFUSAL_KEY not in usage
+
+
 # -- Presence: never waits, typed temporary refusal, no speech ------------------------------------
 
 

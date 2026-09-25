@@ -203,9 +203,9 @@ class HostServiceContext:
         self.rate_limiter = _RateLimiter(on_burst_end=self._ws_relay_burst_ended)
         self._inflight: Dict[str, int] = defaultdict(int)
         self._inflight_lock = threading.Lock()
-        # Auth reads/hashes skill payloads before any per-skill rate limit.
-        # A loop-neutral permit limits concurrent default-executor auth calls;
-        # queued requests hold no thread, and physical completion returns it.
+        # Auth and pre-turn Presence reads may both precede turn reservation.
+        # Bound their combined occupancy of the shared default executor; queued
+        # requests hold no thread, and physical completion returns the permit.
         self._auth_capacity = threading.BoundedSemaphore(2)
         self._counter_lock = threading.Lock()
         self.presence_deliveries = PresenceDeliveryRecorder(self.data_dir)
@@ -356,6 +356,20 @@ class HostServiceContext:
             return chat_id
 
 
+async def _bounded_host_read(ctx: HostServiceContext, operation: Callable[[], Any]) -> Any:
+    """Keep pre-reservation disk work off-loop without filling the shared executor."""
+    while not ctx._auth_capacity.acquire(blocking=False):
+        await asyncio.sleep(0.01)
+    try:
+        work = asyncio.get_running_loop().run_in_executor(None, operation)
+    except BaseException:
+        ctx._auth_capacity.release()
+        raise
+    # A disconnected caller must not release a permit while its worker still runs.
+    work.add_done_callback(lambda _done: ctx._auth_capacity.release())
+    return await asyncio.shield(work)
+
+
 async def _authenticated(
     ctx: HostServiceContext, raw_token: str, permission: str = "",
 ) -> tuple[str, Dict[str, Any]]:
@@ -373,17 +387,7 @@ async def _authenticated(
             ctx.require_permission(skill_name, token_payload, permission)
         return skill_name, token_payload
 
-    while not ctx._auth_capacity.acquire(blocking=False):
-        await asyncio.sleep(0.01)
-    try:
-        work = asyncio.get_running_loop().run_in_executor(None, resolve)
-    except BaseException:
-        ctx._auth_capacity.release()
-        raise
-    # Shield the physical read: a disconnected caller may stop awaiting it but
-    # cannot return the permit while that worker is still occupying a thread.
-    work.add_done_callback(lambda _done: ctx._auth_capacity.release())
-    return await asyncio.shield(work)
+    return await _bounded_host_read(ctx, resolve)
 
 
 def _token_from_websocket(websocket: WebSocket) -> str:
@@ -802,7 +806,8 @@ async def _api_presence_turn(request: Request) -> JSONResponse:
         if not isinstance(event_payload, dict) or set(event_payload) != expected:
             return _presence_error("invalid presence event", 400, "presence_event_invalid", "rejected")
 
-        admission = await asyncio.to_thread(_admit_presence, ctx, skill_name, str(payload.get("binding_id") or ""))
+        admission = await _bounded_host_read(
+            ctx, functools.partial(_admit_presence, ctx, skill_name, str(payload.get("binding_id") or "")))
         provider = str(event_payload.get("provider") or "").strip()
         account_id = str(event_payload.get("account_id") or "").strip()
         conversation_id = str(event_payload.get("conversation_id") or "").strip()
@@ -841,11 +846,13 @@ async def _api_presence_turn(request: Request) -> JSONResponse:
         if not event.source_event_id or not event.conversation_key or not event.actor:
             return _presence_error("presence event is missing identity facts", 400,
                                    "presence_identity_missing", "rejected")
-        staged_files = await asyncio.to_thread(_presence_staged_files, ctx, skill_name, payload.get("staged_files"))
+        staged_files = await _bounded_host_read(
+            ctx, functools.partial(_presence_staged_files, ctx, skill_name, payload.get("staged_files")))
         turn_id = presence_turn_task_id(admission.binding_id, event.source_event_id)
         identity = presence_event_identity(admission.binding_id, event)
         # A settled turn answers from its durable row without queueing behind its conversation.
-        result = await asyncio.to_thread(presence_turn_replay, ctx.data_dir, turn_id, event.conversation_key, identity)
+        result = await _bounded_host_read(
+            ctx, functools.partial(presence_turn_replay, ctx.data_dir, turn_id, event.conversation_key, identity))
         if result is None:
             budget = f"{skill_name}:presence"
             execution, _started = ctx.presence_turns.start_or_join(

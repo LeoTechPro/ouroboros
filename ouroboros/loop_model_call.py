@@ -189,7 +189,9 @@ def _run_cross_model_fallback_chain(
     # A primary quota refusal returned here, not waited: the configured routes come
     # first, and the owner question is that refusal's own wait, asked after them.
     deferred, tools._ctx._deferred_resource_refusal = getattr(tools._ctx, "_deferred_resource_refusal", None), None
-    owner_question = deferred is not None and waiter is not None and waiter.waits_allowed
+    owner_question = (task_type != "presence" and deferred is not None
+                      and waiter is not None and waiter.waits_allowed)
+    deferred_candidate = None  # The route that actually refused; never replay an unrelated primary.
     candidates, tried = fallback_candidate_targets(active_model), []
     # The notice names the model that was actually just tried. `active_model`
     # stays the primary until a candidate succeeds, so a second switch would
@@ -275,11 +277,15 @@ def _run_cross_model_fallback_chain(
             )
         tried.append(fallback_model)
         msg, _cost, candidate_mode = _loop()._call_round_model(candidate_call)
-        if task_type == "presence" and deferred is None and msg is None:
+        if deferred is None and msg is None:
             # Each fallback clears the transient context slot before its own send. Keep the
             # first actual resource refusal for this chain: a later bad request cannot
             # erase evidence that an allowed route refused before generation.
             deferred = getattr(tools._ctx, "_deferred_resource_refusal", None)
+            if deferred is not None:
+                deferred_candidate = candidate_call
+            owner_question = (task_type != "presence" and deferred is not None
+                              and waiter is not None and waiter.waits_allowed)
         if msg is not None:
             (
                 active_model,
@@ -317,23 +323,33 @@ def _run_cross_model_fallback_chain(
             break
         _cooled(fallback_model, fallback_use_local)
         previous_model, previous_tag = fallback_model, ftag
-    if task_type == "presence" and deferred is None:
+    if deferred is None:
         deferred = getattr(tools._ctx, "_deferred_resource_refusal", None)
+    owner_question = (task_type != "presence" and deferred is not None
+                      and waiter is not None and waiter.waits_allowed)
     accumulated_usage.pop(RESOURCE_REFUSAL_KEY, None)
     if msg is None and owner_question and str(accumulated_usage.get("_last_llm_error_kind") or "") not in _CHAIN_STOP_KINDS:
-        # The owner wait of the primary's retained refusal: catalog checks only, so no
-        # generation precedes the answer. The primary sends again only after it resolves.
+        # Only the refused route is eligible to re-send after the owner wait;
+        # the primary might have failed permanently before a fallback's quota refusal.
         deferred.ask_owner(waiter)
-        primary_call = _loop()._RoundModelCallContext(
+        retry_call = deferred_candidate or _loop()._RoundModelCallContext(
             llm=llm, messages=messages, tools=tools, context_fit_plan=context_fit_plan,
             active_model=active_model, tool_schemas=tool_schemas, active_effort=active_effort,
             max_retries=max_retries, drive_logs=drive_logs, task_id=task_id, round_idx=round_idx,
             event_queue=event_queue, accumulated_usage=accumulated_usage, task_type=task_type,
             active_use_local=active_use_local, active_context_mode=active_context_mode,
             drive_root=pathlib.Path(drive_logs).parent, emit_progress=emit_progress, defer_resource_wait=False)
-        msg, _cost, active_context_mode = _loop()._call_round_model(primary_call)
-        active_model, active_use_local = primary_call.active_model, primary_call.active_use_local
-        context_fit_plan = primary_call.context_fit_plan
+        retry_call.defer_resource_wait = False
+        msg, _cost, active_context_mode = _loop()._call_round_model(retry_call)
+        if msg is not None and deferred_candidate is not None:
+            active_model, active_use_local, context_fit_plan, active_context_mode = _adopt_fallback_route(
+                ctx, tools, retry_call.active_model, retry_call.active_use_local,
+                messages, retry_call.messages, retry_call.context_fit_plan, active_context_mode,
+                tool_schemas, accumulated_usage, handover_from_model=active_model,
+                handover_reason="owner_wait")
+        else:
+            active_model, active_use_local = retry_call.active_model, retry_call.active_use_local
+            context_fit_plan = retry_call.context_fit_plan
     elif msg is None and deferred is not None:  # the refused primary buys no forced final either
         accumulated_usage[RESOURCE_REFUSAL_KEY] = deferred.terminal(
             fallbacks_tried=tried, owner_wait="not_asked" if owner_question else "not_allowed")
@@ -686,7 +702,7 @@ def _dispatch_round_model(
         ctx.tools._ctx._deferred_resource_refusal = deferral
         if not waiter.waits_allowed:  # typed at once: the terminal may come before any chain
             ctx.accumulated_usage[RESOURCE_REFUSAL_KEY] = deferral.terminal(fallbacks_tried=[], owner_wait="not_allowed")
-    elif ctx.task_type == "presence" and deferral is not None and deferral.fact and result[0] is None:
+    elif deferral is not None and deferral.fact and result[0] is None:
         ctx.tools._ctx._deferred_resource_refusal = deferral
     pending_wait_handover = getattr(ctx.tools._ctx, "_pending_model_wait_handover", None)
     if pending_wait_handover is not None:

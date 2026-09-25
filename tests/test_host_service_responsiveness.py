@@ -452,3 +452,42 @@ def test_many_slow_auth_probes_do_not_fill_the_default_executor(tmp_path, monkey
         shared.shutdown(wait=True)
 
     asyncio.run(scenario())
+
+
+def test_slow_presence_preparation_cannot_fill_the_default_executor(tmp_path, monkeypatch):
+    """Admission, staging and replay run before turn capacity; their workers still need a bound."""
+    app, binding, ctx = _presence_app(tmp_path, _answer)
+    entered, release = threading.Event(), threading.Event()
+    lock, active, peak = threading.Lock(), [0], [0]
+    original = host_service._admit_presence
+
+    def slow_admission(*args):
+        with lock:
+            active[0] += 1
+            peak[0] = max(peak[0], active[0])
+            if active[0] == 2:
+                entered.set()
+        try:
+            assert release.wait(10)
+            return original(*args)
+        finally:
+            with lock:
+                active[0] -= 1
+
+    monkeypatch.setattr(host_service, "_admit_presence", slow_admission)
+
+    async def scenario():
+        shared = ThreadPoolExecutor(max_workers=3, thread_name_prefix="admission-saturation")
+        asyncio.get_running_loop().set_default_executor(shared)
+        requests = [asyncio.create_task(_turn(app, binding, f"admission-{i}")) for i in range(12)]
+        try:
+            await _until(entered.is_set)
+            assert await asyncio.wait_for(asyncio.to_thread(lambda: "owner-free"), 2) == "owner-free"
+            assert peak[0] == 2 and not any(request.done() for request in requests)
+        finally:
+            release.set()
+        assert all(response.status_code == 200 for response in await asyncio.wait_for(asyncio.gather(*requests), 10))
+        assert ctx.presence_turns.live() == []
+        shared.shutdown(wait=True)
+
+    asyncio.run(scenario())
