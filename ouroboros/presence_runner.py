@@ -115,6 +115,11 @@ def presence_result_from_stored(stored: Mapping[str, Any], task_id: str) -> Pres
         str(metadata.get("presence_outcome") or "message"), str(text or ""), origin,
         legacy=str(stored.get("status") or "") == "completed",
     )
+    if _terminal_refusal(stored):
+        # A refused or unproven attempt has no reply to deliver: the forced rail may
+        # still stamp model_final over a round-one draft it salvaged before the quota
+        # refusal, and the deferred-work view must not hand that draft to the correspondent.
+        outcome, text = "silent", ""
     return PresenceTurnResult(
         outcome=outcome, text=text, task_id=task_id,
         work_ref=str(metadata.get("presence_work_ref") or ""),

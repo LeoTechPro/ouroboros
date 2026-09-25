@@ -10,7 +10,7 @@ from ouroboros.gateway import host_service
 from ouroboros.presence_admission import PresenceAdmissionError
 from ouroboros.presence_runner import PresenceTurnError
 from ouroboros.presence_runner import PresenceTurnGate, presence_turn_task_id, presence_retry_proof, run_presence_turn
-from ouroboros.presence_runner import _notify_unresolved_turn
+from ouroboros.presence_runner import _notify_unresolved_turn, presence_result_from_stored
 from ouroboros.task_results import load_task_result, task_result_path, write_task_result
 from tests.test_host_service_responsiveness import _answer, _event, _presence_app, _request, _turn
 from tests.test_presence_delivery import _payload
@@ -619,3 +619,23 @@ def test_lost_terminal_write_after_start_barrier_never_acknowledges_the_event(tm
     again = asyncio.run(_turn(app, binding, "event"))
     assert again.status_code == 409 and json.loads(again.body)["code"] == "presence_attempt_outcome_unknown"
     assert invoked == [presence_turn_task_id(binding, "event")] and ctx.presence_turns.live() == []
+
+
+@pytest.mark.parametrize("row", [
+    {"reason_code": "resource_refusal_no_resend"},
+    {"reason_code": "provider_unavailable",
+     "outcome_axes": {"execution": {"status": "infra_failed", "reason_code": "provider_unavailable"}}},
+])
+def test_deferred_work_view_never_delivers_a_salvaged_draft_of_a_refused_attempt(row):
+    """A refused or unproven attempt has no reply: the forced rail may still stamp
+    ``model_final`` over the round-one draft it salvaged before the refusal, and the
+    ``/presence/work`` projection must not hand that draft to the correspondent."""
+    stored = {"status": "failed", "terminal_origin": "model_final", "result": "half-written draft",
+              "metadata": {"presence_outcome": "message", "presence_work_ref": "child-1"}, **row}
+    projected = presence_result_from_stored(stored, "work-1")
+    assert (projected.outcome, projected.text, projected.work_ref) == ("silent", "", "child-1")
+    # A model's own failed terminal (round limit, no infrastructure fault) still replays its answer.
+    own = presence_result_from_stored({"status": "failed", "terminal_origin": "model_final", "result": "final words",
+                                       "reason_code": "round_limit", "metadata": {"presence_outcome": "message"},
+                                       "outcome_axes": {"execution": {"status": "best_effort"}}}, "work-2")
+    assert (own.outcome, own.text) == ("message", "final words")
