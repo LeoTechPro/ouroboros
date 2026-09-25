@@ -69,6 +69,8 @@ def _presence_target_refused(ctx: Any, evt: Dict[str, Any], task: Dict[str, Any]
         meta = running.get(str(_issuer(evt).get("task_id") or "")) if isinstance(running, dict) else None
         row = meta.get("task") if isinstance(meta, dict) else None
         binding = presence_metadata_binding(row.get("metadata")) if isinstance(row, dict) else None
+        if binding is None and isinstance(row, dict) and isinstance(row.get("task_contract"), dict):
+            binding = "" if "capability_ceiling" in row["task_contract"] else None
     return binding is not None and not presence_related_work(binding, task)
 
 

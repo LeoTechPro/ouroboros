@@ -72,9 +72,11 @@ def presence_metadata_binding(metadata: Any) -> str | None:
 
     if not isinstance(metadata, Mapping):
         return None
-    presence = metadata.get("presence")
-    carrier = presence if isinstance(presence, Mapping) else metadata.get(PRESENCE_BINDING_AUTHORITY_KEY)
-    if carrier is None:
+    if "presence" in metadata:
+        carrier = metadata["presence"]
+    elif PRESENCE_BINDING_AUTHORITY_KEY in metadata:
+        carrier = metadata[PRESENCE_BINDING_AUTHORITY_KEY]
+    else:
         return None
     value = carrier.get("binding_id") if isinstance(carrier, Mapping) else None
     return value.strip() if isinstance(value, str) else ""
@@ -83,13 +85,17 @@ def presence_metadata_binding(metadata: Any) -> str | None:
 def presence_caller_binding(ctx: Any) -> str | None:
     """``None`` for a non-Presence caller; otherwise its binding id (may be empty)."""
 
-    return presence_metadata_binding(getattr(ctx, "task_metadata", None))
+    binding = presence_metadata_binding(getattr(ctx, "task_metadata", None))
+    contract = getattr(ctx, "task_contract", None)
+    return "" if binding is None and isinstance(contract, Mapping) and "capability_ceiling" in contract else binding
 
 
-def presence_binding_authority_metadata(parent_metadata: Any) -> dict[str, Any]:
+def presence_binding_authority_metadata(parent_metadata: Any, *, task_contract: Any = None) -> dict[str, Any]:
     """What a child delegated by this task inherits: its binding authority only, or nothing."""
 
     binding = presence_metadata_binding(parent_metadata)
+    if binding is None and isinstance(task_contract, Mapping) and "capability_ceiling" in task_contract:
+        binding = ""  # A lost carrier never turns an inherited Presence ceiling into global authority.
     return {} if binding is None else {PRESENCE_BINDING_AUTHORITY_KEY: {"binding_id": binding}}
 
 

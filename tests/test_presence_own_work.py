@@ -596,8 +596,11 @@ def test_the_binding_authority_is_its_own_carrier_and_fails_closed():
     assert presence_metadata_binding({"presence": _presence()}) == BINDING
     assert presence_metadata_binding({"presence_binding_authority": {"binding_id": BINDING}}) == BINDING
     # A malformed authority is still a Presence one: it narrows to nothing, never to everything.
-    for malformed in ({}, {"binding_id": 7}, "not-a-mapping", []):
+    for malformed in ({}, {"binding_id": 7}, "not-a-mapping", [], None):
         assert presence_metadata_binding({"presence_binding_authority": malformed}) == ""
+    assert presence_metadata_binding({"presence": None}) == ""
+    assert presence_binding_authority_metadata({}, task_contract={"capability_ceiling": {}}) == {
+        "presence_binding_authority": {"binding_id": ""}}
     # The speaker metadata decides for a Presence turn or root; its child gets the binding only.
     assert presence_binding_authority_metadata({"presence": _presence(OTHER)}) == {
         "presence_binding_authority": {"binding_id": OTHER}}
@@ -663,6 +666,29 @@ def test_a_presence_child_inherits_only_the_binding_through_real_admission(tmp_p
     assert not {"presence", "presence_binding_authority"} & set(plain["metadata"])
 
 
+def test_a_lost_or_null_carrier_cannot_widen_an_inherited_ceiling(tmp_path, monkeypatch):
+    from ouroboros.dialogue_provenance import presence_caller_binding
+    from ouroboros.presence_authority import presence_work_refusal
+    from supervisor.task_dispatch import build_scheduled_task_payload
+
+    _evt, child = _admitted_child(tmp_path, monkeypatch, _parent(tmp_path, {"presence": _presence()}))
+    _work(tmp_path, "foreign", "completed", binding=OTHER, result="Not yours")
+    for carrier in ({}, {"presence_binding_authority": None}, {"presence_binding_authority": "bad"}):
+        fields = {"tid": "child-lost", "delegation_role": "subagent", "task_contract": child["task_contract"],
+                  **carrier}
+        row = build_scheduled_task_payload(fields)
+        assert row["metadata"]["presence_binding_authority"] == {"binding_id": ""}
+        ctx = types.SimpleNamespace(task_metadata=row["metadata"], task_contract=child["task_contract"],
+                                    task_id="child-lost", drive_root=tmp_path)
+        assert presence_caller_binding(ctx) == ""
+        assert presence_work_refusal(ctx, "foreign", drive_root=tmp_path)
+    # The read-side gate also fails closed before queue payload construction.
+    lost = types.SimpleNamespace(task_metadata={}, task_contract=child["task_contract"],
+                                 task_id="child-lost", drive_root=tmp_path)
+    assert presence_caller_binding(lost) == ""
+    assert presence_work_refusal(lost, "foreign", drive_root=tmp_path)
+
+
 def _child_turn(root, row, supervisor_ctx, emitted):
     turn = _steering_turn(root, supervisor_ctx, emitted)
     turn.task_id, turn.is_direct_chat, turn.task_metadata = row["id"], False, _worker_metadata(row)
@@ -715,6 +741,10 @@ def test_a_presence_child_steers_only_its_bindings_work_through_the_supervisor(t
         return drain_owner_entries(tmp_path, target)
 
     assert unstamped(child["id"], "foreign-work") == []
+    # A legacy/torn live row without its carrier must not widen the Presence ceiling.
+    supervisor_ctx.RUNNING[child["id"]]["task"] = {**child, "metadata": {}}
+    assert unstamped(child["id"], "foreign-work") == []
+    supervisor_ctx.RUNNING[child["id"]]["task"] = child
     assert [entry["text"] for entry in unstamped(plain["id"], "foreign-work")] == ["unstamped"]
 
     # An ordinary child still messages any listed root, with no Presence stamp at all.

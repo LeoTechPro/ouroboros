@@ -53,8 +53,9 @@ def build_scheduled_task_payload(fields: Dict[str, Any]) -> Dict[str, Any]:
     origin_metadata = fields.get("origin_metadata") if isinstance(fields.get("origin_metadata"), dict) else {}
     # A child of a Presence-bound task inherits only the binding it acts for, never the speaker's
     # ``metadata.presence``; a malformed carrier stays a Presence one and narrows to nothing.
-    binding_authority = presence_binding_authority_metadata(
-        {PRESENCE_BINDING_AUTHORITY_KEY: fields.get(PRESENCE_BINDING_AUTHORITY_KEY)})
+    carrier = ({PRESENCE_BINDING_AUTHORITY_KEY: fields[PRESENCE_BINDING_AUTHORITY_KEY]}
+               if PRESENCE_BINDING_AUTHORITY_KEY in fields else {})
+    binding_authority = presence_binding_authority_metadata(carrier, task_contract=task_contract)
     task: Dict[str, Any] = {
         "id": tid,
         "type": "task",
