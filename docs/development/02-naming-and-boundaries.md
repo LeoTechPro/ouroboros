@@ -385,6 +385,7 @@ rows — review-only maintenance.
 | `ouroboros/reviewer_slot_config.py::_ACCEPTANCE_API_PANEL_MEASURED` | Historical API-panel comparison: approximately 12 s / $0.07 per model row per task (median of the 2026-09-01 OSWorld traces); 75 s / $0.82 for a three-row panel on ProgramBench | Workload and route dependent | The named measurement constant used by the one-time delivery disclosure | Repeat the same workload with recorded model, route and usage | An old comparison can be mistaken for a current tariff or a subscription-cost estimate | Keep the date and workload visible; current usage owns money, and session delivery spends subscription time |
 | `ouroboros/llm_claudexor.py::cache_key_for_model` | The 2026-09-17 measurement found Codex prefix reuse across conversations requires one `prompt_cache_key` + `session_id`, while per-conversation turn states remain valid under that shared session | Provider dependent | Dated measurement beside the key derivation | Re-measure cache reads and turn state across two conversations | A stale positive pays cold prefixes or breaks turn state | Re-measure before changing the key scope |
 | `ouroboros/llm_openai_compatible.py` DeepSeek send projection | The 2026-09-03 probe found thinking accepts only `auto`/`none` tool choice; required/named calls returned 400 on both probed v4 models | Provider dependent | Dated probe recorded beside the send projection and its transport tests | Re-probe the exact endpoint/model when that dialect changes | Removing the projection too early breaks forced calls; keeping it after a provider change may suppress supported thinking | Revalidate the wire contract before changing the projection; keep its effect disclosed |
+| `ouroboros/provider_models.py::ZAI_REASONING_EFFORT_ALIASES` (Z.ai send projection) | The 2026-09-21 contributor probe (PR #1207, Coding Plan key, glm-5.3): only `low`/`high`/`max` are accepted, an absent tier is served at max, thinking cannot be disabled (400 code 1210), and forced tool_choice works with thinking on; GLM-5.2 accepts the wider scale | Provider dependent | Dated probe recorded beside the projection and its tests | Re-probe the exact endpoint/model when Z.ai changes the enum or a GLM release changes semantics | Dropping the projection bills every call at max; a stale one rejects tiers the provider would accept | Revalidate the wire contract before changing the projection; keep its effect disclosed |
 
 ### Provider Independence
 
@@ -435,9 +436,9 @@ slug, not an official OpenAI model id, so a direct OpenAI Chat slot uses the pla
 Sol id (the slug in Chat Completions is a guaranteed 404) — a compatibility
 constraint, not a mutable capability table; direct OpenAI tool conversations stay
 on Chat Completions and a model-name prefix is never admission authority;
-DeepSeek is the second effort-carrying route, its `reasoning_effort` keyed on the
-provider id rather than a name prefix or capability field, so a hand-built target
-cannot silently drop it; direct Anthropic is the deliberate exception to a purely
+DeepSeek and Z.ai carry `reasoning_effort` through provider-specific projections
+keyed on the provider id rather than a name prefix or capability field, so a
+hand-built target cannot silently drop it; direct Anthropic is the deliberate exception to a purely
 reconstructed provider transcript, and no effort-to-`budget_tokens` policy is
 synthesized (ARCHITECTURE §6 "Context fitting, retry, and compaction", ARCHITECTURE §7 "LLM output token
 budgets"). A provider-specific optional feature may be unavailable elsewhere, but

@@ -27,7 +27,7 @@ from ouroboros.llm_capability_policy import (
 )
 from ouroboros.reasoning_artifacts import transcript_has_sealed_reasoning
 from ouroboros.llm_routing import _resolve_or_provider
-from ouroboros.provider_models import normalize_deepseek_reasoning_effort
+from ouroboros.provider_models import normalize_deepseek_reasoning_effort, normalize_zai_reasoning_effort
 from ouroboros.request_wire_recovery import (
     finalize_wire_response,
     note_provider_metadata_drop_fields,
@@ -204,6 +204,26 @@ class _OpenAICompatibleLaneMixin:
                     _EFFORT_CLAMP_CVAR.set({
                         "requested": requested_effort, "applied": applied,
                         "reason": "provider_forced_tool_choice" if forced_tool else "provider_wire_mapping",
+                        "model": resolved_model,
+                    })
+            elif provider == "zai":
+                # Same carriage family, Z.ai's OWN projection table (NOT
+                # DeepSeek's: medium does not exist at Z.ai and xhigh maps to
+                # max, not high). GLM reasoning cannot be disabled — the
+                # DeepSeek ``thinking={"type":"disabled"}`` arm answers
+                # 400 code 1210 ("please use low, high or max") on PAYG — and
+                # forced tool_choice WORKS with thinking enabled (measured
+                # 2026-09-21), so there is no forced-tool exception either.
+                # An absent parameter is served at MAX: dropping the tier
+                # silently billed every call at max. Any tier change is
+                # disclosed on usage as ``reasoning_effort_clamped``.
+                applied = normalize_zai_reasoning_effort(requested_effort)
+                kwargs["reasoning_effort"] = applied
+                _EFFORT_CLAMP_CVAR.set(None)  # never inherit a stale note
+                if applied != requested_effort:
+                    _EFFORT_CLAMP_CVAR.set({
+                        "requested": requested_effort, "applied": applied,
+                        "reason": "provider_wire_mapping",
                         "model": resolved_model,
                     })
             if temperature is not None:
