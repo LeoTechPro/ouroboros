@@ -15,6 +15,7 @@ import asyncio
 import json
 import queue
 import time
+from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
@@ -344,7 +345,16 @@ def test_ordinary_task_keeps_intermediate_fallback_quota_for_owner_wait(main_cal
     tools = _loop_tools(ctx, owner)
     monkeypatch.setenv("OUROBOROS_MODEL_FALLBACKS", "openai::one,openai::two")
     monkeypatch.setattr(fallback_cooldown, "is_cooling_down", lambda *_args: False)
-    monkeypatch.setattr(loop, "_rebind_context_fit_plan", lambda plan, *_a, **_kw: (plan, "max"))
+    rebounds = []
+
+    def rebind(plan, *_args, **kwargs):
+        account = kwargs.get("credential_profile_id")
+        rebounds.append(account)
+        if account == "account-b":
+            return replace(plan, model_route={"accountFingerprint": "B", "credentialProfileId": account}), "max"
+        return plan, "max"
+
+    monkeypatch.setattr(loop, "_rebind_context_fit_plan", rebind)
     waiter = SimpleNamespace(waits_allowed=True, overrides={})
     monkeypatch.setattr(model_wait, "current_model_wait", lambda: waiter)
     seen, asked = [], []
@@ -355,10 +365,12 @@ def test_ordinary_task_keeps_intermediate_fallback_quota_for_owner_wait(main_cal
         if call.active_model == "openai::one":
             if asked:
                 assert asked == [waiter]
+                assert call.context_fit_plan.model_route["accountFingerprint"] == "B"
                 return {"role": "assistant", "content": "after owner wait"}, 0.0, "max"
             call.tools._ctx._deferred_resource_refusal = SimpleNamespace(
                 fact={"reason": "quota", "reset_at": RESET},
-                ask_owner=lambda _waiter: asked.append(_waiter),
+                ask_owner=lambda _waiter: (asked.append(_waiter), waiter.overrides.update(
+                    {"fallback:0": {"model_account_override": "account-b"}})),
                 terminal=lambda **fields: {"reason": "quota", "reset_at": RESET, **fields})
             call.accumulated_usage["_last_llm_error_kind"] = "quota_exhausted"
             return None, 0.0, "max"
@@ -377,6 +389,7 @@ def test_ordinary_task_keeps_intermediate_fallback_quota_for_owner_wait(main_cal
     assert message["content"] == "after owner wait"
     assert seen == [("openai::one", True), ("openai::two", True), ("openai::one", False)]
     assert tools._ctx.active_model == "openai::one"
+    assert rebounds[-1] == "account-b"
     assert RESOURCE_REFUSAL_KEY not in usage
 
 

@@ -340,6 +340,21 @@ def _run_cross_model_fallback_chain(
             active_use_local=active_use_local, active_context_mode=active_context_mode,
             drive_root=pathlib.Path(drive_logs).parent, emit_progress=emit_progress, defer_resource_wait=False)
         retry_call.defer_resource_wait = False
+        if deferred_candidate is not None:
+            # An owner may select a DIFFERENT account on this same fallback model.
+            # Rebind its window/route evidence before measurement and physical send;
+            # the pre-wait candidate's account is not evidence for the new one.
+            from ouroboros.model_slots import task_model_binding
+
+            role, account = task_model_binding(
+                {"model_role": retry_call.model_role,
+                 "task_metadata": getattr(tools._ctx, "task_metadata", {})},
+                overrides=waiter.overrides)
+            retry_call.context_fit_plan, retry_call.active_context_mode = _loop()._rebind_context_fit_plan(
+                retry_call.context_fit_plan, tools, retry_call.messages,
+                model=retry_call.active_model, use_local=retry_call.active_use_local,
+                preferred_mode=retry_call.active_context_mode, tool_schemas=tool_schemas,
+                model_role=role, model_route={}, credential_profile_id=account)
         msg, _cost, active_context_mode = _loop()._call_round_model(retry_call)
         if msg is not None and deferred_candidate is not None:
             active_model, active_use_local, context_fit_plan, active_context_mode = _adopt_fallback_route(
