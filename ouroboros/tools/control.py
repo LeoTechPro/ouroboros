@@ -415,6 +415,7 @@ def get_tools() -> List[ToolEntry]:
                 "focus_source_sha256": {"type": "string", "default": "", "description": "With include_focus_source: select the retained source by the sha256 the roster row quoted, so a later focus of the same author cannot substitute its evidence."},
                 "source_start_char": {"type": "integer", "description": "Inclusive character offset for the requested canonical source range."},
                 "source_end_char": {"type": "integer", "description": "Exclusive character offset for the requested canonical source range. A range outside the source returns no text: the answer names complete_chars and the range received, and is an argument error."},
+                "presence_scope": {"type": "string", "enum": ["own_binding"], "description": "Presence tasks only: read just independent work started from this Presence binding (any of its conversations) or this task's own tree."},
             }},
         }, _get_task_result),
         ToolEntry("wait_task", {

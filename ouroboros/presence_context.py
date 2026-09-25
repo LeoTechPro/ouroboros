@@ -83,8 +83,102 @@ def _previous_turn_line(previous: Mapping[str, Any]) -> str:
             f"outcome {previous.get('outcome')}, delivery {previous.get('delivery') or 'unknown'}): {body}.{work}")
 
 
-def build_presence_context_section(drive_root: Path, value: Any) -> str:
-    """Render host-authored presence context, including declared full KB topics."""
+_OWN_WORK_PAGE = 5
+
+
+def _own_work_section(drive_root: Path, value: Mapping[str, Any], task_id: str) -> str:
+    """The first page of independent work this binding started, from the scoped reader."""
+    from ouroboros.tools.recent_tasks import recent_tasks_page
+
+    binding = str(value.get("binding_id") or "").strip()
+    if not binding:
+        return ""
+    page = recent_tasks_page(Path(drive_root), limit=_OWN_WORK_PAGE, binding=binding,
+                             exclude=str(task_id or ""), restricted=True)
+    here = str((value.get("event") or {}).get("conversation_key") or "")
+    lines = []
+    for row in page.get("tasks") or []:
+        origin = row.get("presence_origin") if isinstance(row.get("presence_origin"), Mapping) else {}
+        key = str(origin.get("conversation_key") or "")
+        where = ("this conversation" if key and key == here
+                 else f"conversation {key}" if key else "a conversation the queue row names")
+        preview = " ".join(str(row.get("result_preview") or "").split())[:200]
+        lines.append(
+            f"- {row.get('task_id')} [{row.get('status') or 'unknown'}"
+            + (f", cancel {row['cancel_state']}" if row.get("cancel_state") else "")
+            + (", its result row is unreadable" if row.get("result_row") == "unreadable" else "") + f"] from {where}: "
+            + json.dumps(" ".join(str(row.get("description") or "").split())[:200], ensure_ascii=False)
+            + (f"; result preview {json.dumps(preview, ensure_ascii=False)}"
+               if preview and row.get("status") in {"completed", "failed", "cancelled"} else "")
+            + (f"; {row['effective_result']}" if row.get("effective_result") else "")
+        )
+    gap = page.get("read_gap") if isinstance(page.get("read_gap"), Mapping) else {}
+    if gap:
+        lines.append("(some results are unreadable now: "
+                     + ("the result root" if gap.get("result_root") else
+                        f"{gap.get('unattributed_unreadable_rows')} row(s) no record attributes")
+                     + "; this binding's work may be among them)")
+    if page.get("error"):
+        lines.append(f"(listing unavailable now: {page['error'].get('code')}; page again with recent_tasks)")
+    elif page.get("remaining"):
+        lines.append(f"({page['remaining']} more: recent_tasks(presence_scope=\"own_binding\", "
+                     f"offset={page['offset'] + page['returned']}, snapshot=\"{page['snapshot']}\"))")
+    if not lines:
+        return ""
+    return (
+        "## Work started from this binding (host-authored facts)\n\n"
+        "Independent work this Presence binding started, from this or another of its conversations, "
+        "newest first (queued work without a result row leads). Being listed says nothing about whether "
+        "its result reached anyone. Where your tools include them, get_task_result(task_id, "
+        "presence_scope=\"own_binding\") reads one exactly, steer_task gives it new facts as this "
+        "task's own message, and presence_cancel_work requests its cancellation. Work of other "
+        "bindings and the owner's own tasks are not addressable from here.\n\n"
+        + "\n".join(lines)
+    )
+
+
+def presence_send_facts(drive_root: Path, task_id: str, value: Any) -> str:
+    """Transport sends of this task confirmed so far in its own conversation, or honest unknown."""
+    from ouroboros.presence_runner import _live_task_rows, _turn_sends
+
+    value = value if isinstance(value, Mapping) else {}
+    key = str((value.get("event") or {}).get("conversation_key") or "")
+    if not key or value.get("delivery_reporting_version") != 1:
+        return "unknown (this transport reports no delivery receipts)"
+    sent, uncertain = _turn_sends(_live_task_rows(Path(drive_root), str(task_id or ""), key))
+    if sent is None:
+        return "unknown (no readable receipt coverage for this task)"
+    said = " / ".join(json.dumps(text, ensure_ascii=False) for text in sent if text) or "none"
+    return said + (f"; {uncertain} more part(s) have an uncertain outcome and may have landed" if uncertain else "")
+
+
+def presence_finish_not_accepted_note(ctx: Any, completion: Mapping[str, Any]) -> str:
+    """Tell the round that follows an invalidated finish what is void and what is already sent."""
+    from ouroboros.tool_access import canonical_data_root
+
+    metadata = getattr(ctx, "task_metadata", None)
+    try:  # the host records receipts on the canonical root, never on a forked execution drive
+        sent = presence_send_facts(canonical_data_root(ctx), str(getattr(ctx, "task_id", "") or ""),
+                                   metadata.get("presence") if isinstance(metadata, Mapping) else None)
+    except Exception:
+        sent = "unknown (receipts unreadable)"
+    return (
+        f"[PRESENCE_FINISH_NOT_ACCEPTED]\npresence_finish({completion.get('outcome')}) was not accepted: "
+        "finalization asked for the work above first, so it no longer decides what the conversation "
+        f"receives. Sends confirmed for this task so far: {sent}. When the work is done, finish again: "
+        "tool_delivered or silent when the substantive result already reached the conversation and "
+        "nothing new needs saying, message only for new useful speech. Review, helper and limit "
+        "details are not conversation content."
+    )
+
+
+def build_presence_context_section(drive_root: Path, value: Any, task_id: str = "", *,
+                                   status_root: Path | None = None) -> str:
+    """Render host-authored presence context, including declared full KB topics.
+
+    ``status_root`` is the canonical task root the own-work catalogue reads (a forked
+    execution drive holds only its own worker rows); it defaults to ``drive_root``.
+    """
 
     if not isinstance(value, Mapping):
         return ""
@@ -170,6 +264,12 @@ def build_presence_context_section(drive_root: Path, value: Any) -> str:
             f"The host lost an earlier attempt of this event before it finished; {detail}. "
             "Do not resend what was already delivered."
         )
+    try:
+        own_work = _own_work_section(Path(status_root or drive_root), value, task_id)
+    except Exception:
+        own_work = "## Work started from this binding (host-authored facts)\n\nUnavailable now; page it with recent_tasks."
+    if own_work:
+        parts.append(own_work)
     parts += [
         "## Current presence event (host-authored facts)\n\n"
         + json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True, default=str),
@@ -178,4 +278,7 @@ def build_presence_context_section(drive_root: Path, value: Any) -> str:
     return "\n\n".join(parts)
 
 
-__all__ = ["build_presence_context_section", "frame_presence_user_content"]
+__all__ = [
+    "build_presence_context_section", "frame_presence_user_content",
+    "presence_finish_not_accepted_note", "presence_send_facts",
+]

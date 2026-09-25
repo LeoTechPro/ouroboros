@@ -143,7 +143,10 @@ CHAPTER_BYTE_BUDGETS: dict[str, int] = {
     # after the long-work continuity merge, 308678 after the Claudexor 3.14.0 pin, #1264);
     # the run-origin sentences replace the "request decides what the run was for" and the
     # owner-turn descriptions (+144 on the merged base) rather than appending to them.
-    "docs/architecture/06-agent-core.md": 308900,
+    # 308900 -> 309100 (TZ2 own work): the task-message sentence names the Presence
+    # sender's own-binding boundary and the delivery-control paragraph the Presence
+    # forced declaration it resolves around; both clauses extend existing sentences.
+    "docs/architecture/06-agent-core.md": 309100,
     "docs/architecture/07-configuration.md": 36991,
     # 18947 -> 19287: CI failure collection now documents diagnostic desktop builds while release remains gated.
     # 19287 -> 20560 (#1215): three contracts the chapter had no older text for — the
@@ -183,7 +186,11 @@ CHAPTER_BYTE_BUDGETS: dict[str, int] = {
     # conversation key, placeholder re-run and its lost-attempt facts, presence-local liveness,
     # previous-turn pointer and its replay repair, split in-flight budgets, silent orphaned work,
     # presence room label); the base sat 2 bytes under.
-    "docs/architecture/12-host-service-companions-and-chat-ids.md": 12500,
+    # 12500 -> 13400 (TZ2 own work): the Presence paragraph gains two contracts it had
+    # no text for — what a binding's own work is and which readers/controls reach it
+    # (replacing the conversation-exact cancel sentence), and the forced-final split
+    # between the internal record and the declared reply; the base sat 10 bytes under.
+    "docs/architecture/12-host-service-companions-and-chat-ids.md": 13400,
     # 7764 -> 8600 (#1195): the fresh selected-subject + immutable peer projection
     # execution check (`skill_peer_inventory.py`, `skill_conflicts.py`) replaces
     # whole-inventory hashing; the chapter had no description of that seam to swap out.
@@ -209,7 +216,9 @@ CHAPTER_BYTE_BUDGETS: dict[str, int] = {
     # chapter had 5 bytes left. Sized to the text: 5 bytes of margin.
     # 94520 -> 94900: the delegated-lane bullet names the worktree ops lock rule
     # (issue #1241: no tree walk or per-file git process under the lock).
-    "docs/development/06-rules-by-change-class.md": 94900,
+    # 94900 -> 95000 (TZ2 own work): the Presence bullets replace the conversation-exact
+    # cancel clause with the own-binding rule and name the forced declaration.
+    "docs/development/06-rules-by-change-class.md": 95000,
     "docs/development/07-managed-update-rule.md": 4166,
     "docs/development/08-mutation-attribution-rule.md": 2899,
     "docs/development/09-process-custody-rule.md": 10028,

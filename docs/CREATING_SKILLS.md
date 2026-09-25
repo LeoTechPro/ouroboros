@@ -734,8 +734,9 @@ ceiling and reply context rather than widening authority.
 
 Transport custody preserves provider arrival order before Host admission; the
 host serializes one conversation and enforces the installation-wide active-turn
-limit across processes. A current Presence turn may cancel only its own
-binding-and-conversation-correlated `work_ref`. Owner chat or Background
+limit across processes. A Presence turn may find, read, message and cancel only
+independent work started from its own binding, in any of that binding's
+conversations; other bindings and the owner's tasks stay out of reach. Owner chat or Background
 Consciousness may initiate an existing binding, but the resulting cycle must use
 an explicitly selected transport tool and finish `tool_delivered` to claim that
 an external message was sent.
@@ -765,6 +766,8 @@ status notices stay in the owner task; an empty deferred body sends nothing but
 still requires polling. Cached and late results preserve that empty body rather
 than substituting the task diagnostic. This does not turn failure into success.
 Ordinary implicit replies and genuine authored best-effort answers remain valid.
+A forced final separates the task record from the reply: only a `presence_finish`
+declared in that answer is spoken, so an undeclared record sends nothing new.
 
 `GET /identity` advertises `presence_delivery_version: 1` on supporting hosts.
 Only then request `delivery_reporting_version: 1` alongside `binding_id` and

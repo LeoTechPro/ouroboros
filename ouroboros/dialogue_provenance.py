@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import Any, Mapping
 
 from ouroboros.contracts.chat_id_policy import HIDDEN_CHAT_ID, WEB_UI_CHAT_ID
@@ -23,6 +24,112 @@ def is_presence_task(task: Mapping[str, Any]) -> bool:
         or task.get("_presence_origin")
         or isinstance(metadata.get("presence"), Mapping)
     )
+
+
+# A Presence binding's own work is reached through this scope (owner Q1/Q2).
+PRESENCE_OWN_WORK_SCOPE = "own_binding"
+
+
+def presence_record_binding(record: Any) -> str:
+    """The nonempty host binding id one task/queue record carries, else ``""``."""
+
+    metadata = record.get("metadata") if isinstance(record, Mapping) else None
+    presence = metadata.get("presence") if isinstance(metadata, Mapping) else None
+    value = presence.get("binding_id") if isinstance(presence, Mapping) else None
+    return value.strip() if isinstance(value, str) else ""
+
+
+def presence_related_work(binding_id: str, record: Any) -> bool:
+    """Independent work started from this same nonempty binding (owner Q1).
+
+    Related work is a promoted or follow-up ROOT carrying the host's Presence
+    provenance for exactly this binding id, whichever of its conversations it
+    came from. An inline Presence turn, a delegated child, an owner root and a
+    record without that provenance are never attributed to the binding.
+    """
+
+    binding = str(binding_id or "").strip()
+    return bool(
+        binding
+        and isinstance(record, Mapping)
+        and presence_record_binding(record) == binding
+        and str(record.get("delegation_role") or "") == "root"
+        and not str(record.get("parent_task_id") or "").strip()
+    )
+
+
+def presence_caller_binding(ctx: Any) -> str | None:
+    """``None`` for a non-Presence caller; otherwise its binding id (may be empty)."""
+
+    metadata = getattr(ctx, "task_metadata", None)
+    presence = metadata.get("presence") if isinstance(metadata, Mapping) else None
+    if not isinstance(presence, Mapping):
+        return None
+    value = presence.get("binding_id")
+    return value.strip() if isinstance(value, str) else ""
+
+
+def presence_sender_origin(ctx: Any) -> dict[str, str]:
+    """Where a Presence caller's run started (its ``run_origin`` room/event facts).
+
+    It names the sending run's origin only: later arrivals in that turn may have
+    been written by other people, so it never claims authorship of quoted words.
+    """
+    metadata = getattr(ctx, "task_metadata", None)
+    return dict(run_origin({"metadata": metadata if isinstance(metadata, Mapping) else {}}).get("presence") or {})
+
+
+def presence_queue_task(drive_root: Any, task_id: str) -> dict[str, Any] | None:
+    """The persisted queue row of one pending/running task, if the snapshot lists it."""
+
+    from ouroboros.utils import read_json_dict
+
+    snapshot = read_json_dict(Path(drive_root) / "state" / "queue_snapshot.json") or {}
+    for key in ("pending", "running"):
+        for item in snapshot.get(key) or []:
+            task = item.get("task") if isinstance(item, Mapping) else None
+            if isinstance(task, Mapping) and str(item.get("id") or task.get("id") or "") == task_id:
+                return {**dict(task), "id": task_id}
+    return None
+
+
+def presence_target_record(drive_root: Any, task_id: str) -> Mapping[str, Any] | None:
+    """The record that decides whose work ``task_id`` is.
+
+    The canonical task record decides; a legacy row without Presence provenance
+    may be established only by the queue's own task metadata.
+    """
+
+    from ouroboros.task_results import load_task_result
+
+    target = str(task_id or "").strip()
+    try:
+        stored = load_task_result(Path(drive_root), target) if target else None
+    except (OSError, ValueError):
+        stored = None  # an unreadable or invalid id is no evidence of relation
+    record = stored if isinstance(stored, Mapping) and stored else None
+    if record is None or not presence_record_binding(record):
+        record = presence_queue_task(drive_root, target) or record
+    return record
+
+
+def presence_effective_hops(task_id: str, effective: Any) -> list[str]:
+    """The OTHER tasks an effective projection of ``task_id`` carries: retry lineage and successor."""
+
+    if not isinstance(effective, Mapping):
+        return []
+    ids = [value for hop in effective.get("retry_lineage") or [] if isinstance(hop, Mapping)
+           for value in (hop.get("task_id"), hop.get("retry_task_id"))]
+    ids.append(effective.get("task_id") or effective.get("id"))
+    requested = str(task_id or "").strip()
+    return [hop for hop in dict.fromkeys(str(value or "").strip() for value in ids) if hop and hop != requested]
+
+
+def presence_effective_related(binding: str, task_id: str, effective: Any, *, drive_root: Any) -> bool:
+    """Whether every task an effective projection of ``task_id`` reaches is this binding's own work."""
+
+    return all(presence_related_work(binding, presence_target_record(drive_root, hop))
+               for hop in presence_effective_hops(task_id, effective))
 
 
 def presence_provenance_from_task(task: Mapping[str, Any]) -> dict[str, str]:

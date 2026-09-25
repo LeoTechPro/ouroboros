@@ -121,6 +121,15 @@ def build_presence_result_event(task: dict[str, Any], text: str, ctx: Any, *, te
     completion = completion if (
         isinstance(completion, dict) and getattr(ctx, "_presence_completion_accepted", False)
     ) else {}
+    # A forced final declares its outward delivery beside the internal record; without
+    # a valid declaration the record never becomes conversation speech (owner Q4).
+    declared = getattr(ctx, "_presence_forced_declaration", None)
+    if not completion and isinstance(declared, dict):
+        completion = declared if declared.get("status") == "declared" else {"outcome": "silent"}
+        # Only a message/deferred body is speech; a tool_delivered note stays context even
+        # when owed work below turns the outcome into deferred.
+        text = str(completion.get("message") or "") if completion.get("outcome") in {"message", "deferred"} else ""
+    note = str(completion.get("message") or "") if completion.get("outcome") == "tool_delivered" else ""
     outcome = str(completion.get("outcome") or "message").strip()
     handoff = getattr(ctx, "_swarm_handoff_attempt", None)
     handoff = handoff if isinstance(handoff, dict) else {}
@@ -141,6 +150,8 @@ def build_presence_result_event(task: dict[str, Any], text: str, ctx: Any, *, te
     metadata["presence_result_text"] = result_text
     if work_ref:
         metadata["presence_work_ref"] = work_ref
+    if not getattr(ctx, "_presence_completion_accepted", False) and isinstance(declared, dict):
+        metadata["presence_declaration"] = {key: declared[key] for key in ("status", "reason") if declared.get(key)}
     task["metadata"] = metadata
     return {
         "type": "presence_result",
@@ -148,7 +159,7 @@ def build_presence_result_event(task: dict[str, Any], text: str, ctx: Any, *, te
         "outcome": outcome,
         "text": result_text,
         # The accepted presence_finish message; a tool_delivered note is context, never speech.
-        "message": result_text or (str(completion.get("message") or "") if outcome == "tool_delivered" else ""),
+        "message": result_text or note,
         "work_ref": work_ref,
         "ts": utc_now_iso(),
     }

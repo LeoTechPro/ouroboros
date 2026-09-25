@@ -972,6 +972,7 @@ def _send_task_message(
     No origin-bytes substitution, attachments or owner client surface.
     The result says WRITTEN: the target reads it at its next checkpoint.
     """
+    from ouroboros.dialogue_provenance import presence_caller_binding, presence_sender_origin
     from ouroboros.project_dialogue import AGENT_RECEIPT_ID_PREFIX
 
     routing_token = uuid.uuid4().hex
@@ -987,6 +988,8 @@ def _send_task_message(
         "issuer": dict(issuer),
         "ts": utc_now_iso(),
     }
+    if (binding := presence_caller_binding(ctx)) is not None:  # admitted only to this binding's own work (owner Q2)
+        evt.update(presence_binding_id=binding, sender_origin=presence_sender_origin(ctx))
     mode, receipt = _emit_and_wait_for_routing(ctx, evt)
     if str(receipt.get("status") or "") == "delivered":
         return (

@@ -527,6 +527,11 @@ def _promote_chat_to_task_outcome(evt: Dict[str, Any], ctx: Any) -> Dict[str, An
                     else "Task is scheduled, but its owner-facing routing receipt was not confirmed."
                 ),
                 attachment_manifest=list(outcome.get("attachment_manifest") or []),
+                # A Presence promotion's host-carried provenance is canonical from
+                # admission, so its binding finds, polls and controls the work while
+                # it is still queued (the worker's running write keeps the same value).
+                **({"metadata": {"presence": dict(evt["presence"])}, "source": "presence_promote"}
+                   if isinstance(evt.get("presence"), dict) and evt.get("presence") else {}),
             )
             admission = stored.get("promotion_admission") if isinstance(stored, dict) else {}
             if (

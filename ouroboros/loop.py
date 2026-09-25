@@ -118,6 +118,10 @@ def _finalize_loop_candidate(content, limit_ctx, tools, emit_progress, *, after_
         if transcript_growth_signature(limit_ctx.messages) == spoken_before:
             wait_for_acceptance_feedback(tools, limit_ctx, limit_ctx.llm_trace,
                                          limit_ctx.tool_schemas, limit_ctx.owner_msg_seen)
+        elif isinstance(completion, dict):  # that owed round also learns its finish is void
+            from ouroboros.presence_context import presence_finish_not_accepted_note
+
+            _append_or_merge_user_message(limit_ctx.messages, presence_finish_not_accepted_note(ctx, completion), slot=ctx)
     return result
 
 
@@ -420,6 +424,7 @@ def _record_transcript_prefix(ctx, messages, round_idx, accumulated_usage,
 def _reset_turn_state(ctx: Any) -> None:
     """Clear the per-turn state this turn owns; nothing durable is touched."""
     ctx._presence_completion, ctx._presence_completion_accepted = None, False
+    ctx._presence_forced_declaration = ctx._presence_forced_pending = None
     ctx._delivery_candidate, ctx._delivery_candidate_revision, ctx._delivery_control_required = None, 0, False
     ctx._delivery_evidence_revision, ctx._delivery_evidence_fingerprint = 0, ""
     ctx.model_turn_state, ctx._authoring_handover, ctx._pending_model_wait_handover = ModelTurnState(), None, None

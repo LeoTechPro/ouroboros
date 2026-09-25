@@ -53,6 +53,13 @@ def _task_issued(evt: Dict[str, Any]) -> bool:
     return str(_issuer(evt).get("kind") or "") == "task"
 
 
+def _presence_target_related(evt: Dict[str, Any], task: Dict[str, Any]) -> bool:
+    """A Presence sender's live target is independent work of its own binding."""
+    from ouroboros.dialogue_provenance import presence_related_work
+
+    return presence_related_work(str(evt.get("presence_binding_id") or ""), task)
+
+
 def _refuse_steering_while_cancelling(
     ctx: Any,
     evt: Dict[str, Any],
@@ -250,6 +257,8 @@ def _handle_steer_task(evt: Dict[str, Any], ctx: Any) -> None:
         refusal = "target_unknown"
     elif str(task.get("delegation_role") or "") == "subagent":
         refusal = "subagent_target"
+    elif task_issued and "presence_binding_id" in evt and not _presence_target_related(evt, task):
+        refusal = "presence_work_not_related"
     elif not task_issued and not _owner_lane_allows(ctx, task, target, chat_id):
         refusal = "chat_mismatch"
     else:
@@ -373,6 +382,7 @@ def _handle_steer_task(evt: Dict[str, Any], ctx: Any) -> None:
             if not write_task_message(
                 drive, message, target, source_task_id=issuer_task_id,
                 provenance=PROVENANCE_INDEPENDENT_TASK, msg_id=msg_id,
+                sender_origin=evt.get("sender_origin") if isinstance(evt.get("sender_origin"), dict) else None,
             ):
                 raise OSError("task mailbox append was not durable")
             delivered = True
