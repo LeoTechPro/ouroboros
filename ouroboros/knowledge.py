@@ -361,8 +361,10 @@ def write_knowledge_note(
                                         {"old_chars": len(current.text), "new_chars": len(current.text),
                                          "change_chars": 0, "removed_headings": []})
         updated = _note(address, raw)
-        if mode == "edit" and (updated.parse_error or updated.metadata != current.metadata
-                               or bool(updated.source.frontmatter_span) != bool(current.source.frontmatter_span)):
+        if mode == "edit" and (updated.parse_error or
+                               bool(updated.source.frontmatter_span) != bool(current.source.frontmatter_span) or
+                               updated.raw[:current.source.body_span.start_byte] !=
+                               current.raw[:current.source.body_span.start_byte]):
             return KnowledgeWriteResult(False, "invalid_note: edit cannot change frontmatter", current, revision)
         old_text = current.text if current else ""
         before = (Counter((heading.level, heading.title) for heading in current.source.headings)

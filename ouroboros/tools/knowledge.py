@@ -12,7 +12,7 @@ from ouroboros.knowledge import INDEX_FILE, OVERVIEW_TOPIC
 from ouroboros.knowledge import sanitize_topic as _sanitize_topic
 from ouroboros.tools.arg_feedback import ignored_argument_note
 from ouroboros.tools.registry import ToolEntry, ToolContext
-from ouroboros.tools.tool_result import ToolResult, _publish_tool_result
+from ouroboros.tools.tool_result import ToolResult, _MAX_META_BYTES, _publish_tool_result
 from ouroboros.utils import append_jsonl, utc_now_iso
 
 KNOWLEDGE_DIR = "memory/knowledge"
@@ -129,6 +129,19 @@ def _record_backlog_history(backlog_file: Path, topic: str, mode: str, task_id: 
 
 
 
+def _bound_delta_meta(meta: dict) -> None:
+    """Keep the tool receipt inside its existing metadata limit; history holds the full delta."""
+    delta = meta.get("knowledge_delta") or {}
+    headings = delta.get("removed_headings")
+    if not isinstance(headings, list) or len(json.dumps(meta, ensure_ascii=True, sort_keys=True,
+                                                        separators=(",", ":")).encode("utf-8")) <= _MAX_META_BYTES:
+        return
+    meta["knowledge_delta"] = {**delta, "removed_headings": [],
+                               "removed_headings_count": len(headings), "removed_headings_omitted": True,
+                               "removed_headings_sha256": hashlib.sha256(
+                                   json.dumps(headings, ensure_ascii=False).encode("utf-8")).hexdigest()}
+
+
 def _knowledge_write(
     ctx: ToolContext, topic: str, content: str, mode: str = "overwrite",
     scope: str = "", expected_revision: str | None = None, old_str: str | None = None,
@@ -167,6 +180,7 @@ def _knowledge_write(
     if result.current is not None:
         meta["knowledge_source"] = result.current.source_ref()
     if result.ok:
+        _bound_delta_meta(meta)
         return _publish_tool_result(ctx, ToolResult(
             status="ok", code="OK",
             text=f"✅ Knowledge '{sanitized}' {result.reason} ({mode}).\n" + json.dumps(meta, ensure_ascii=False, sort_keys=True),
@@ -181,6 +195,7 @@ def _knowledge_write(
         # retry or another model deciding whether the stale write was safe.
         text += "\n\n" + view
         meta["knowledge_body_start"] = len(text) - len(result.current.text)
+    _bound_delta_meta(meta)
     return _publish_tool_result(ctx, ToolResult(
         status="error", code="TOOL_REPORTED_FAILURE", text=text, meta=meta))
 

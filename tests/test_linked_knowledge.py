@@ -185,6 +185,35 @@ def test_edit_cannot_turn_a_plain_note_into_frontmatter(tmp_path):
     assert not (target.shelf.parent / "knowledge_history.jsonl").exists()
 
 
+def test_edit_accepts_recursive_yaml_alias_without_comparing_metadata_graphs(tmp_path):
+    target = address(tmp_path, "recursive")
+    target.path.parent.mkdir(parents=True)
+    target.path.write_bytes(b"---\ntype: note\ncustom: &loop [*loop]\n---\nOld.\n")
+    original = store.read_knowledge_note(target)
+    assert original.source is not None and not original.parse_error
+    result = store.write_knowledge_note(target, "New.", mode="edit", old_str="Old.",
+                                        expected_revision=original.revision)
+    assert result.ok and result.current.raw == original.raw.replace(b"Old.", b"New.")
+    assert history(target)[-1]["old_content"] == original.text
+
+
+def test_large_removed_heading_delta_keeps_tool_receipt_and_full_history(tmp_path):
+    ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id="editor")
+    target = address(tmp_path, "large-headings")
+    body = "".join(f"# Раздел {i:03d}\n" for i in range(240))
+    original = store.write_knowledge_note(target, body).current
+    reply = tools._knowledge_write(ctx, "large-headings", "# Short\n", mode="edit",
+                                   old_str=body, scope="global", expected_revision=original.revision)
+    assert reply.startswith("✅")
+    result = store.read_knowledge_note(target)
+    assert result.text.endswith("# Short\n")
+    assert len(history(target)[-1]["delta"]["removed_headings"]) == 240
+    reported = json.loads(reply.split("\n", 1)[1])["knowledge_delta"]
+    assert reported["removed_headings_count"] == 240
+    assert reported["removed_headings_omitted"] is True
+    assert reported["old_chars"] == len(original.text)
+
+
 def test_edit_preserves_crlf_and_multibyte_surroundings(tmp_path):
     target = address(tmp_path, "legacy")
     target.path.parent.mkdir(parents=True)
