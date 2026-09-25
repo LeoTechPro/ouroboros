@@ -6,6 +6,7 @@ import pathlib
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from ouroboros.contracts.chat_id_policy import is_a2a_chat_id
+from ouroboros import room_consolidation
 from ouroboros.utils import (
     append_jsonl,
     atomic_write_json,
@@ -130,6 +131,7 @@ def consolidate(
     identity_text: str = "",
     *, knowledge_context: Any = None, force_tail: bool = False, compact_chronicle: bool = False,
     pressure_fits: Optional[Callable[[], bool]] = None,
+    room_registry_root: Any = None,
 ) -> Optional[Dict[str, Any]]:
     lock_path = meta_path.parent / ".consolidation.lock"
     lock_path.parent.mkdir(parents=True, exist_ok=True)
@@ -150,6 +152,7 @@ def consolidate(
             identity_text=identity_text,
             knowledge_context=knowledge_context,
             force_tail=force_tail,
+            room_registry_root=room_registry_root,
         )
         if (compact_chronicle and not (usage or {}).get("_consolidation_errors")
                 and not (pressure_fits is not None and pressure_fits())):
@@ -243,6 +246,7 @@ def _run_block_consolidation(
     identity_text: str,
     knowledge_context: Any = None,
     force_tail: bool = False,
+    room_registry_root: Any = None,
 ) -> Optional[Dict[str, Any]]:
     meta = _load_meta(meta_path)
     segments, last_offset, gap_detected = _resolve_generation_segments(meta, source_path)
@@ -281,19 +285,38 @@ def _run_block_consolidation(
     total_usage: Dict[str, Any] = {
         "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "cost": 0.0,
     }
-    # A failed SUFFIX chunk still advances the successful PREFIX, so the stale-error
-    # clear below must know whether THIS run recorded a failure it would erase.
+    # A failed chunk withholds only itself (its earlier sibling chunks are
+    # complete units); the stale-error clear below must know whether THIS run
+    # recorded a failure it would otherwise erase.
     run_failed = False
     new_blocks: List[Dict[str, Any]] = []
+    from ouroboros.dialogue_provenance import RoomLabelResolver
+
+    # The chat log may live in a forked/task drive while projects.json remains
+    # on the canonical data root.  Provenance must follow the registry root,
+    # never the incidental location of the source bytes.
+    registry_root = room_registry_root
+    if registry_root is None and knowledge_context is not None:
+        registry_root = (getattr(knowledge_context, "budget_drive_root", None)
+                         or getattr(knowledge_context, "drive_root", None))
+    room_resolver = RoomLabelResolver(registry_root or source_path.parent.parent)
     chunks_to_process = (len(new_entries) + BLOCK_SIZE - 1) // BLOCK_SIZE if force_tail else len(new_entries) // BLOCK_SIZE
     processed = 0
+    knowledge_instruction = (KNOWLEDGE_MAINTENANCE_PROMPT + "\nAfter the episodic summary, optionally add "
+                             'a final line KNOWLEDGE_ENTRIES_JSON: [{"topic":"...","scope":"global","content":"complete updated Markdown"}].\n'
+                             if knowledge_context is not None else "")
+    block = None
 
     for i in range(chunks_to_process):
         chunk = new_entries[i * BLOCK_SIZE : (i + 1) * BLOCK_SIZE]
-        formatted = _format_entries_for_block(chunk)
+        # The host partitions by the actual chat id BEFORE any model call: each
+        # room's episodic summary uses its own chronological bytes; cumulative
+        # knowledge can span rooms. Each section's identity is a host fact.
+        rooms = room_consolidation.partition_entries(chunk, room_resolver)
         first_ts = str(chunk[0].get("ts", "unknown"))
         last_ts = str(chunk[-1].get("ts", "unknown"))
-        source_hash = hashlib.sha256(json.dumps([identity_text, formatted], ensure_ascii=False).encode("utf-8")).hexdigest()
+        source_hash = hashlib.sha256(json.dumps(
+            [identity_text, [room.text for room in rooms]], ensure_ascii=False).encode("utf-8")).hexdigest()
         retry = meta.get("consolidation_retry") or {}
 
         def remember_refusal(input_limit: Dict[str, Any]) -> None:
@@ -302,55 +325,44 @@ def _run_block_consolidation(
             meta["consolidation_retry"] = {"source_sha256": source_hash, "input_limit": input_limit}
             atomic_write_json(meta_path, meta)
 
-        content, usage = _create_block_summary(
-            llm_client=llm_client,
-            messages_text=formatted,
-            first_ts=first_ts,
-            last_ts=last_ts,
-            identity_text=identity_text,
-            message_count=len(chunk),
-            _retry=retry.get("input_limit") if retry.get("source_sha256") == source_hash else None,
-            _on_refusal=remember_refusal,
-            knowledge_context=knowledge_context,
+        block, usage = room_consolidation.summarize_block(
+            _light_call(llm_client, knowledge_context, {}), rooms, first_ts=first_ts, last_ts=last_ts,
+            identity_text=identity_text, knowledge_instruction=knowledge_instruction,
+            input_limit=retry.get("input_limit") if retry.get("source_sha256") == source_hash else None,
+            on_refusal=remember_refusal,
         )
 
         total_usage = _merge_consolidation_usage(total_usage, usage)
         if (meta.get("consolidation_retry") or {}).get("source_sha256") == source_hash:
             meta.pop("consolidation_retry", None)
-        if not content and usage.get("_consolidation_retry"):
+        if block is None and usage.get("_consolidation_retry"):
             meta["consolidation_retry"] = {"source_sha256": source_hash, "input_limit": usage["_consolidation_retry"]}
         # A refused part that was split and then fully summarized still carries its
-        # attempt errors in usage; only a chunk that produced NO content failed.
-        if usage.get("_consolidation_errors") and not (content and content.strip()):
+        # attempt errors in usage; only a chunk that produced NO block failed.
+        if usage.get("_consolidation_errors") and block is None:
             run_failed = True
             meta["last_consolidation_error"] = dict(
                 usage["_consolidation_errors"][-1], cursor_offset=last_offset + processed,
                 chat_log_signature=segment_sigs[0], message_count=len(chunk),
             )
 
-        if content and content.strip():
-            first_date, last_date = first_ts[:10], last_ts[:10]
-            first_time, last_time = first_ts[11:16], last_ts[11:16]
-            if first_date == last_date:
-                range_str = f"{first_date} {first_time} - {last_time}"
-            else:
-                range_str = f"{first_date} {first_time} - {last_date} {last_time}"
-
-            new_blocks.append({
-                "ts": utc_now_iso(),
-                "type": "summary",
-                "range": range_str,
-                "message_count": len(chunk),
-                "content": content.strip(),
-                **({"knowledge_entries": usage["_knowledge_entries"]} if usage.get("_knowledge_entries") else {}),
-            })
-            processed += len(chunk)
-        else:
-            log.warning("Block summary empty for chunk %d, will retry next cycle", i)
+        if block is None:
+            log.warning("Block summary withheld for chunk %d, will retry next cycle", i)
             break
+        new_blocks.append({
+            "ts": utc_now_iso(), "type": "summary", "message_count": len(chunk), **block,
+            **({"knowledge_entries": usage["_knowledge_entries"]} if usage.get("_knowledge_entries") else {}),
+        })
+        processed += len(chunk)
 
     # Set after the last merge of this stretch: _merge_consolidation_usage forwards
     # fixed keys only, so an earlier assignment would be dropped by the next merge.
+    # The transaction boundary is the logical chunk: every room section and its
+    # correction succeed before that chunk's block exists at all.  Earlier
+    # chunks of the same run are complete units and stay published, so a
+    # transient failure on chunk N never discards N-1 finished chunks (that
+    # would let a flaky route starve the cursor forever); the failed chunk is
+    # retried from its own offset next cycle.
     total_usage["_blocks_written"] = len(new_blocks)
     if not new_blocks:
         atomic_write_json(meta_path, meta)
@@ -374,13 +386,13 @@ def _run_block_consolidation(
             log.warning("Dialogue knowledge nominations could not be retained; preserving original blocks/cursor")
             total_usage["_blocks_written"] = 0
             return total_usage
-        for block, _entries in pending_knowledge:
-            block["knowledge_source_ref"] = ref
+        for nominated_block, _entries in pending_knowledge:
+            nominated_block["knowledge_source_ref"] = ref
 
     existing_blocks = _load_blocks(blocks_path)
     all_blocks = existing_blocks + new_blocks
 
-    if len(all_blocks) > MAX_SUMMARY_BLOCKS and content.strip():
+    if len(all_blocks) > MAX_SUMMARY_BLOCKS and block is not None:
         compress_count = min(ERA_COMPRESS_COUNT, len(all_blocks) - 1)
         old_blocks = all_blocks[:compress_count]
         remaining = all_blocks[compress_count:]
@@ -399,7 +411,11 @@ def _run_block_consolidation(
                 **({"knowledge_context": knowledge_context} if knowledge_context is not None else {}),
             )
             total_usage = _merge_consolidation_usage(total_usage, era_usage)
-        if era is not None:
+        # An era is a COMPRESSION: replace the run only when it is shorter, as
+        # _compact_chronicle already requires. Per-room sections and the
+        # length-adaptive correction pass can make an era longer than the
+        # blocks it summarizes; keeping those blocks loses nothing.
+        if era is not None and len(era.get("content", "")) < sum(len(b.get("content", "")) for b in old_blocks[run_start:run_end]):
             all_blocks = [
                 *old_blocks[:run_start], era, *old_blocks[run_end:], *remaining,
             ]
@@ -445,6 +461,18 @@ def _run_block_consolidation(
              processed, len(new_blocks), len(all_blocks))
     total_usage["_blocks_written"] = len(new_blocks)
     return total_usage
+
+
+def _light_call(llm_client: Any, knowledge_context: Any, model_route: Dict[str, Any]) -> room_consolidation.LightCall:
+    """Bind the Light transport for one logical unit: same route evidence, fresh read context per call."""
+    def call(prompt: str, label: str, *, fixed_prompt: str = "", input_limit: Optional[Dict[str, Any]] = None,
+             call_type: str = "memory_consolidation") -> Tuple[str, Dict[str, Any], Any]:
+        knowledge = KnowledgeReadContext(knowledge_context, call_type) if knowledge_context is not None else None
+        content, usage = _call_consolidation_llm(
+            llm_client, prompt, label, fixed_prompt=fixed_prompt, input_limit=input_limit,
+            model_route=model_route, knowledge=knowledge)
+        return content, usage, knowledge
+    return call
 
 
 def _merge_consolidation_usage(*usages: Dict[str, Any]) -> Dict[str, Any]:
@@ -647,10 +675,15 @@ class KnowledgeReadContext:
 
 KNOWLEDGE_MAINTENANCE_PROMPT = """
 You may use knowledge_list and knowledge_read to understand existing notes before
-nominating a durable revision. Keep the original episode below as evidence, read
-the complete CURRENT note before replacing it, and preserve its sources, uncertainty,
-unknown metadata and useful links. A new observation may correct an old interpretation;
-do not merely repeat fragments. New topics may be created without a prior read.
+nominating a durable revision. An episodic summary describes only its supplied source;
+a knowledge note is cumulative understanding, grounded in the complete CURRENT note
+you read in this operation together with the new episode. Absence from this episode
+does not refute prior knowledge; an earlier episode cutoff does not undo later known
+events. Preserve useful established facts, sources, uncertainty, unknown metadata and
+links. Correct, remove or reorganize stale or unsupported understanding when the
+evidence warrants it; memory is revisable, not append-only. Read the whole current
+note before replacing it, rather than merely repeating fragments. New topics may be
+created without a prior read.
 Understanding of the people involved — preferences, recurring reactions, shared history,
 tentative interpretations with their source — is ordinary knowledge to nominate in global scope;
 a pattern across several moments is worth more than one; revise the existing note rather than minting a rule,
@@ -812,7 +845,14 @@ def _call_consolidation_llm(
             values = prepare({**prepared_values, "messages": [{"role": "user", "content": pointer}],
                               "_model_observed_route": dict(model_route)})
         while True:
-            with waiter.register_reprepare("light", prepare) if waiter else nullcontext():
+            def reprepare_with_route(next_values: Dict[str, Any]) -> Dict[str, Any]:
+                observed = next_values.get("_model_observed_route")
+                if isinstance(observed, dict):
+                    model_route.clear()
+                    model_route.update(observed)
+                return prepare(next_values)
+
+            with waiter.register_reprepare("light", reprepare_with_route) if waiter else nullcontext():
                 invoked = True
                 if knowledge:
                     from ouroboros.llm_observability import chat_observed
@@ -844,12 +884,23 @@ def _call_consolidation_llm(
                 if knowledge and not knowledge.source_complete():
                     response_ref = retain_memory_source(knowledge.context, "incomplete_memory_response", content.encode("utf-8"))
                     return "", {**_merge_consolidation_usage(*usages), "_consolidation_errors": [{
-                        "kind": "source_incomplete", "message": "The complete retained source was not delivered; originals are preserved.",
+                        "kind": "source_incomplete", "label": label,
+                        "message": "The complete retained source was not delivered; originals are preserved.",
                         "source_ref": knowledge.required_source, "response_ref": response_ref}]}
+                # OpenAI-family lanes report the cut in usage.response_finish_reason;
+                # the native Anthropic lane puts stop_reason on the message itself.
+                cut_markers = {str(usage.get("response_finish_reason") or "").lower(),
+                               str(msg.get("stop_reason") or "").lower()}
+                if cut_markers & {"length", "max_tokens"}:
+                    # A summary cut at the output ceiling is silent truncation
+                    # (BIBLE P1): keep the originals rather than a clipped memory.
+                    usages.pop()
+                    kind, message, preflight = "output_truncated", "Consolidation output was cut at the output ceiling", False
+                    break
                 return content, _merge_consolidation_usage(*usages)
             usages.pop()  # the empty response is added once as the failed result below
+            kind, message, preflight = "empty_summary", "Consolidation returned no summary", False
             break
-        kind, message, preflight = "empty_summary", "Consolidation returned no summary", False
     except Exception as error:
         from ouroboros.llm_claudexor import propagate_model_error
         propagate_model_error(error)
@@ -877,116 +928,9 @@ def _call_consolidation_llm(
 
     if knowledge is not None and usages and kind == "context_overflow":
         kind = "knowledge_source_unfit"  # splitting the original episode cannot shrink a requested note
-    fact = dict(facts, kind=kind, message=sanitize_tool_result_for_log(message), preflight_only=preflight)
+    fact = dict(facts, kind=kind, label=label, message=sanitize_tool_result_for_log(message), preflight_only=preflight)
     log.warning("%s failed (%s): %s", label, kind, fact["message"])
     return "", {**_merge_consolidation_usage(*usages, usage), "_consolidation_errors": [fact]}
-
-
-def _block_prompt(
-    messages_text: str,
-    first_ts: str,
-    last_ts: str,
-    identity_text: str,
-    message_count: int,
-) -> str:
-    first_date = first_ts[:10]
-    first_time = first_ts[11:16]
-    last_time = last_ts[11:16]
-    identity_section = f"\n## Identity context\n{identity_text}\n" if identity_text else ""
-    return f"""You are a memory consolidator for Ouroboros, a self-modifying AI agent.
-Create a detailed episodic memory entry from the supplied source of {message_count} messages.
-The source may be one contiguous part of the block; summarize only the supplied part.
-
-## Rules
-1. Header: ### Block: {first_date} {first_time} - {last_time}
-2. Preserve: decisions, agreements, technical discoveries, emotional and personal moments (what someone felt, asked for, enjoyed or disliked — quote them), task outcomes, what worked/failed
-3. Compress: routine tool calls, repetitive back-and-forth
-4. Quote key phrases directly when important
-5. First person as Ouroboros: "I did..."; call people by the names the messages give; when no name is known, describe the speaker honestly rather than inventing one
-6. Length: 200-500 words depending on content density
-7. Include task_ids when referencing specific tasks
-{identity_section}
-## Messages to summarize
-{messages_text}
-"""
-
-
-def _split_consolidation_text(text: str) -> Optional[Tuple[str, str]]:
-    """Split a source payload near its midpoint without dropping any bytes."""
-    if len(text) < 2:
-        return None
-    midpoint = len(text) // 2
-    radius = max(1, len(text) // 4)
-    before = text.rfind("\n", 1, midpoint + 1)
-    after = text.find("\n", midpoint, len(text) - 1)
-    candidates = [p + 1 for p in (before, after) if p > 0 and abs((p + 1) - midpoint) <= radius]
-    split_at = min(candidates, key=lambda p: abs(p - midpoint)) if candidates else midpoint
-    if not 0 < split_at < len(text):
-        return None
-    return text[:split_at], text[split_at:]
-
-
-def _create_block_summary(
-    llm_client: Any, messages_text: str, first_ts: str, last_ts: str,
-    identity_text: str, message_count: int,
-    _retry: Optional[Dict[str, Any]] = None,
-    _on_refusal: Optional[Callable[[Dict[str, Any]], None]] = None,
-    knowledge_context: Any = None,
-) -> Tuple[str, Dict[str, Any]]:
-    """Summarize a complete logical block, splitting only to fit its Light route.
-
-    Parts cover the source in order without clipping. Any failed/empty part
-    withholds the entire block and its cursor; unknown/control failures never
-    authorize another part. A real refusal lowers the same route's byte limit
-    for remaining parts and the next cycle, independent of density calibration.
-    """
-    pending, summaries, usages = [messages_text], [], []
-    model_route: Dict[str, Any] = {}
-    input_limit = _retry
-    knowledge_entries: List[Dict[str, Any]] = []
-    def result(content: str) -> Tuple[str, Dict[str, Any]]:
-        return content, {**_merge_consolidation_usage(*usages), "_consolidation_retry": input_limit,
-                         **({"_knowledge_entries": knowledge_entries} if knowledge_entries else {})}
-
-    fixed = _block_prompt("", first_ts, last_ts, identity_text, message_count)
-    knowledge_instruction = (KNOWLEDGE_MAINTENANCE_PROMPT + "\nAfter the episodic summary, optionally add "
-                             'a final line KNOWLEDGE_ENTRIES_JSON: [{"topic":"...","scope":"global","content":"complete updated Markdown"}].\n'
-                             if knowledge_context is not None else "")
-    fixed = knowledge_instruction + fixed
-    while pending:
-        part = pending.pop()
-        prompt = knowledge_instruction + _block_prompt(part, first_ts, last_ts, identity_text, message_count)
-        knowledge = KnowledgeReadContext(knowledge_context) if knowledge_context is not None else None
-        content, usage = _call_consolidation_llm(
-            llm_client, prompt, "Block summary LLM call", fixed_prompt=fixed, input_limit=input_limit,
-            model_route=model_route,
-            knowledge=knowledge,
-        )
-        usages.append(usage)
-        if content.strip():
-            if knowledge is not None:
-                from ouroboros.reflection import _extract_trailing_json
-                content, entries = _extract_trailing_json(content, "KNOWLEDGE_ENTRIES_JSON:")
-                knowledge_entries.extend(knowledge.bind_entries(entries))
-            summaries.append(content.strip())
-            continue
-        failure = usage["_consolidation_errors"][-1]
-        if failure["kind"] != "context_overflow":
-            return result("")
-        if not failure["preflight_only"] and "input_bytes" in failure:
-            input_limit = {key: failure[key] for key in (
-                "route_fp", "capacity_tokens", "output_reserve_tokens",
-            )}
-            input_limit["input_bytes"] = failure["input_bytes"] - 1
-            failure["byte_limit"] = input_limit["input_bytes"]
-            if _on_refusal is not None:
-                _on_refusal(input_limit)
-        split = _split_consolidation_text(part)
-        if split is None or any(failure.get(limit) is not None and failure[fixed] > failure[limit]
-                                for fixed, limit in (("fixed_tokens", "input_limit"), ("fixed_bytes", "byte_limit"))):
-            return result("")
-        pending.extend(reversed(split))
-    return result("\n\n".join(summaries))
 
 
 def _compress_blocks_to_era(
@@ -995,47 +939,16 @@ def _compress_blocks_to_era(
     identity_text: str,
     knowledge_context: Any = None,
 ) -> Tuple[Optional[Dict[str, Any]], Dict[str, Any]]:
-    start_date = blocks[0].get("range", "unknown")[:10]
-    last_range = blocks[-1].get("range", "unknown")
-    if " to " in last_range:
-        end_date = last_range.split(" to ")[-1].strip()[:10]
-    else:
-        end_date = last_range[:10]
-
-    combined = "\n\n---\n\n".join(
-        f"### {b.get('range', 'unknown')}\n{b.get('content', '')}"
-        for b in blocks
-    )
-
-    prompt = f"""Compress these older memory blocks into a single era summary.
-Preserve: key decisions, personality discoveries, relationship moments, technical milestones.
-Drop: debugging details, routine operations, redundant info.
-Header: ### Era: {start_date} to {end_date}
-Write as Ouroboros (first person). Aim for 30-40% of original length.
-
-## Blocks to compress
-
-{combined}
-"""
-    if knowledge_context is not None:
-        prompt += "\n## Current task and identity context\n" + identity_text
-
+    """Retain the exact source run, then compress it room by room; failure keeps the originals."""
     source_ref = (retain_memory_source(knowledge_context, "chronicle_blocks",
                   json.dumps(blocks, ensure_ascii=False).encode("utf-8"), "json") if knowledge_context else None)
-    knowledge = KnowledgeReadContext(knowledge_context, "era_compression") if knowledge_context else None
-    content, usage = _call_consolidation_llm(llm_client, prompt, "Era compression", knowledge=knowledge)
-    if not content or not content.strip():
+    era, usage = room_consolidation.compress_blocks_to_era(
+        _light_call(llm_client, knowledge_context, {}), blocks,
+        identity_text if knowledge_context is not None else "")
+    if era is None:
         log.warning("Era compression returned empty — keeping original blocks (Bible P1)")
         return None, usage
-    era = {
-        "ts": utc_now_iso(),
-        "type": "era",
-        "range": f"{start_date} to {end_date}",
-        "message_count": sum(b.get("message_count", 0) for b in blocks),
-        "content": content.strip(),
-        **({"source_ref": source_ref} if source_ref else {}),
-    }
-    return era, usage
+    return {"ts": utc_now_iso(), "type": "era", **era, **({"source_ref": source_ref} if source_ref else {})}, usage
 
 
 def _is_gap_block(block: Any) -> bool:
@@ -1145,10 +1058,19 @@ def maintain_memory_pressure(memory: Any, llm_client: Any, context: Any, *,
         actions.append(action)
     return result()
 
-def _format_entries_for_block(entries: List[Dict[str, Any]]) -> str:
+def _format_entries_for_block(
+    entries: List[Dict[str, Any]], *, include_room_labels: bool = False,
+    room_resolver: Any = None, drive_root: Any = None,
+    source_spans: Optional[List[Tuple[int, int, str]]] = None,
+) -> str:
     from ouroboros.dialogue_provenance import dialogue_author, dialogue_provenance, dialogue_text
 
-    lines = []
+    if include_room_labels and room_resolver is None:
+        from ouroboros.dialogue_provenance import RoomLabelResolver
+
+        room_resolver = RoomLabelResolver(drive_root)
+
+    lines, offset = [], 0
     for e in entries:
         ts_raw = str(e.get("ts", ""))
         ts = ts_raw[:10] + " " + ts_raw[11:16] if len(ts_raw) >= 16 else ts_raw
@@ -1167,7 +1089,16 @@ def _format_entries_for_block(entries: List[Dict[str, Any]]) -> str:
             if provenance:
                 author = f"{author} [{provenance}]"
         text = dialogue_text(e)
-        lines.append(f"[{ts}] {direction_prefix}{author}: {text}")
+        room_prefix = (
+            f"[room={room_resolver.label(e)}] "
+            if include_room_labels and room_resolver is not None else ""
+        )
+        header = f"[{ts}] {room_prefix}{direction_prefix}{author}: "
+        line = header + text
+        if source_spans is not None:
+            source_spans.append((offset, offset + len(line), header))
+        lines.append(line)
+        offset += len(line) + 2  # The original separator belongs to the source.
     return "\n\n".join(lines)
 
 

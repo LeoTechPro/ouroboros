@@ -237,7 +237,7 @@ def _initiate_presence(
 
     from ouroboros.loop import _resolve_loop_max_rounds
     from ouroboros.presence_admission import admit_presence_turn
-    from ouroboros.presence_bindings import list_presence_bindings
+    from ouroboros.presence_bindings import conversation_key, list_presence_bindings
     from ouroboros.presence_runner import PresenceTurnEvent, run_presence_turn
     from ouroboros.tool_access import canonical_data_root
 
@@ -273,9 +273,9 @@ def _initiate_presence(
             account_id=endpoint.account_id,
             conversation_id=endpoint.conversation_id,
             thread_id=endpoint.thread_id,
-            conversation_key=":".join(filter(None, (
+            conversation_key=conversation_key(
                 endpoint.transport, endpoint.account_id, endpoint.conversation_id, endpoint.thread_id,
-            ))),
+            ),
             actor={"id": "ouroboros", "display_name": "Ouroboros", "kind": "proactive_initiation"},
             conversation={"kind": "configured_presence_destination"},
             message={"kind": "proactive_initiation"},

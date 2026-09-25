@@ -115,14 +115,14 @@ def test_module_load_failure_recorded_and_survives_schema_rebuilds(tmp_path, mon
 # H4 — typed preflight_blocked reason_kind
 # ---------------------------------------------------------------------------
 
-def _guidance_for(reason_kind: str) -> str:
+def _guidance_for(reason_kind: str, status: str = "preflight_blocked") -> str:
     from ouroboros.review_state import AdvisoryReviewState, AdvisoryRunRecord
     from ouroboros.tools.claude_advisory_review import _next_step_guidance
 
     latest = AdvisoryRunRecord(
         snapshot_hash="cafe" * 4,
         commit_message="m",
-        status="preflight_blocked",
+        status=status,
         ts="2026-09-01T00:00:00Z",
         raw_result="detail text",
         reason_kind=reason_kind,
@@ -140,13 +140,20 @@ def test_release_metadata_block_never_claims_syntax_error():
     assert "release metadata" in guidance
 
 
+def test_unavailable_release_guidance_preserves_the_failure_kind():
+    guidance = _guidance_for("release_metadata_unavailable", status="error")
+    assert "unavailable release metadata evidence" in guidance
+    assert "Restore access" in guidance
+
+
 def test_untyped_preflight_block_stays_generic():
     guidance = _guidance_for("")
     assert "SyntaxError" not in guidance
     assert "raw_result" in guidance
 
 
-def test_commit_gate_block_message_branches_on_reason_kind(tmp_path, monkeypatch):
+@pytest.mark.parametrize("unavailable", [False, True])
+def test_commit_gate_block_message_branches_on_reason_kind(tmp_path, monkeypatch, unavailable):
     from ouroboros.review_state import AdvisoryRunRecord, compute_snapshot_hash, load_state, make_repo_key, save_state
     from ouroboros.tools.commit_gate import _check_advisory_freshness
 
@@ -160,16 +167,18 @@ def test_commit_gate_block_message_branches_on_reason_kind(tmp_path, monkeypatch
     state = load_state(tmp_path)
     state.add_run(AdvisoryRunRecord(
         snapshot_hash=snapshot_hash, commit_message="msg",
-        status="preflight_blocked", ts="2026-09-01T00:00:00Z",
-        raw_result="⚠️ PREFLIGHT_BLOCKED: VERSION is 1.0 but README says 0.9",
-        reason_kind="release_metadata", repo_key=make_repo_key(repo),
+        status="error" if unavailable else "preflight_blocked", ts="2026-09-01T00:00:00Z",
+        raw_result="exact release source diagnostic",
+        reason_kind="release_metadata_unavailable" if unavailable else "release_metadata", repo_key=make_repo_key(repo),
     ))
     save_state(tmp_path, state)
 
     message = _check_advisory_freshness(ctx, "msg")
     assert message is not None
     assert "SyntaxError" not in message
-    assert "release metadata preflight failed" in message
+    assert "exact release source diagnostic" in message
+    assert "Snapshot changed" not in message
+    assert ("evidence could not be read" if unavailable else "release metadata preflight failed") in message
 
 
 # ---------------------------------------------------------------------------

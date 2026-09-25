@@ -17,6 +17,7 @@ import pathlib
 from typing import Any, Dict
 
 from ouroboros.utils import atomic_write_json, read_json_dict, utc_now_iso
+from ouroboros.focus import compact_focus as _compact_focus
 
 log = logging.getLogger(__name__)
 
@@ -47,12 +48,16 @@ def publish_direct_roots(drive_root: Any) -> Dict[str, Any]:
             finally:
                 lock.release()
             if turn is not None:
-                rows.append({
+                row = {
                     "task_id": str(turn.get("id") or ""),
                     "title": str(turn.get("title") or "").strip(),
                     "chat_id": turn.get("chat_id"),
                     "project_id": str(turn.get("project_id") or ""),
-                })
+                }
+                focus = _compact_focus(turn.get("focus"))
+                if focus is not None:
+                    row["focus"] = focus
+                rows.append(row)
     except Exception:
         log.debug("direct roots projection failed", exc_info=True)
         incomplete = True

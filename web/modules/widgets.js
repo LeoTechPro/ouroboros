@@ -11,7 +11,10 @@ import {
 import { chartConfig, formatNumber, getPath, renderChartDataTable, renderTableCell } from './widget_chart.js';
 import { applyChartTheme, onThemeChange } from './theme_palette.js';
 import { mountModuleWidget, mountRouteIframeWidget } from './widget_module.js';
-import { planWidgetListPatch, widgetKey, widgetTabsSignature } from './widget_list.js';
+import {
+    planWidgetListPatch, requestWidgetCards, requestWidgetListPayload, widgetKey,
+    widgetListRequests, widgetTabsSignature,
+} from './widget_list.js';
 import {
     bindWidgetCardMenus,
     effectiveStartMode,
@@ -1255,6 +1258,7 @@ async function mountTabOnce(card, tab, key, isCurrent) {
     }
 }
 
+
 export function initWidgets(ctx = {}) {
     const page = document.createElement('div');
     page.innerHTML = pageTemplate();
@@ -1262,6 +1266,7 @@ export function initWidgets(ctx = {}) {
     const list = document.getElementById('widgets-list');
     const listError = document.getElementById('widgets-list-error');
     const retryButton = listError.querySelector('[data-widget-list-retry]');
+    const listRequests = widgetListRequests();
     let renderGeneration = 0;
     let widgetsVisible = false;
     let widgetsMounted = false;
@@ -1344,7 +1349,7 @@ export function initWidgets(ctx = {}) {
         if (!kept.length) return;
         let data;
         try {
-            data = await apiClient.widgets();
+            data = await listRequests.run((controller) => requestWidgetCards(apiClient, controller));
         } catch {
             return;
         }
@@ -1353,9 +1358,8 @@ export function initWidgets(ctx = {}) {
         kept.filter((key) => !live.has(key)).forEach(disposeWidgetByKey);
     }
 
-    // One list sync: GET /api/widgets (+ preferences), compare signatures, patch
-    // cards by key, then mount every card without a live mount. Repeats while a
-    // trigger marked the list dirty mid-flight.
+    // One list sync: GET /api/widgets (+ preferences), signature compare, keyed
+    // patch, then mount. Repeats while a trigger marked the list dirty.
     async function syncWidgets(generation) {
         const isCurrent = isCurrentFor(generation);
         activeSync = generation;
@@ -1364,10 +1368,8 @@ export function initWidgets(ctx = {}) {
         try {
             do {
                 listDirty = false;
-                const [data, prefs] = await Promise.all([
-                    apiClient.widgets(),
-                    apiClient.uiPreferences().catch(() => null),
-                ]);
+                const [data, prefs] = await listRequests.run(
+                    (controller) => requestWidgetListPayload(apiClient, controller));
                 if (!isCurrent()) return;
                 listError.hidden = true;
                 if (prefs) {
@@ -1435,6 +1437,9 @@ export function initWidgets(ctx = {}) {
             } while (listDirty && isCurrent());
         } catch (err) {
             if (!isCurrent()) return;
+            // A deliberate abort (page hide, disposal) is not a list failure;
+            // the deadline reports itself as its own typed timeout error.
+            if (err && err.name === 'AbortError') return;
             // Error feedback is outside the keyed list. Last good cards and
             // owner Stop choices remain intact while the list can be retried.
             if (!lastTabs) list.textContent = '';
@@ -1553,6 +1558,7 @@ export function initWidgets(ctx = {}) {
     retryButton.addEventListener('click', reconcileWidgetList);
     const cardMenus = bindWidgetCardMenus(list, setWidgetStartMode);
     window.addEventListener('pagehide', (event) => {
+        listRequests.abortAll();
         if (!event.persisted) cardMenus.destroy();
     });
     list.addEventListener('click', (event) => {
@@ -1570,6 +1576,9 @@ export function initWidgets(ctx = {}) {
             render();
         } else {
             cardMenus.close();
+            // Leaving Widgets cancels ITS sync; once hidden, an unrelated page change
+            // must not cancel a skill-disable retention check (its kept frame would run on).
+            if (widgetsVisible) listRequests.abortAll();
             // Leaving disposes the mounted work — except the frames the owner
             // keeps running, which stay mounted in the hidden page — and stops
             // stale paints; the cards stay in the DOM so the next entry mounts

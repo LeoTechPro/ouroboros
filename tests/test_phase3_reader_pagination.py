@@ -34,11 +34,12 @@ def _journal_rows(root, project_id: str, count: int) -> None:
 def test_journal_read_pages_205_rows_and_digest_pointer_is_executable(tmp_path, monkeypatch):
     monkeypatch.setattr("ouroboros.config.DATA_DIR", tmp_path)
     _journal_rows(tmp_path, "mine", 205)
+    _journal_rows(tmp_path, "other", 205)
     ctx = SimpleNamespace(
         drive_root=tmp_path / "fork",
         budget_drive_root=str(tmp_path),
         project_id="mine",
-        task_metadata={"budget_drive_root": str(tmp_path)},
+        task_metadata={"budget_drive_root": str(tmp_path), "root_task_id": "root"},
     )
 
     first = _journal_read(ctx, "other", limit=200)

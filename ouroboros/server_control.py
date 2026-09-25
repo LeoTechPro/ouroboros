@@ -113,6 +113,8 @@ def execute_panic_stop(
     recycled descriptor ports never authorize signalling an unrelated process.
     """
     log.critical("PANIC STOP initiated.")
+    from ouroboros.startup_historical_audit import audit
+    audit.stop()  # latch first; never wait for spawn/publication/exit or audit locks
     try:
         consciousness.stop()
     except Exception:

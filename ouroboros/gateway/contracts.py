@@ -7,10 +7,17 @@ TypedDicts document payloads, not runtime validation. Keep discriminating
 from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
+from ouroboros.cost_projection import CostPresentation
 
 from ouroboros.gateway.history_contracts import ChatHistoryResponse  # noqa: F401 -- public re-export
 from ouroboros.gateway.widgets import ExtensionLiveSnapshot, WidgetTab, WidgetsResponse
 from ouroboros.gateway.decision_contracts import DecisionRequest, DecisionResponse  # noqa: F401 -- public re-exports
+from ouroboros.gateway.schedule_contracts import (  # noqa: F401 -- public re-exports
+    ScheduleActionResponse,
+    ScheduledTasksResponse,
+    ScheduleDeleteResponse,
+    ScheduleUpsertResponse,
+)
 
 try:  # Python 3.11+
     from typing import Literal, NotRequired, Required, TypedDict  # type: ignore[attr-defined]
@@ -221,6 +228,8 @@ class ChatOutbound(TypedDict):
     # amount computed over a degraded ledger reached every surface looking exactly
     # like one computed over a sound ledger.
     ledger_integrity_degraded: NotRequired[Optional[bool]]
+    # Closed shape owned by the cost producer; null means ledger unavailable.
+    cost_presentation: NotRequired[Optional[CostPresentation]]
     result: NotRequired[str]
     result_truncated: NotRequired[bool]  # P3: WS preview was capped; fetch full via task id
     trace_summary: NotRequired[str]
@@ -241,15 +250,15 @@ class ChatOutbound(TypedDict):
     transport: NotRequired[TransportMetadata]
     # Typed message kind; role alone selects authorship (DESIGN: Chat authorship and System rows).
     system_type: NotRequired[str]
-    # A host-stamped placement fact for a task-keyed System row: "timeline" = a timeline item of the task's card,
-    # "reviews" = the card's Reviews group carries the fact (the row is still attached to the card); absent = an
-    # ordinary row. ``card_row_id`` is the row's stable identity across live delivery, outbox replay and history.
+    # Host-stamped placement of a task-keyed System row: "timeline" = a timeline item of the task's card, "reviews" =
+    # the card's Reviews group carries it (still attached); absent = ordinary. ``card_row_id`` is its stable identity.
     card_row: NotRequired[Literal["timeline", "reviews"]]
     card_row_id: NotRequired[str]
     # Event-time human presentation; raw task/project ids remain machine keys.
     target_label: NotRequired[str]
     project_id: NotRequired[str]
     project_name: NotRequired[str]
+    handoff_id: NotRequired[str]  # immutable origin/destination receipt identity
     completion_answer: NotRequired[str]  # a Project root's model-authored final answer, mirrored into Main (DESIGN)
     # Present on some transport re-broadcast paths.
     chat_id: NotRequired[int]
@@ -695,10 +704,9 @@ class EvolutionStateSnapshot(TypedDict):
 class ActiveDirectTurn(TypedDict):
     """An active in-process direct chat or ephemeral decision turn.
 
-    Snapshot rows in ``StateResponse.active_direct_turns``; the seven identity
-    and activity fields are always emitted by ``DirectActivityRegistry.snapshot()``
-    (empty-string for absent values), so the mirror marks them required.
-    A model_waits projection is optional and must be supplied by its live owner.
+    Rows of ``StateResponse.active_direct_turns``: ``DirectActivityRegistry.snapshot()``
+    always emits the seven identity/activity fields (empty string for absent values),
+    so the mirror marks them required; ``model_waits`` comes only from its live owner.
     """
 
     activity_id: str
@@ -715,17 +723,20 @@ class ActiveDirectTurn(TypedDict):
 class ActiveChatActivity(ActiveDirectTurn):
     """One in-flight chat activity in ``StateResponse.active_chat_activities``.
 
-    The combined snapshot: direct/ephemeral registry turns (same rows as
-    ``active_direct_turns``) plus ROOT managed queue tasks projected as
-    ``kind="managed_task"`` with ``phase`` ``queued`` | ``budget_paused``
-    (zero-dispatch member awaiting an explicit resume — never plain
-    "queued") | ``working`` | ``finalizing`` (final answer stored, post-task
-    synthesis still open).
-    Field shape mirrors ``ActiveDirectTurn`` so one client reducer hydrates
-    both; managed rows carry an empty ``client_message_id``.
+    Direct/ephemeral registry turns (the ``active_direct_turns`` rows) plus ROOT
+    managed queue tasks as ``kind="managed_task"`` with ``phase`` ``queued`` |
+    ``budget_paused`` (awaiting an explicit owner Resume; never plain "queued") |
+    ``budget_pausing`` (RUNNING, writing its exact pause record; #1196) | ``working`` |
+    ``finalizing`` (answer stored, post-task
+    synthesis open); a direct row whose live wait owner could not be read is
+    ``phase="unknown"``; a budget-paused direct turn (#1196) keeps its SAME id and
+    reports the managed phases as ``kind="direct_chat"``. Same shape as ``ActiveDirectTurn`` so one reducer hydrates
+    both (managed rows: empty ``client_message_id``). ``required_question_unavailable``:
+    a recorded owner-question wait whose detail could not be resolved — possibly blocked.
     """
 
     required_question: NotRequired[Dict[str, Any]]
+    required_question_unavailable: NotRequired[bool]
 
 
 class StateResponse(TypedDict):
@@ -924,20 +935,6 @@ class EvolutionDataResponse(TypedDict):
     checkpoints: NotRequired[list[Dict[str, Any]]]
     generated_at: str
     cached: bool
-
-
-class ScheduledTasksResponse(TypedDict):
-    schema_version: int
-    tasks: list[Dict[str, Any]]
-
-
-class ScheduleUpsertResponse(TypedDict):
-    ok: bool
-    schedule: Dict[str, Any]
-
-
-class ScheduleDeleteResponse(TypedDict):
-    ok: bool
 
 
 class UploadResponse(TypedDict):
@@ -1488,6 +1485,7 @@ WS_MESSAGE_TYPES: tuple[str, ...] = (
 
 
 __all__ = [
+    "CostPresentation",
     "ChatInbound",
     "TaskConstraintInbound",
     "CommandInbound",
@@ -1557,6 +1555,7 @@ __all__ = [
     "ScheduledTasksResponse",
     "ScheduleUpsertResponse",
     "ScheduleDeleteResponse",
+    "ScheduleActionResponse",
     "UploadResponse",
     "ExtensionsIndexResponse",
     "ExtensionLiveSnapshot",

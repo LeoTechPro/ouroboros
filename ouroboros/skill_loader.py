@@ -17,6 +17,13 @@ from typing import Any, Callable, Dict, Iterable, List, Optional
 from ouroboros.contracts.skill_manifest import SkillManifest, SkillManifestError, canonical_skill_name, parse_skill_manifest_text
 from ouroboros.contracts.plugin_api import FORBIDDEN_SKILL_SETTINGS
 from ouroboros.contracts.schema_versions import with_schema_version
+# Peer-conflict projection lives in its own leaf (module-size gate); it is
+# re-exported here so every historical import site keeps working unchanged.
+from ouroboros.skill_conflicts import (
+    _MAX_CONFLICT_PROJECTION,  # noqa: F401
+    enabled_skill_conflicts,  # noqa: F401
+    skill_conflict_status,  # noqa: F401
+)
 from ouroboros.skill_review_status import STATUS_BLOCKERS, STATUS_CLEAN, STATUS_PENDING, STATUS_WARNINGS, VALID_SKILL_REVIEW_STATUSES, aggregate_skill_review_status, normalize_skill_review_status, skill_review_gate
 from ouroboros.utils import append_jsonl, atomic_write_json, read_json_dict, utc_now_iso
 from ouroboros.review_records import validate_author_disposition
@@ -127,6 +134,10 @@ class LoadedSkill:
     source: str = "native"
     is_self_authored: bool = False
     identity_collision: bool = False
+
+    @property
+    def conflicts(self) -> tuple[str, ...]:
+        return tuple(self.manifest.conflicts or ())
 
     @property
     def available_for_execution(self) -> bool:
@@ -499,7 +510,7 @@ def compute_content_hash(
 
 
 def load_enabled(drive_root: pathlib.Path, name: str) -> bool:
-    state = read_json_dict(skill_state_dir(drive_root, name) / "enabled.json")
+    state = read_json_dict(skill_state_dir_path(drive_root, name) / "enabled.json")
     if not isinstance(state, dict):
         return False
     enabled = state.get("enabled")
@@ -738,7 +749,7 @@ def _merge_allowed(*value_groups: Any, allowed: set[str], upper: bool = False) -
 
 
 def load_skill_grants(drive_root: pathlib.Path, name: str) -> Dict[str, Any]:
-    data = read_json_dict(skill_state_dir(drive_root, name) / GRANTS_FILENAME)
+    data = read_json_dict(skill_state_dir_path(drive_root, name) / GRANTS_FILENAME)
     if not isinstance(data, dict):
         return {"granted_keys": [], "granted_permissions": [], "updated_at": ""}
     keys = _unique_text(data.get("granted_keys"), upper=True)
@@ -1395,6 +1406,34 @@ def discover_selected_skill_candidates(
     )
 
 
+def discover_skill_identity(
+    drive_root: pathlib.Path,
+    name: str,
+    *,
+    repo_path: str | None = None,
+) -> List[LoadedSkill]:
+    """Load one identity with ORDINARY discovery semantics, nothing else read.
+
+    Same inventory and collision rules as ``discover_skills`` restricted to one
+    canonical name — no manifestless opt-in, so a directory without a manifest
+    beside a valid skill of the same name stays invisible here exactly as it is
+    to passive discovery. This is the resolver every EXECUTION caller uses
+    (liveness, reconcile, the extension child); the repair/publication lanes
+    keep ``discover_selected_skill_candidates`` and its deliberately stricter
+    manifestless ambiguity.
+    """
+    if repo_path is None:
+        from ouroboros.config import get_skills_repo_path
+
+        repo_path = get_skills_repo_path()
+    safe = _sanitize_skill_name(name)
+    candidates = tuple(
+        item for item in _skill_location_inventory(drive_root, repo_path=repo_path)
+        if item.name == safe
+    )
+    return _load_skill_location_candidates(candidates, drive_root=drive_root)
+
+
 def find_skill(
     drive_root: pathlib.Path,
     name: str,
@@ -1403,52 +1442,10 @@ def find_skill(
 ) -> Optional[LoadedSkill]:
     """Return one skill by name, including broken manifests with ``load_error``."""
     safe = _sanitize_skill_name(name)
-    for skill in discover_skills(drive_root, repo_path=repo_path):
+    for skill in discover_skill_identity(drive_root, name, repo_path=repo_path):
         if skill.name == safe:
             return skill
     return None
-
-
-_MAX_CONFLICT_PROJECTION = 8
-
-
-def enabled_skill_conflicts(
-    skill: LoadedSkill,
-    skills: List[LoadedSkill],
-) -> List[str]:
-    """Return enabled installed peers conflicting with ``skill``.
-
-    A declaration on either side is authoritative, so one-sided manifests are
-    enforced symmetrically. Missing and disabled peers are deliberately inert.
-    """
-    declared = set(skill.manifest.conflicts or [])
-    conflicts = {
-        peer.name
-        for peer in skills
-        if peer.name != skill.name
-        and peer.enabled
-        and (
-            peer.name in declared
-            or skill.name in set(peer.manifest.conflicts or [])
-        )
-    }
-    return sorted(conflicts)
-
-
-def skill_conflict_status(
-    skill: LoadedSkill,
-    skills: List[LoadedSkill],
-) -> Optional[Dict[str, Any]]:
-    """Return a bounded API-safe projection of enabled peer conflicts."""
-    names = enabled_skill_conflicts(skill, skills)
-    if not names:
-        return None
-    visible = names[:_MAX_CONFLICT_PROJECTION]
-    return {
-        "code": "skill_conflict",
-        "skills": visible,
-        "omitted": len(names) - len(visible),
-    }
 
 
 def list_available_for_execution(
@@ -1590,7 +1587,7 @@ __all__ = [
     "AutoGrantOutcome", "LoadedSkill", "HASH_EXEMPT_CONTROL_FILENAMES",
     "SkillReviewState", "auto_grant_if_enabled",
     "VALID_REVIEW_STATUSES", "compute_content_hash", "reduce_skill_content_hash", "discover_skills",
-    "discover_selected_skill_candidates", "find_skill",
+    "discover_selected_skill_candidates", "discover_skill_identity", "find_skill",
     "enabled_skill_conflicts", "skill_conflict_status",
     "grant_status_for_skill", "is_self_authored_skill_dir", "list_available_for_execution",
     "load_enabled", "load_review_state", "load_skill_grants", "load_skill",

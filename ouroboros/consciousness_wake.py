@@ -19,10 +19,12 @@ from ouroboros.consciousness_authority import (
     CONSCIOUSNESS_CATEGORY,
     CONSCIOUSNESS_INITIATOR,
     disabled_tools_for,
+    is_consciousness_origin,
     normalize_level,
     runtime_mode_cap_for,
 )
 from ouroboros.context_health import safe_read
+from ouroboros.dialogue_provenance import is_presence_task
 from ouroboros.utils import iter_jsonl_objects
 
 PROMPT_REL = pathlib.Path("prompts") / "CONSCIOUSNESS.md"
@@ -32,7 +34,7 @@ CHAT_TAIL_BYTES = 512_000
 PLACEHOLDERS = ("reason", "last_wake_ago", "events", "level", "level_line", "withheld_tools",
                 "spent_usd", "daily_usd", "running", "max_tasks", "interval")
 LEVEL_LINES = {
-    "observe": "think, keep memory/knowledge, write to your human; no tasks, no changes in the world",
+    "observe": "research and internal work, memory, project notes, your own children and schedules, owner delivery; no shell, user-file, source, skill/settings or publication changes",
     "act": "everything your runtime mode allows except editing your own code/prompts, evolution, restart and settings",
     "full": "everything your runtime mode allows, including evolution",
 }
@@ -175,6 +177,7 @@ def wake_events(
     from ouroboros.owner_quiz import STATE_EXPIRED_TERMINAL, STATE_OPEN
     from ouroboros.task_results import list_task_results
     from ouroboros.task_status import SETTLED_STATUSES
+    from ouroboros.task_finalization import HOST_AUTHORED_TERMINAL_ORIGINS
 
     root, since_iso, lines, read_errors = pathlib.Path(drive_root), _iso(since), [], []
     try:
@@ -195,14 +198,28 @@ def wake_events(
                     str(block.get("asked_at") or ""),
                     _card_line(task_id, str(quiz_id), block, now=now, owner_wait=row.get("owner_wait")),
                 ))
-        if task_id == exclude_task_id or row.get("_is_direct_chat"):
-            continue
         status, stamp = str(row.get("status") or ""), str(row.get("updated_at") or row.get("ts") or "")
+        metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+        presence_failure = is_presence_task(row) and not is_consciousness_origin(metadata) and (
+            status in {"failed", "cancelled"}
+            or row.get("terminal_origin") in HOST_AUTHORED_TERMINAL_ORIGINS
+        )
+        # Inline Presence shares the direct-turn lane, but its host failure is
+        # absent from external dialogue. Surface the existing task, not a retry.
+        if task_id == exclude_task_id or (row.get("_is_direct_chat") and not presence_failure):
+            continue
         if status in SETTLED_STATUSES and stamp >= since_iso:
             cost = row.get("accounted_upper_bound_usd", row.get("cost_usd"))
             cost_text = f", ${float(cost):.2f}" if isinstance(cost, (int, float)) else ""
             title = _clip_preview(row.get("description") or row.get("text") or row.get("result"), 80)
-            settled.append((stamp, task_id, f"- task {task_id} {status}{cost_text}: {title}".rstrip(": ")))
+            detail = ""
+            if presence_failure:
+                outcome = str(metadata.get("presence_outcome") or "unknown")
+                work = str(metadata.get("presence_work_ref") or "")
+                detail = f"; Presence outcome={outcome}; see get_task_result"
+                if work:
+                    detail += f"; deferred work={work}"
+            settled.append((stamp, task_id, f"- task {task_id} {status}{cost_text}: {title}".rstrip(": ") + detail))
     trigger, trigger_task_id = _trigger_line(root, reason, rows, now=now)
     if trigger:
         lines.append(trigger)

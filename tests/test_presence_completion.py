@@ -72,7 +72,7 @@ def test_explicit_finish_uses_one_model_round_and_real_tool_batch(turn, outcome,
     assert usage["presence_completion_outcome"] == outcome
     assert usage["terminal_origin"] == "model_final"
     assert len(trace["tool_calls"]) == 2
-    result = build_presence_result_event({"id": "parent1"}, text, registry._ctx)
+    result = build_presence_result_event({"id": "parent1"}, text, registry._ctx, terminal_origin=usage.get("terminal_origin", ""))
     assert result["outcome"] == outcome
     assert result["text"] == (message if outcome in {"message", "deferred"} else "")
     assert derive_loop_outcome(text, usage, trace)["outcome_axes"]["execution"]["status"] == "ok"
@@ -101,7 +101,7 @@ def test_review_hold_drops_old_outcome_and_uses_replacement(turn, monkeypatch):
     assert len(calls) == 2 and reviews == ["Old answer", "Revised answer"]
     assert registry._ctx._presence_completion is None
     assert "presence_completion_outcome" not in usage
-    result = build_presence_result_event({"id": "parent1"}, text, registry._ctx)
+    result = build_presence_result_event({"id": "parent1"}, text, registry._ctx, terminal_origin=usage.get("terminal_origin", ""))
     assert (result["outcome"], result["text"]) == ("message", "Revised answer")
 
 
@@ -164,7 +164,7 @@ def test_owner_followup_invalidates_finish_before_or_during_final_gate(turn, tmp
     assert len(calls) == 2 and text == "With the new detail"
     assert any("new detail" in str(row.get("content")) for row in calls[-1])
     assert "presence_completion_outcome" not in usage
-    assert build_presence_result_event({"id": "parent1"}, text, registry._ctx)["outcome"] == "message"
+    assert build_presence_result_event({"id": "parent1"}, text, registry._ctx, terminal_origin=usage.get("terminal_origin", ""))["outcome"] == "message"
 
 
 @pytest.mark.parametrize("reason", ["cancel", "budget"])
@@ -194,8 +194,9 @@ def test_control_or_budget_tail_precedes_pending_finish(turn, tmp_path, monkeypa
     assert "presence_completion_outcome" not in usage
     assert registry._ctx._presence_completion_accepted is False
     assert usage["execution_status"] == "failed"
-    result = build_presence_result_event({"id": "parent1"}, text, registry._ctx)
-    assert result["outcome"] == "message" and result["text"] != "Old answer"
+    result = build_presence_result_event({"id": "parent1"}, text, registry._ctx, terminal_origin=usage.get("terminal_origin", ""))
+    assert result["outcome"] == "silent" and result["text"] == ""
+    assert usage["terminal_origin"] == "host_notice"
     if reason == "budget":
         assert tail == ["budget"] and len(calls) == 1
     else:
@@ -223,4 +224,4 @@ def test_pending_children_still_require_absorption(turn, tmp_path):
     assert len(calls) > 1
     assert usage["reason_code"] == "children_unabsorbed"
     assert "presence_completion_outcome" not in usage
-    assert build_presence_result_event({"id": "parent1"}, text, _registry._ctx)["outcome"] == "message"
+    assert build_presence_result_event({"id": "parent1"}, text, _registry._ctx, terminal_origin=usage.get("terminal_origin", ""))["outcome"] == "message"

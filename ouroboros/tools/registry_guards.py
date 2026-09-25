@@ -404,6 +404,16 @@ def _capability_resource_guard_result(
     is_mcp: bool = False,
 ) -> ToolResult | None:
     """Apply direct task capability and resource admission in legacy order."""
+    # Consciousness Observe keeps the names it needs for useful read-only research
+    # visible, but their ARGUMENTS cannot carry back the mutating authority the
+    # level removed. The policy lives with the level that owns it (a call-time
+    # import, like every other D04->D15 edge); a failure to consult it raises
+    # here rather than reading as permission.
+    from ouroboros.consciousness_authority import observe_argument_refusal
+
+    metadata = getattr(ctx, "task_metadata", {}) if isinstance(getattr(ctx, "task_metadata", {}), dict) else {}
+    if refusal := observe_argument_refusal(metadata, name, args):
+        return ToolResult(status="blocked", code="RESOURCE_CONSTRAINT_BLOCKED", text=refusal)
     if name in _disabled_tools(ctx):
         return ToolResult(
             status="blocked",

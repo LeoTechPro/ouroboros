@@ -29,6 +29,7 @@ from ouroboros.utils import (
     truncate_for_log,
     utc_now_iso,
 )
+from ouroboros.budget_pause import BudgetPauseRequested
 from ouroboros.usage_accounting import BudgetExceeded
 from ouroboros.llm import LLMClient
 from ouroboros.tools import ToolRegistry
@@ -46,6 +47,7 @@ from ouroboros.agent_startup_checks import (
 from ouroboros.agent_task_pipeline import (
     emit_task_results, build_review_context,
 )
+from ouroboros.task_finalization import TERMINAL_ORIGIN_HOST_NOTICE
 from ouroboros.task_results import STATUS_RUNNING, write_task_result
 from ouroboros.contracts.task_constraint import normalize_task_constraint
 from ouroboros.consciousness_authority import apply_consciousness_authority
@@ -86,7 +88,7 @@ def _authority_source_terminal(refusal: Dict[str, Any]):
     ).strip()
     usage = {
         "execution_status": "infra_failed", "reason_code": "authority_source_unavailable",
-        "authority_source_unavailable": refusal,
+        "authority_source_unavailable": refusal, "terminal_origin": TERMINAL_ORIGIN_HOST_NOTICE,
     }
     return text, usage, {"reasoning_notes": ["authority_source_unavailable"], "tool_calls": []}
 
@@ -104,7 +106,8 @@ def _task_exception_terminal(env: Any, task: Dict[str, Any], exc: Exception, dri
     llm_trace = captured_trace if isinstance(captured_trace, dict) else {
         "reasoning_notes": [], "tool_calls": [], "loop_evidence_unavailable": True,
     }
-    usage.update(execution_status="infra_failed", reason_code="task_exception")
+    usage.update(execution_status="infra_failed", reason_code="task_exception",
+                 terminal_origin=TERMINAL_ORIGIN_HOST_NOTICE)
     text = f"⚠️ Error during processing: {type(exc).__name__}: {exc}"
     append_jsonl(drive_logs / "events.jsonl", {
         "ts": utc_now_iso(), "type": "task_error", "task_id": task.get("id"),
@@ -352,6 +355,19 @@ class OuroborosAgent:
         """
         try:
             started = getattr(self, "_task_started_ts", None)
+            # A queue row's focus is a REPLAY (retry clone, owner-wait restart
+            # handoff): it may be older than the focus the same task id already
+            # published durably, so it is accepted only when it is newer.
+            focus_kw: Dict[str, Any] = {}
+            if task.get("focus"):
+                from ouroboros.focus import compact_focus
+                from ouroboros.task_results import load_task_result
+
+                incoming = compact_focus(task.get("focus"))
+                current = load_task_result(self.env.drive_root, str(task.get("id") or ""))
+                durable = compact_focus(current.get("focus")) if isinstance(current, dict) else None
+                if incoming and (durable is None or str(durable.get("authored_at") or "") < str(incoming.get("authored_at") or "")):
+                    focus_kw = {"focus": incoming}
             running = write_task_result(
                 self.env.drive_root,
                 str(task.get("id") or ""),
@@ -366,6 +382,9 @@ class OuroborosAgent:
                 session_id=task.get("session_id"),
                 actor_id=task.get("actor_id"),
                 delegation_role=task.get("delegation_role"),
+                # The producer's raw origin marker (promote_chat_to_task, presence_promote,
+                # api, ...): the acceptance packet reads run_origin from this record.
+                source=task.get("source"),
                 project_id=str(task.get("project_id") or ""),
                 role=task.get("role"),
                 description=task.get("description"),
@@ -397,6 +416,10 @@ class OuroborosAgent:
                 task_group=task.get("task_group"),
                 subagent_envelope=task.get("subagent_envelope"), configured_subagent=task.get("configured_subagent"), parent_cognitive_route=task.get("parent_cognitive_route"), subagent_availability=task.get("subagent_availability"),
                 metadata=task.get("metadata") if isinstance(task.get("metadata"), dict) else {},
+                # A queue row without a focus (a retry clone, a fresh task) must not
+                # erase the durable focus the same task id already authored, and a
+                # replayed older focus must not replace a newer durable one.
+                **focus_kw,
                 # Ingress-captured owner-message identity (v6.73.0): persisted on the
                 # durable record so a post-hoc "Turn into project" binds the start
                 # message by value, never by content lookup.
@@ -518,25 +541,11 @@ class OuroborosAgent:
 
         task_metadata = dict(task.get("metadata") or {}) if isinstance(task.get("metadata"), dict) else {}
         for key in (
-            "parent_task_id",
-            "root_task_id",
-            "session_id",
-            "actor_id",
-            "delegation_role",
-            "role",
-            "workspace_root",
-            "workspace_mode",
-            "memory_mode",
-            "drive_root",
-            "child_drive_root",
-            "budget_drive_root",
-            "root_cost_ceiling_usd",
-            "model_lane",
-            "requested_model_lane",
-            "effective_model_lane",
-            "model",
-            "use_local_model",
-            "requested_executor",
+            "parent_task_id", "root_task_id", "session_id", "actor_id", "delegation_role", "role",
+            "workspace_root", "workspace_mode", "memory_mode",
+            "drive_root", "child_drive_root", "budget_drive_root", "root_cost_ceiling_usd",
+            "model_lane", "requested_model_lane", "effective_model_lane",
+            "model", "use_local_model", "requested_executor",
             # `effective_executor`/`capability_delta` are deliberately NOT here: this
             # projection is only READ for `effective_model_lane` (grandchild
             # inheritance), the child learns its own reduction from the prompt and the
@@ -642,11 +651,21 @@ class OuroborosAgent:
         ctx.task_started_at = self._task_started_ts
         ctx.owner_wait_callback = getattr(self, "owner_wait_callback", None)
         ctx.owner_wait_resume = task.get("_owner_wait_resume")
+        ctx.budget_pause_resume = task.get("_budget_pause_resume")
         from ouroboros.owner_wait import load_owner_wait
         saved_wait = load_owner_wait(ctx)  # Runtime/ContextFit must disclose the original ceiling.
+        if not saved_wait and ctx.budget_pause_resume:
+            from ouroboros.budget_pause import load_budget_pause
+            saved_wait = load_budget_pause(ctx)  # same-ID budget continuation (#1196)
         if saved_wait and ctx.model_wait_context is not None:
+            # started_at stays the ORIGINAL start; the granted paused interval is
+            # the separate carrier the finite lifetime subtracts (#1196). A budget
+            # grant supplies the CURRENT cumulative value; an owner-wait restart
+            # of a previously paused task has none to supply, and the serializer's
+            # own saved carrier is used instead (``restore_continuation``, F5).
             ctx.model_wait_context.restore_continuation(
-                saved_wait.get("model_wait") or {}, started_at=ctx.task_started_at)
+                saved_wait.get("model_wait") or {}, started_at=ctx.task_started_at,
+                budget_paused_sec=(ctx.budget_pause_resume or {}).get("paused_duration_sec"))
 
         if self._event_queue is not None:
             # Optional runtime seam consumed by loop.py.  Unit/direct contexts
@@ -840,7 +859,8 @@ class OuroborosAgent:
 
     def _handle_task_scoped(self, task: Dict[str, Any]) -> List[Dict[str, Any]]:
         self._busy = True
-        start_time = float((task.get("_owner_wait_resume") or {}).get("started_at") or time.time())
+        _continuation = task.get("_owner_wait_resume") or task.get("_budget_pause_resume") or {}
+        start_time = float(_continuation.get("started_at") or time.time())
         self._task_started_ts = start_time
         self._last_progress_ts = start_time
         self._pending_events = []
@@ -969,7 +989,7 @@ class OuroborosAgent:
                         initial_effort=initial_effort,
                         drive_root=self.env.drive_root,
                     )
-                except BudgetExceeded:
+                except (BudgetExceeded, BudgetPauseRequested):
                     raise
                 except Exception as e:
                     from ouroboros.cancel_intents import STOP_POLICY_IMMEDIATE, active_intent, stop_policy
@@ -1003,6 +1023,10 @@ class OuroborosAgent:
             )
             if not isinstance(text, str) or (not text.strip() and not intentional_empty):
                 text = "⚠️ Model returned an empty response. Try rephrasing your request."
+                usage["terminal_origin"] = TERMINAL_ORIGIN_HOST_NOTICE
+                usage.pop("presence_completion_outcome", None)
+                if ctx is not None:
+                    ctx._presence_completion_accepted = False
 
             # A task that scoped ITSELF mid-run (ensure_project_scope) set the scope on
             # ctx, but persistence/finalization read the task dict — sync it back so the
@@ -1017,6 +1041,16 @@ class OuroborosAgent:
                 ctx=ctx,
                 event_queue=self._event_queue,
             )
+            return list(self._pending_events)
+
+        except BudgetPauseRequested as exc:
+            # The durable pause row already exists (the loop raised only after
+            # writing it). Supervisor owns the queue transition; no task_done,
+            # no result text, no Main final: the SAME task id stays pending
+            # under its exact continuation until an explicit owner Resume.
+            from ouroboros.budget_pause import pause_event
+
+            self._pending_events.append(pause_event(task, exc.pause))
             return list(self._pending_events)
 
         except BudgetExceeded as exc:
@@ -1070,6 +1104,7 @@ class OuroborosAgent:
             usage = {
                 "execution_status": "failed",
                 "reason_code": "budget_exhausted",
+                "terminal_origin": TERMINAL_ORIGIN_HOST_NOTICE,
                 "resource_limit": resource_limit,
             }
             llm_trace = {

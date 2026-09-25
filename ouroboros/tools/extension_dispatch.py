@@ -13,7 +13,8 @@ from ouroboros.tools.tool_context import ToolContext
 from ouroboros.tools.tool_result import (
     ToolResult,
     ToolStatus,
-    _compose_execute_result,
+    _compose_execute_result_result,
+    _replace_tool_result,
     _structured_failure,
 )
 
@@ -98,11 +99,10 @@ def _dispatch_mcp_tool_result(
         return ToolResult(status="error", code="TOOL_ERROR", text=text)
     if not safety_msg:
         return result
-    text = _compose_execute_result(result.text, "", safety_msg)
-    meta = {**dict(result.meta), "safety_warning": True}
-    if result.code == "OK":
-        return ToolResult(status="ok", code="SAFETY_WARNING", text=text, meta=meta)
-    return ToolResult(status=result.status, code=result.code, text=text, meta=meta)
+    return _replace_tool_result(
+        _compose_execute_result_result(name, result, "", safety_msg),
+        meta_updates={"safety_warning": True},
+    )
 
 
 def _extension_result(
@@ -138,21 +138,18 @@ def _extension_completion(result: str, safety_msg: str) -> ToolResult:
     structured check is the adapter's, so there is exactly one implementation of
     what a self-reported failure is."""
     reported_failure = _structured_failure(result)
+    base = _extension_result(
+        "error" if reported_failure else "ok",
+        "TOOL_REPORTED_FAILURE" if reported_failure else "OK",
+        result,
+        dispatched=True,
+    )
     if safety_msg:
-        # #447 H1: the warning TRAILS the payload — line 1 belongs to the
-        # extension, so a structured {"ok": false} answer (and any first-line
-        # marker) stays readable to every text-only consumer downstream.
-        text = f"{result}\n\n{safety_msg}"
-        return _extension_result(
-            "error" if reported_failure else "ok",
-            "TOOL_REPORTED_FAILURE" if reported_failure else "SAFETY_WARNING",
-            text,
-            safety_warning=True,
-            dispatched=True,
+        return _replace_tool_result(
+            _compose_execute_result_result("", base, "", safety_msg),
+            meta_updates={"safety_warning": True},
         )
-    if reported_failure:
-        return _extension_result("error", "TOOL_REPORTED_FAILURE", result, dispatched=True)
-    return _extension_result("ok", "OK", result, dispatched=True)
+    return base
 
 
 def _generation_digest_for(ext_tool: Dict[str, Any]) -> str:
@@ -208,11 +205,9 @@ def _dispatch_extension_tool_result(
         or not digest
     ):
         return result
-    return ToolResult(
-        status=result.status,
-        code=result.code,
-        text=result.text,
-        meta={**dict(result.meta), "extension_generation": digest,
+    return _replace_tool_result(
+        result,
+        meta_updates={"extension_generation": digest,
               **({"content_hash": content_hash} if content_hash else {})},
     )
 

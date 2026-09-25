@@ -475,8 +475,8 @@ def worktree_after_commit(clone: pathlib.Path) -> tuple[bool, str, list[str]]:
 
 def _git_show(clone: pathlib.Path, rev: str, path: str) -> str:
     """The exact text of ``path`` at ``rev`` ('' when absent there)."""
-    proc = subprocess.run(["git", "show", f"{rev}:{path}"], cwd=str(clone), check=False, capture_output=True, text=True)
-    return proc.stdout if proc.returncode == 0 else ""
+    proc = subprocess.run(["git", "show", f"{rev}:{path}"], cwd=str(clone), check=False, capture_output=True)
+    return proc.stdout.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n") if proc.returncode == 0 else ""
 
 
 def release_carriers_desync_at(clone: pathlib.Path, rev: str) -> str:
@@ -488,6 +488,8 @@ def release_carriers_desync_at(clone: pathlib.Path, rev: str) -> str:
 
     with tempfile.TemporaryDirectory(prefix="sm1_carriers_") as tmp:
         root = pathlib.Path(tmp)
+        # Admission reads Git change scope; the export needs its own disposable repository.
+        subprocess.run(["git", "init", "-q"], cwd=str(root), check=True, capture_output=True)
         for rel in sorted(CARRIER_SPAN_PATHS):
             text = _git_show(clone, rev, rel)
             if text:

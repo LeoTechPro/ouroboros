@@ -450,6 +450,7 @@ def reconcile_model_send_seals(
     legitimately live in the child's ledger, not this one.
     """
     report: Dict[str, Any] = {
+        "status": "completed", "manifests_checked": 0,
         "seals": 0, "sealed_attempts": 0,
         "orphan_seals": 0, "unlogged_attempts": 0,
         "facts_written": 0, "truncated": False,
@@ -466,6 +467,7 @@ def reconcile_model_send_seals(
             finals = _final_rows(_read_records_locked(root))
     except Exception:
         log.debug("model_send reconciliation skipped: ledger state unknown", exc_info=True)
+        report["status"] = "unknown"
         return report
 
     def _write(fact: Dict[str, Any]) -> None:
@@ -477,11 +479,13 @@ def reconcile_model_send_seals(
                 report["facts_written"] += 1
         except Exception:
             log.debug("model_send reconciliation fact write failed", exc_info=True)
+            report["status"] = "unknown"
 
     try:
         _reconcile_seal_directions(root, finals, _write, report, manifest_paths)
     except Exception:
         log.debug("model_send reconciliation failed soft", exc_info=True)
+        report["status"] = "unknown"
     return report
 
 
@@ -513,12 +517,16 @@ def _reconcile_seal_directions(
                 log.debug("model_send reconciliation: archived history unknown", exc_info=True)
         # UNKNOWN skips reverse accusations for this pass; forward checks below
         # still use the known live rows. Never turn a failed read into absence.
+        if archived_ids is None:
+            report["status"] = "unknown"
         return archived_ids is None or attempt_id in archived_ids
 
     for manifest_path in manifest_paths:
+        report["manifests_checked"] = report.get("manifests_checked", 0) + 1
         try:
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         except Exception:
+            report["status"] = "unknown"
             continue
         if not isinstance(manifest, dict) or manifest.get("promoted_call_manifest"):
             continue

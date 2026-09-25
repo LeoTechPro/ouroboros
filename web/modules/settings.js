@@ -1,4 +1,5 @@
-import { refreshModelCatalog } from './settings_catalog.js';
+import { refreshModelCatalog, watchAccountModelCatalog } from './settings_catalog.js';
+export { accountCatalogRefreshKey } from './settings_catalog.js';
 import { getNotifier } from './notifications.js';
 import { bindEffortSegments, syncEffortSegments, readCustomSecretDraft, collectCustomSecretDraft, paintSettingsFieldErrors, settingsWriteFailure } from './settings_controls.js';
 import { bindLocalModelControls } from './settings_local_model.js';
@@ -51,6 +52,8 @@ const INPUT_FIELDS = [
     ['s-evo-budget', 'OUROBOROS_POST_TASK_EVOLUTION_BUDGET_USD', '0'],
     ['s-consciousness-daily-usd', 'OUROBOROS_CONSCIOUSNESS_DAILY_USD', '20'],  // float: NUMBER_FIELDS would truncate 20.5 to 20
     ['s-evo-objective', 'OUROBOROS_EVOLUTION_PERSISTENT_OBJECTIVE', ''],
+    // Optional task bounds: a positive integer or "unlimited" (SSOT: ouroboros/settings_scales.py); a blank is refused by the server.
+    ['s-max-rounds', 'OUROBOROS_MAX_ROUNDS', 'unlimited'], ['s-task-lifetime', 'OUROBOROS_TASK_ABS_CEILING_SEC', 'unlimited'],
 ];
 const VALUE_FIELDS = [
     // 6.3: Review / Scope Review efforts are per-slot rows in Agents → Review
@@ -855,6 +858,10 @@ export function initSettings({ state, setBeforePageLeave, ws } = {}) {
                     'warn'
                 );
             }
+            // Catalog readiness is independent of Settings GET completion:
+            // a superseding page-show load may still be waiting for its document.
+            // Arm after discovery so its settled Accounts snapshot stays quiet.
+            accountModelCatalog.arm();
         } catch (error) {
             if (reloadSequence !== loadSequence) return;
             settingsLoaded = false;
@@ -1162,10 +1169,20 @@ export function initSettings({ state, setBeforePageLeave, ws } = {}) {
             refreshSettingsAfterExtensionChange(action);
         });
     }
-    const disposeRestartReconnect = ws?.on?.('open', refreshRestartState);
+    // A confirmed Accounts facet is the existing status-store seam for login
+    // completion. It refreshes the catalog only on a changed/rehydrated account
+    // answer, while modelRoles.adoptCatalog keeps unsaved assignments intact.
+    const accountModelCatalog = watchAccountModelCatalog();
+    const disposeRestartReconnect = ws?.on?.('open', () => {
+        refreshRestartState();
+        if (settingsLoaded) void refreshModelCatalog();
+    });
 
     window.addEventListener('ouro:page-shown', (event) => {
-        if (event.detail?.page === 'settings') refreshSettingsAfterExtensionChange('settings page shown');
+        if (event.detail?.page === 'settings') {
+            refreshSettingsAfterExtensionChange('settings page shown');
+            if (settingsLoaded) void refreshModelCatalog();
+        }
     });
 
     const onModelCatalog = (event) => modelRoles.adoptCatalog(event.detail);
@@ -1180,6 +1197,7 @@ export function initSettings({ state, setBeforePageLeave, ws } = {}) {
         window.removeEventListener('beforeunload', beforeUnload);
         disposeLocalModel();
         disposeRestartReconnect?.();
+        accountModelCatalog.dispose();
         restartReadSequence += 1;
         baselineSettleDisposer?.();
         modelRoles.destroy();

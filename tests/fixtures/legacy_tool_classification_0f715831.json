@@ -931,6 +931,46 @@
    "is_error": true,
    "status": "error"
   },
+  "ident:FOCUS_PROJECTION_UNAVAILABLE:named": {
+   "is_error": true,
+   "status": "error"
+  },
+  "ident:FOCUS_PROJECTION_UNAVAILABLE:plain": {
+   "is_error": true,
+   "status": "error"
+  },
+  "ident:FOCUS_SOURCE_UNRESOLVED:named": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:FOCUS_SOURCE_UNRESOLVED:plain": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:FOCUS_SOURCE_UNRETAINED:named": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:FOCUS_SOURCE_UNRETAINED:plain": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:FOCUS_STALE:named": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:FOCUS_STALE:plain": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:FOCUS_TASK_NOT_LIVE:named": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:FOCUS_TASK_NOT_LIVE:plain": {
+   "is_error": false,
+   "status": "ok"
+  },
   "ident:GH_ERROR:named": {
    "is_error": true,
    "status": "error"
@@ -2656,6 +2696,14 @@
    "status": "error"
   },
   "ident:TOOL_ERROR:plain": {
+   "is_error": true,
+   "status": "error"
+  },
+  "ident:TOOL_FORBIDDEN:named": {
+   "is_error": true,
+   "status": "error"
+  },
+  "ident:TOOL_FORBIDDEN:plain": {
    "is_error": true,
    "status": "error"
   },

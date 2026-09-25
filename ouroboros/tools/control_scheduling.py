@@ -415,6 +415,17 @@ def _build_acting_constraint(
     }
 
 
+def delegation_may_mutate(requested: bool, caller_profile: str) -> bool:
+    """Whether a scheduler may pass a MUTATING delegation budget to its child.
+
+    ``child_budget_for_schedule`` narrows against the parent's RECORDED budget;
+    this asks what the parent's profile actually is. A read-only subagent may
+    delegate descendants — that is how recursive research works — but a legacy
+    contract that still carries the mutative flag cannot hand it down.
+    """
+    return bool(requested) and str(caller_profile or "") != LOCAL_READONLY_SUBAGENT_MODE
+
+
 def _select_subagent_constraint(write_surface, write_root, protected_paths_grant, external_tool_grants, parent_workspace_root, caller_readonly=False, ctx=None):
     """Read-only default (no surface), a validated acting constraint, or an error string."""
     if not write_surface or str(write_surface).strip().lower() == "read_only":
@@ -641,6 +652,7 @@ def _schedule_task(ctx: ToolContext, internal: Dict[str, Any] | None = None, /, 
     constraints = fields["constraints"]
     memory_mode = fields["memory_mode"]
     may_mutate = fields["may_mutate"]
+    metadata = getattr(ctx, "task_metadata", {}) if isinstance(getattr(ctx, "task_metadata", {}), dict) else {}
     try:
         configured_subagent, legacy_selection = select_subagent_snapshot(
             effective_runtime_subagent_settings(runtime_settings(settings_reader=_ctl().load_settings)),
@@ -663,7 +675,6 @@ def _schedule_task(ctx: ToolContext, internal: Dict[str, Any] | None = None, /, 
     if depth_error:
         return f"⚠️ TOOL_ERROR (schedule_subagent): invalid_task_depth: {depth_error}"
     new_depth = current_depth + 1
-    metadata = getattr(ctx, "task_metadata", {}) if isinstance(getattr(ctx, "task_metadata", {}), dict) else {}
     parent_contract = fields["parent_contract"]
     max_depth = admitted_depth_cap(parent_contract, get_max_subagent_depth())
     if new_depth > max_depth:
@@ -773,7 +784,7 @@ def _schedule_task(ctx: ToolContext, internal: Dict[str, Any] | None = None, /, 
     child_delegation_budget = child_budget_for_schedule(
         parent_contract,
         current_depth=current_depth, new_depth=new_depth, max_depth=max_depth,
-        may_mutate=may_mutate, may_fan_out=params.get("may_fan_out", True),
+        may_mutate=delegation_may_mutate(may_mutate, caller_profile), may_fan_out=params.get("may_fan_out", True),
         max_children=params.get("max_children", 0),
         intent_note=params.get("delegation_intent", ""),
         requested_depth=params.get("requested_depth", 0),

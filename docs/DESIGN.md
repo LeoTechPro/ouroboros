@@ -241,6 +241,16 @@ Status, owner action, and urgent notification are separate product concepts:
   product's explicit incident/notification seam, not a red status or a failed
   task as a proxy.
 
+Activity schedule rows use the same factual status rule: `active`, `disabled`,
+`suppressed`, and `consumed once · history` describe lifecycle state, while the
+adjacent Disable/Enable, Restore, and Delete controls state the owner action. A
+consumed one-shot is history even when its task succeeded or failed; the status
+never implies a result. Retained rows — consumed and suppressed — collapse into
+one disclosure rather than padding the standing list or disappearing: history
+the owner can still open, read and act on. A suppressed skill row keeps Restore
+so the owner can ask for it back; a consumed one keeps only Delete, because
+offering Enable on a schedule that cannot fire again would be a lie.
+
 A task-bound `Reviews` history row may be the only retained fact for its owner.
 That row keeps a neutral owner anchor visible, but hides task status and typing
 until a real task status or activity arrives; review presence alone never means
@@ -292,6 +302,13 @@ pointer alone; a card in another chat keeps the excerpt.
 - **Status renders as dot + text.** The dot carries the state at a glance, so
   the sentence does not have to shout it in saturated colour and can sit at
   ordinary reading contrast.
+- **A known outcome owns the status; an unfinished lifecycle stands beside it.**
+  When a task's outcome is already settled while post-task work still runs, the
+  chip states that outcome from the five-word family and `Finalizing…` is a
+  SECOND, quieter fact next to it — not a replacement, not a sixth status word,
+  and never something the card title has to carry instead. The pair is one
+  accessible name, so a screen reader hears the outcome and the hold together.
+  An owner stop outranks the hold entirely and speaks for itself.
 - **Neutral is a real state**, not an absence of one. A classification chip
   (which agent, which family) is neutral: it is a tag, not an alarm.
   A tone value the code actually emits (`muted`) must have a rule; falling
@@ -337,6 +354,29 @@ Adopting these tokens is applying the semantic status contract, which already
 governs every surface — it is not a token migration of those surfaces and does
 not move them into the migrated set in section 8.
 
+### Sidebar activity dots
+
+Project navigation rows may carry the existing three 4px working dots
+(`chat-live-typing`, 3px gap) for the live `active_chat_activities` census.
+`Working`, `Thinking` and `Finalizing` are the only moving states, using the
+existing 1.4s bounce rhythm; `Queued` stays static at a quieter step.
+Budget-paused work, confirmed model access waits and required owner questions
+are static amber, with `resumed` questions no longer waiting. A wait on the same
+producer row suppresses its working motion; an independent working row keeps
+motion, and the row's accessible name states both facts. Unknown or unconfirmed
+census state stays static and explicitly unavailable. The dots take the row's
+own foreground, like the status-sentence dot, so they never out-shout the title
+and follow its hover and selected ink; the wait is the one hue, and no row
+paints them in a saturated project colour of its own. In a Project row the dots
+and the unread dot each own a reserved trailing column, so both sit at one x
+across rows whether or not the other is present, whatever the name length, and
+while the sibling kebab is hovered, focused or has its menu open; a deleting
+row draws only `Deleting…` and keeps its census fact in the accessible name.
+The collapsed Projects header carries the aggregate dots beside its label, and
+an activity repaint preserves the existing row and menu nodes. The dots are
+separate from unread dots and never carry a counter, percent or text
+animation. Reduced-motion clients receive the same state without the bounce.
+
 ### References and actions
 
 One owner intent has one control, built in one module. Tokens and primitives
@@ -354,9 +394,8 @@ therefore about intents.
   `ouro:open-project`; a caller chooses a layout (`inline`, `bar`, `footer`),
   never a label or a class. It names the Project wherever its row carries the
   name; a Project that was never named, and the owner's routed message (whose
-  caption names the destination), read `Project`, never an id. Words appear
-  only as a closed state of the same control (`running in background` on a
-  converted card). Its accessible name
+  caption names the destination), read `Project`, never an id. The handoff's separate phase chip states observed activity; the reference
+  itself makes no running claim. Its accessible name
   says in words what the glyph and the arrow say in pixels (`Open project <name>`),
   and nothing depends on hover.
 - A **command** is a button: it changes or confirms something, or goes to a
@@ -641,6 +680,22 @@ the rest of the chat surface.
 
 **Project question mirror.** A Project question the owner has not answered appears in Main as the Project's own quiz card — the same `buildQuizCard` form with the question through the chat markdown pipeline, the options with their details and the `recommended` badge, the stake, the assumption or waiting line, the status and the own-answer field — inside the same assistant bubble. The one addition is the Project reference ("References and actions") in the head beside the `Question` chip: its inline pill (the `--project` tints, the Project name in project ink with `↗`) opens that exact question in its Project, with the card's shared keyboard ring. A long Project name yields first (the chip is capped and ellipsized, its title names the Project whole) so the status keeps its place; a phone column wraps the head. Every lifecycle state reads as it does in the Project: waiting, open, resumed and finished questions stay answerable, and a replaced question stays as a read-only record. An unreadable source keeps what Main already knew; with nothing known the copy says `Status unavailable`, takes no answer and keeps its chip, and a row that cannot carry the form yet shows `Open the original question for its text.` until it can. The first confirmed answer from any source — a press in Main, the Project form or another device, a history or census snapshot — shows the recorded result (the chosen option, `Owner's answer: …`, `You answered`) for five seconds and then removes only the Main copy, through the ordinary message retirement and without moving the reader's viewport; the Project keeps its card. The countdown starts once and later observations never restart it. When focus was inside the copy it stays there while the result shows, then moves to the next Main question, or to the composer for a keyboard owner, never summoning a touch keyboard. A copy that learns its form and its answer in one delivery shows that result for the same five seconds. An answered question never enters Main again: fresh history, a reconnect or a stale open snapshot cannot bring the copy back. Main remembers the lifecycle of a bounded number of questions; a question it no longer remembers mounts a safe unknown copy, whose answer controls appear only after a fresh canonical record confirms it unanswered. A failed, missing or wrong-project canonical read leaves a safe `Status unavailable` copy with its Project chip and no answer controls; the chip opens the original Project form, while a later owned refresh retries the Main copy, so an unavailable read never turns a stale open snapshot into an answerable form and never permanently suppresses a legitimate unanswered question. The mirror and the quiz header share the lifecycle wording above.
 
+**Project handoff.** Each independent Main request transferred into a Project retains
+one compact chronological anchor, not one mutable capsule for the whole Project.
+The anchor names the work, projects its observed phase and ends with the shared
+Project reference. It uses Project colour, not a warning treatment. Binding alone
+means neither Working nor Done; unavailable activity stays explicitly unconfirmed.
+A manually converted card opens its room; an agent-created handoff does not steal
+focus. A converted card is always visible — two cards of one owner message both stay —
+and the durable receipt row shows only when no card carries the transfer; a folded
+receipt returns when its card leaves the feed. Matching Started and routing
+references fold visually into that anchor only while it is mounted; their durable
+records remain, including their plain-text presentation to non-browser consumers.
+A converted card whose Main receipt is not durable keeps a dashed border and a plain
+warning names the gap; the binding still holds. Genuine initiator work and failures
+are not hidden. A later final answer remains a separate message at its completion
+time, never a replacement for the handoff.
+
 **Project completion mirror.** A Project root that ended with Ouroboros's own final answer reaches Main as an ordinary Ouroboros message: that answer through the chat markdown pipeline, in the assistant voice, because the bytes are model-authored — the host stamps the answer on the completion row only for a model-authored final, so the browser never infers authorship. A long answer is folded to about seven lines; the fold is a visual clamp over the complete, selectable text, with a fade only when it really hides something, and never a cut. Under it sits one control, the Project reference ("References and actions"). The durable row and its wire frame stay `role="system"`: like the Project question mirror, this is a browser presentation of model-authored bytes, not a change of the row's author. The message carries no status word, cause sentence, title or duration, so a host verdict on that answer (a warning, an unaccepted review) is not shown in Main: it stays loud on the task's card in the Project, one press away. Copy copies the answer. An ending with no model-authored answer (a provider failure, a stop, preserved output), a start row, and every row written before the answer rode the row keep the System row, which ends with that same reference: the voice of a row never chooses how the UI points at its Project. One durable row either way: its plain text is unchanged, so the Telegram mirror, Ouroboros's own context and one-ending-one-notification behave as before.
 
 The row under a Project lifecycle row or a routed message is the shared `createSystemMessageActions` composition around the Project reference. It owns token-based space above and below the controls, wrapping and clearance for the focus ring; a control never sits in a clipped/nowrap text line. This is a row composition, not a new card framework or a global button-margin rule.
@@ -719,7 +774,18 @@ the wait controls stay, and its first row of work gives it the title. The
 collapsed header carries the tool count live and, once the turn ends, cost and
 duration (a replayed header carries the count and cost; duration is a live
 fact); its `updated` stamp follows the turn's own narration, never a host note
-and never a tool call. The
+and never a tool call. Money on that header is ONE line whose wording carries
+its own openness, and it never renders an unknown as a number: `$0.00` only
+where priced rows evidenced that zero, `up to $1.20` while the tracked subtotal
+is still inexact, `Tracked: $1.20` with the reason stated in words
+beside it (`some steps have no price`) when part of the same scope has no price
+at all (`Tracked: up to $1.20` when that subtotal itself is inexact), and
+`Cost unknown` for unpriced rows with no tracked amount. An empty, intact ledger
+has no money line; an empty view with an integrity gap stays unknown. Neither
+proves a free result. The explanation is text on the line,
+never a hover-only title, because a tooltip is invisible on touch, to assistive
+technology and in a copied line. Every part of that meta line is separated by a
+real ` · ` text part for the same reason. The
 host's `_is_direct_chat` fact keeps its host jobs (routing, census `kind`, Stop
 custody, terminal rows) and, on the client, only the header pill (a direct turn
 keeps the census verdict beside its block). A block whose only reason to exist

@@ -363,10 +363,11 @@ def test_presence_handoff_retains_work_ref_when_transport_terminal_fails(tmp_pat
         events, task, result, usage, trace, 0.0, tmp_path / "logs", ctx=registry._ctx)
     delivery = next(row for row in events if row["type"] == "presence_result")
     assert delivery["outcome"] == "deferred" and delivery["work_ref"] == "presence-work"
-    assert delivery["text"].count("[Host status]") == 1
+    assert delivery["text"] == ""
     stored = load_task_result(tmp_path, task["id"])
     assert stored["status"] == "failed" and stored["reason_code"] == "provider_unavailable"
     assert stored["metadata"]["presence_work_ref"] == "presence-work"
+    assert stored["result"] == result and stored["terminal_provider_notice"]
 
 
 @pytest.mark.parametrize("turn_flag", [None, "is_direct_chat"])

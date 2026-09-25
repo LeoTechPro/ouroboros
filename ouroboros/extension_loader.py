@@ -132,7 +132,7 @@ from ouroboros.extension_surface_names import (
     extension_surface_name,  # noqa: F401
     parse_extension_surface_name,  # noqa: F401
 )
-from ouroboros.skill_loader import _SKILL_DIR_CACHE_NAMES, _sanitize_skill_name, LoadedSkill, SkillPayloadUnreadable, compute_content_hash, discover_skills, find_skill, grant_status_for_skill, requested_core_setting_keys, skill_conflict_status, skill_review_gate, skill_state_dir, skill_state_dir_path  # noqa: F401
+from ouroboros.skill_loader import _SKILL_DIR_CACHE_NAMES, _sanitize_skill_name, LoadedSkill, SkillPayloadUnreadable, compute_content_hash, discover_skills, discover_selected_skill_candidates, discover_skill_identity, find_skill, grant_status_for_skill, requested_core_setting_keys, skill_conflict_status, skill_review_gate, skill_state_dir, skill_state_dir_path  # noqa: F401
 from ouroboros.skill_token import SkillToken  # noqa: F401
 from ouroboros.tools.skill_exec import _scrub_env  # noqa: F401
 from ouroboros.utils import atomic_write_json, read_json_dict, utc_now_iso  # noqa: F401
@@ -323,17 +323,25 @@ def reconcile_extension(
         from ouroboros.config import get_skills_repo_path
 
         resolved_repo_path = get_skills_repo_path() if repo_path is None else repo_path
-        peers = list(skills) if skills is not None else discover_skills(
-            drive_root, repo_path=resolved_repo_path
+        peers = list(skills) if skills is not None else discover_skill_identity(
+            drive_root, skill_name, repo_path=resolved_repo_path
         )
         if selected_skill is not None:
             peers = [item for item in peers if item.name != selected_skill.name]
             peers.append(selected_skill)
+        safe_name = _sanitize_skill_name(skill_name)
+        # The subject resolved for THIS reconcile IS the selected authority:
+        # letting the liveness read re-resolve it would hash the same payload a
+        # second time inside one request without making anything fresher.
+        subject = selected_skill or next(
+            (item for item in peers if item.name == safe_name), None
+        )
         state = runtime_state_for_skill_name(
             skill_name,
             drive_root,
             repo_path=resolved_repo_path,
-            skills=peers,
+            skills=peers if skills is not None else None,
+            selected_skill=subject,
         )
         loaded_present = bool(state.get("loaded_present"))
         was_live = bool(state.get("live_loaded"))
@@ -344,7 +352,8 @@ def reconcile_extension(
                 skill_name,
                 drive_root,
                 repo_path=resolved_repo_path,
-                skills=peers,
+                skills=peers if skills is not None else None,
+                selected_skill=subject,
             )
             loaded_present = bool(state.get("loaded_present"))
             was_live = bool(state.get("live_loaded"))
@@ -384,8 +393,7 @@ def reconcile_extension(
             _finalize_extension_reconcile(state, drive_root, skill_name, reason="already_live", health_stamp=health_stamp)
             return state
 
-        safe_name = _sanitize_skill_name(skill_name)
-        loaded = next((item for item in peers if item.name == safe_name), None)
+        loaded = subject
         if loaded is None:
             state["reason"] = "missing"
             state["action"] = "extension_inactive"
@@ -398,7 +406,7 @@ def reconcile_extension(
                 loaded,
                 settings_reader,
                 drive_root=drive_root,
-                skills=peers,
+                skills=skills if skills is not None else None,
                 repo_path=resolved_repo_path,
             )
         except Exception as exc:  # an unexpected raise must still revert enable + record
@@ -421,7 +429,7 @@ def reconcile_extension(
             skill_name,
             drive_root,
             repo_path=resolved_repo_path,
-            skills=peers,
+            skills=skills if skills is not None else None,
         )
         refreshed["action"] = "extension_loaded"
         _finalize_extension_reconcile(refreshed, drive_root, skill_name, reason="loaded", health_stamp=health_stamp)
@@ -452,7 +460,6 @@ def ensure_companions_running(
     drive_root = pathlib.Path(drive_root)
     state = runtime_state_for_skill_name(
         skill_name, drive_root, repo_path=repo_path,
-        skills=[selected_skill] if selected_skill is not None else None,
     )
     if not state.get("desired_live"):
         supervisor.stop_skill(skill_name)

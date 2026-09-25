@@ -171,6 +171,7 @@ def _record_forced_finalization(
         "current_evidence_revision": current_revision,
         "evidence_current": bool(
             candidate is not None
+            and bool(current_fingerprint) and not binding.get("stale_evidence")
             and candidate.evidence_fingerprint == current_fingerprint
         ),
         "acceptance_status": str(binding.get("acceptance_status") or "unaccepted"),
@@ -847,15 +848,21 @@ def _publish_stale_forced_candidate(
     tools = getattr(ctx, "tools", None)
     if tools is None:
         return None
-    current_revision, _current_fingerprint = _loop()._delivery_evidence_state(
+    current_revision, current_fingerprint = _loop()._delivery_evidence_state(
         tools, ctx, llm_trace,
     )
     disclosure = (
         "\n\n⚠️ STALE-EVIDENCE NOTICE — RESUME REQUIRED (host): The preserved "
-        "answer above was produced before newer task evidence reached the loop. "
-        "It has not been regenerated or accepted against that newer evidence and "
-        "does not claim to incorporate it. Resume the task to produce and review "
-        "a complete answer against the latest evidence."
+        + ("answer above was produced before newer task evidence reached the loop. "
+           "It has not been regenerated or accepted against that newer evidence and "
+           "does not claim to incorporate it. "
+           if current_fingerprint else
+           # UNKNOWN evidence: the host could not re-read it, so it is not claimed
+           # newer — only unverified. Typed, never a crash or an approval.
+           "answer above rests on task evidence the host could no longer read. "
+           "It has not been re-verified or accepted against the current evidence and "
+           "does not claim to reflect it. ")
+        + "Resume the task to produce and review a complete answer against the latest evidence."
     )
     set_terminal_host_notice(ctx.accumulated_usage, suffix, disclosure)
     candidate = _loop()._replace_delivery_candidate(

@@ -226,7 +226,8 @@ def _periodic_supervisor_maintenance(
     watchdog and pending child-ref promotion replay (every 20s), custody reap of
     orphaned task-scoped processes (every 600s) + review-job zombie reconcile
     (every 300s). Each cadence gates itself via its own last-run marker, updated on
-    the LOOP thread; the first two cadences then do their work on a daemon thread.
+    the LOOP thread: the first two stamp before handing their work to a daemon
+    thread; the inline zombie reconcile stamps when its pass ends.
     ``stop_event`` is the loop's per-generation token, handed to the custody pass so
     it stops mutating when that generation ends. ``on_orphans_healed(count)`` fires
     when the zombie reconcile terminalized orphaned RUNNING task rows (the alarm
@@ -249,8 +250,12 @@ def _periodic_supervisor_maintenance(
             latch.release()
             log.warning("Periodic custody sweep could not start", exc_info=True)
     if time.time() - last_review_reconcile[0] > 300:
-        last_review_reconcile[0] = time.time()
-        _periodic_zombie_reconcile(on_orphans_healed=on_orphans_healed)
+        try:
+            _periodic_zombie_reconcile(on_orphans_healed=on_orphans_healed)
+        finally:
+            # Stamped when the pass ENDS: a pass slower than its cadence never re-arms
+            # on the next tick, so >=300 s of ordinary ticks separate two passes (issue #1230).
+            last_review_reconcile[0] = time.time()
 
 
 def _run_periodic_custody_sweep(stop_event: Any = None, latch: Any = None) -> None:
@@ -266,6 +271,13 @@ def _run_periodic_custody_sweep(stop_event: Any = None, latch: Any = None) -> No
     set, and the generation is re-read before every mutation.
     """
     try:
+        try:
+            if _stop_requested(stop_event):
+                return
+            from ouroboros.terminal_projection import reconcile_terminal_projections
+            reconcile_terminal_projections(DATA_DIR)
+        except Exception:
+            log.warning("Terminal projection reconciliation deferred", exc_info=True)
         try:
             # Issue #844: release the owned-daemon start latch in ITS OWN try, ahead of
             # the reap, so a raising reap can never pin it; retry once — only when THIS
@@ -668,23 +680,6 @@ def _startup_custody_sweep() -> None:
                      report=sweep_settled_delegate_state(DATA_DIR))
     except Exception:
         log.debug("Delegate state sweep failed", exc_info=True)
-    try:
-        # CPL-5 reverse direction (model_send only): every seal joins exactly
-        # one accounting attempt, every seam-sealed dispatched attempt still
-        # resolves to its durable seal. Orphans on either side become typed
-        # facts — the sweep deletes nothing and fabricates nothing, so there is
-        # no destructive conclusion for an UNKNOWN state to skip (it skips the
-        # whole pass instead when the ledger is unreadable).
-        from ouroboros.model_send_seal import reconcile_model_send_seals
-
-        seal_report = reconcile_model_send_seals(DATA_DIR)
-        if seal_report.get("facts_written"):
-            log.warning(
-                "model_send invariant reconciliation wrote %d typed fact(s): %s",
-                seal_report["facts_written"], seal_report,
-            )
-    except Exception:
-        log.debug("model_send seal reconciliation failed", exc_info=True)
 
 
 def _prune_delegated_snapshots() -> None:

@@ -611,7 +611,7 @@ def test_open_custody_is_its_own_card_row_live_and_on_history_replay(tmp_path, m
 
 
 @pytest.mark.parametrize("outcome", ["message", "deferred", "silent", "tool_delivered"])
-def test_presence_delivers_host_notice_once_and_preserves_silence(tmp_path, monkeypatch, outcome):
+def test_presence_preserves_authored_speech_and_keeps_host_notice_in_task(tmp_path, monkeypatch, outcome):
     from ouroboros.presence_runner import PresenceTurnGate, run_presence_turn
     from tests.test_presence_runner import _admission, _event
 
@@ -635,7 +635,8 @@ def test_presence_delivers_host_notice_once_and_preserves_silence(tmp_path, monk
     assert run_presence_turn(**args) == first
     assert first.outcome == outcome
     assert load_task_result(tmp_path, first.task_id)["result"] == ANSWER
-    assert first.text == (ANSWER + "\n\n[Host status]\n" + NOTICE if outcome in {"message", "deferred"} else "")
+    assert first.text == (ANSWER if outcome in {"message", "deferred"} else "")
+    assert load_task_result(tmp_path, first.task_id)["terminal_host_notice"] == NOTICE
 
 
 def test_a_failed_answer_send_stays_owed_and_owes_no_second_row(tmp_path, monkeypatch):

@@ -356,3 +356,51 @@ def test_project_question_pointer_display_fields_share_one_contract():
     assert len(census) == 1, "_task_activity_facts keeps the quiz display fields in one key tuple"
     quiz_sourced = browser_fields - {"project_name"}
     assert quiz_sourced <= set(census[0]), sorted(quiz_sourced - set(census[0]))
+
+
+def _census_row_with_quiz_wait(tmp_path, monkeypatch, *, project_id: str = "", chat_id: int = 0):
+    from ouroboros.gateway import state as gs
+    from supervisor import queue
+
+    write_task_result(tmp_path, "t1", STATUS_RUNNING, project_id=project_id,
+                      root_phase_checkpoint={"post_task_synthesis": "running"})
+    record_asked(tmp_path, "t1", quiz_id="q1", question="?", options=["a", "b"], wait_for_answer=True)
+    set_owner_wait(tmp_path, "t1", {"quiz_id": "q1", "wait_id": "w1", "state": "waiting"})
+    monkeypatch.setattr(queue, "PENDING", [])
+    monkeypatch.setattr(queue, "RUNNING", {"t1": {"task": {"id": "t1", "project_id": project_id, "chat_id": chat_id}}})
+    gs._FINALIZING_MEMO.clear()
+    return gs
+
+
+def test_unreadable_question_detail_is_disclosed_per_row_never_read_as_unblocked(tmp_path, monkeypatch):
+    """A row that MAY be blocked on an owner answer must not project as free of questions."""
+    from ouroboros import project_dialogue
+
+    project = create_project(tmp_path, "waiting-project", name="Waiting Project")
+    gs = _census_row_with_quiz_wait(tmp_path, monkeypatch, project_id=project["id"], chat_id=project["chat_id"])
+
+    def _boom(*_a, **_k):
+        raise RuntimeError("quiz detail unreadable")
+
+    monkeypatch.setattr(project_dialogue, "project_question_pointer", _boom)
+    rows = gs._chat_activities_snapshot_safe(tmp_path, direct_turns=[])
+    assert rows[0]["required_question_unavailable"] is True
+    assert "required_question" not in rows[0]
+    # The rest of the census stays intact: the row is still there with its own live phase.
+    assert rows[0]["phase"] in {"working", "finalizing"}
+
+
+def test_quiz_wait_without_a_project_pointer_is_disclosed_not_dropped(tmp_path, monkeypatch):
+    """A recorded owner-question wait whose Project pointer cannot be built is unknown, not absent."""
+    gs = _census_row_with_quiz_wait(tmp_path, monkeypatch, project_id="", chat_id=0)
+    rows = gs._chat_activities_snapshot_safe(tmp_path, direct_turns=[])
+    assert rows[0]["required_question_unavailable"] is True
+    assert "required_question" not in rows[0]
+
+
+def test_readable_question_detail_carries_no_unavailable_flag(tmp_path, monkeypatch):
+    project = create_project(tmp_path, "waiting-project", name="Waiting Project")
+    gs = _census_row_with_quiz_wait(tmp_path, monkeypatch, project_id=project["id"], chat_id=project["chat_id"])
+    rows = gs._chat_activities_snapshot_safe(tmp_path, direct_turns=[])
+    assert rows[0]["required_question"]["quiz_state"] == "open"
+    assert "required_question_unavailable" not in rows[0]

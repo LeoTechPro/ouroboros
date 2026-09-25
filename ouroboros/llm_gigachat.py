@@ -303,6 +303,11 @@ class _GigaChatLaneMixin:
             "cost": None,
             "cost_final": False,
         }
+        # The provider's cut marker survives normalization: consolidation refuses
+        # a clipped correction by usage.response_finish_reason on every lane.
+        finish_reason = getattr(first, "finish_reason", None) if first is not None else None
+        if isinstance(finish_reason, str) and finish_reason.strip():
+            usage["response_finish_reason"] = finish_reason.strip()[:64]
 
         if target.get("processing_preference"):
             from ouroboros._usage_response import processing_receipt

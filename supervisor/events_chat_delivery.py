@@ -292,7 +292,7 @@ def _handle_send_message(evt: Dict[str, Any], ctx: Any) -> None:
         )
         system_type = str(evt.get("system_type") or "")
         # Project lifecycle rows pin Main; others keep lineage routing.
-        chat_id = int(evt["chat_id"]) if system_type in ("project_started", "project_completion_summary") else bound_chat or int(evt["chat_id"])
+        chat_id = int(evt["chat_id"]) if system_type in ("project_started", "project_handoff", "project_completion_summary") else bound_chat or int(evt["chat_id"])
         ctx.send_with_budget(
             chat_id,
             str(evt.get("text") or ""),

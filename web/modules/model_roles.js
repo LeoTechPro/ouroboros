@@ -3,7 +3,7 @@
 // Catalog arrival only enriches choices. It never authors an assignment.
 import { fetchJson } from './api_client.js';
 import { MODEL_CATALOG_TIMEOUT_MS, catalogReadNote, mergeModelCatalog } from './settings_catalog.js';
-import { bindStatusSurface, claudexorStatus } from './claudexor_status_store.js';
+import { accountRows, bindStatusSurface, claudexorStatus } from './claudexor_status_store.js';
 import { parseModelSource, composeModelSource, configuredApiProviders, indexProfilesByHarness,
     profileOptionsFor, routeChoiceGroups, selectHtml, mintStableId, API_CHOICE_PREFIX,
     DEFAULT_API_PROVIDER } from './route_editor_primitives.js';
@@ -51,12 +51,12 @@ export function sourceFromChoice(choice) {
  *   `providers` is `configuredApiProviders()` output, `current` a stored row source.
  */
 export function modelSourceGroups({ sources = [], providers = [], current = '',
-    catalogKnown = false, accountsKnown = false, providerProfiles = {} } = {}) {
+    catalogKnown = false, accountsKnown = false, providerProfiles = {}, hasConfiguredAccounts = false } = {}) {
     return [
         ...(current === 'inherit' ? [{ options: [{ value: 'inherit', label: 'Uses Main' }] }] : []),
         ...routeChoiceGroups({ modelSources: sources, providers, providerProfiles,
             currentChoice: current === 'inherit' ? '' : sourceChoice(current),
-            catalogKnown, accountsKnown, includeSessions: false }),
+            catalogKnown, accountsKnown, hasConfiguredAccounts, includeSessions: false }),
     ];
 }
 
@@ -238,8 +238,9 @@ export function createModelRolesEditor({ hostId, store = claudexorStatus,
             const node = element.querySelector(`[data-model-role="${row.id}"]`);
             if (!node) continue;
             const source = node.querySelector('[data-model-role-source]');
-            const sourceHtml = selectHtml('', sourceGroupsFor(row, {
+        const sourceHtml = selectHtml('', sourceGroupsFor(row, {
                 catalogKnown: catalog.sources_read_state === 'ok', accountsKnown: store.accountsKnown,
+                hasConfiguredAccounts: accountRows(store.snapshot || {}).length > 0,
             }), sourceChoice(row.source));
             const options = sourceHtml.slice(sourceHtml.indexOf('>') + 1, sourceHtml.lastIndexOf('</select>'));
             if (source.innerHTML !== options) source.innerHTML = options;

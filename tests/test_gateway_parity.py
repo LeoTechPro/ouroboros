@@ -367,18 +367,20 @@ def test_gateway_contract_endpoint_index_matches_router_and_types(tmp_path):
     assert _notrequired_fields(ActiveDirectTurn) == {"model_waits", "task_attempt"}, (
         "ActiveDirectTurn keeps its required base; waits and attempt are optional live-owner facts"
     )
-    assert _notrequired_fields(ActiveChatActivity) == {"model_waits", "task_attempt", "required_question"}, (
-        "ActiveChatActivity keeps the same required base and optional wait/attempt facts"
-    )
+    assert _notrequired_fields(ActiveChatActivity) == {
+        "model_waits", "task_attempt", "required_question", "required_question_unavailable",
+    }, "ActiveChatActivity keeps the same required base and optional wait/attempt/question facts"
     activity_fields = get_type_hints(ActiveChatActivity, include_extras=True)
-    assert {key: value for key, value in activity_fields.items() if key != "required_question"} == get_type_hints(ActiveDirectTurn, include_extras=True), (
+    question_keys = {"required_question", "required_question_unavailable"}
+    assert {key: value for key, value in activity_fields.items() if key not in question_keys} == get_type_hints(ActiveDirectTurn, include_extras=True), (
         "ActiveChatActivity must mirror ActiveDirectTurn's field shape so one client reducer hydrates both"
     )
     from ouroboros.gateway.schema import json_schema_for
 
     activity_schema = json_schema_for(ActiveChatActivity)
     assert activity_schema["properties"].pop("required_question")["type"] == "object"
-    assert "required_question" not in activity_schema["required"]
+    assert activity_schema["properties"].pop("required_question_unavailable")["type"] == "boolean"
+    assert not question_keys & set(activity_schema["required"])
     assert activity_schema == json_schema_for(ActiveDirectTurn), (
         "the shared activity shape must preserve flat keys, types and requiredness"
     )
@@ -681,3 +683,14 @@ def test_quiz_option_recommendation_is_an_additive_optional_field_in_both_langua
     )
     option_decl = re.search(r"@typedef \{Object\} QuizOption\b([\s\S]*?)\*/", text)
     assert option_decl and "@property {boolean=} recommended" in option_decl.group(1)
+
+
+def test_cost_presentation_has_a_closed_nullable_wire_shape():
+    from typing import get_args, get_type_hints
+    from ouroboros.cost_projection import CostPresentation
+
+    hints = get_type_hints(CostPresentation)
+    assert set(hints) == {'scope', 'tracked_amount', 'has_unpriced', 'tracked_final', 'accounting_open', 'has_rows'}
+    assert set(get_args(hints['scope'])) == {'own', 'root_tree'}
+    assert _contains_none(hints['tracked_amount'])
+    assert _contains_none(get_type_hints(ChatOutbound, include_extras=True)['cost_presentation'])

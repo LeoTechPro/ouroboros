@@ -877,7 +877,9 @@ def test_era_compression_preserves_gap_markers(tmp_path):
     chat, blocks, meta = _chat_layout(tmp_path)
     old_blocks = [
         {"ts": "2026-07-01T00:00:00Z", "type": "summary", "range": "r",
-         "message_count": 100, "content": "old block A"},
+         "message_count": 100, "content": "old block A1 " + "detail " * 40},
+        {"ts": "2026-07-01T06:00:00Z", "type": "summary", "range": "r",
+         "message_count": 100, "content": "old block A2 " + "detail " * 40},
         {"ts": "2026-07-01T12:00:00Z", "type": "summary", "range": "unknown",
          "message_count": 0, "gap_id": "gap:test", "content": "[MEMORY GAP] test"},
         {"ts": "2026-07-02T00:00:00Z", "type": "summary", "range": "r",
@@ -900,12 +902,13 @@ def test_era_compression_preserves_gap_markers(tmp_path):
     blocks_after = json.loads(blocks.read_text(encoding="utf-8"))
     gap_positions = [i for i, b in enumerate(blocks_after) if b.get("gap_id") == "gap:test"]
     assert len(gap_positions) == 1
-    # The era compressed ONLY the pre-gap run ("old block A"); the gap keeps its
+    # The era compressed ONLY the pre-gap run (A1+A2); the gap keeps its
     # chronological slot right after it, and post-gap blocks B/C stay intact.
     assert gap_positions[0] == 1
     texts = [b.get("content", "") for b in blocks_after]
     assert "old block B" in texts and "old block C" in texts
-    assert "old block A" not in texts  # compressed into the era
+    assert not any(t.startswith("old block A") for t in texts)  # compressed into the era
+    assert "Era or block summary." in texts[0]  # the era is shorter than the run it replaced
 
 
 def test_consolidator_rotation_between_resolve_and_first_capture(tmp_path, monkeypatch):

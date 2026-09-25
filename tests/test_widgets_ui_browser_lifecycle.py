@@ -15,6 +15,7 @@ import json
 import os
 import pathlib
 import textwrap
+import time
 
 import pytest
 
@@ -848,11 +849,21 @@ def test_ui_smoke_widget_retain_keeps_running_across_pages(direct_server_with_da
 
                 # Leave, then disable the skill while Widgets is hidden: the kept frame
                 # is force-stopped without a visit; the return finds the cards gone.
+                # The read is HELD across dashboard -> skills: unrelated navigation must not cancel it.
                 _click_nav(page, "dashboard")
                 wait_active(page, False)
                 page.wait_for_timeout(300)
                 assert frame_count(page, "kept") == 1
+                held = []
+                page.route("**/api/widgets", lambda route: held.append(route))
                 assert toggle(page, False) == 200
+                deadline = time.monotonic() + 10
+                while not held and time.monotonic() < deadline: page.wait_for_timeout(50)
+                assert held, "the disable did not start the hidden retention read"
+                _click_nav(page, "skills")
+                page.wait_for_timeout(300)
+                assert frame_count(page, "kept") == 1, "the read is still held; nothing may stop yet"
+                [route.continue_() for route in held]; page.unroute("**/api/widgets")
                 wait_frame(page, "kept", False, timeout=15_000)
                 wait_active(page, False)
                 _click_nav(page, "widgets")

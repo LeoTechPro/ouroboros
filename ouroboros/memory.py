@@ -943,7 +943,10 @@ class Memory:
 
         return jsonl_generation_signature(self.logs_path(log_name))
 
-    def summarize_chat(self, entries: List[Dict[str, Any]], limit: int = 1000) -> str:
+    def summarize_chat(
+        self, entries: List[Dict[str, Any]], limit: int = 1000, *,
+        include_room_labels: bool = False, room_resolver: Any = None,
+    ) -> str:
         """Render recent chat entries; never hide a horizon cut silently (P1).
 
         Callers that want the FULL window (e.g. low-context mode passes a huge
@@ -957,11 +960,32 @@ class Memory:
         prefix = ""
         if len(entries) > len(shown):
             prefix = f"[{len(entries) - len(shown)} older unconsolidated messages omitted]\n"
-        return prefix + "\n".join(self._format_chat_line(e, compact=True) for e in shown)
+        if include_room_labels and room_resolver is None:
+            from ouroboros.dialogue_provenance import RoomLabelResolver
+
+            room_resolver = RoomLabelResolver(self.drive_root)
+        return prefix + "\n".join(
+            self._format_chat_line(
+                e, compact=True, include_room_label=include_room_labels,
+                room_resolver=room_resolver,
+            )
+            for e in shown
+        )
 
     @staticmethod
-    def _format_chat_line(e: Dict[str, Any], *, compact: bool) -> str:
+    def _format_chat_line(
+        e: Dict[str, Any], *, compact: bool, include_room_label: bool = False,
+        room_resolver: Any = None,
+    ) -> str:
         from ouroboros.dialogue_provenance import dialogue_text
+
+        room_prefix = ""
+        if include_room_label:
+            if room_resolver is None:
+                from ouroboros.dialogue_provenance import RoomLabelResolver
+
+                room_resolver = RoomLabelResolver()
+            room_prefix = f"[room={room_resolver.label(e)}] "
 
         dir_raw = str(e.get("direction", "")).lower()
         ts_full = str(e.get("ts", ""))
@@ -973,18 +997,18 @@ class Memory:
             provenance = dialogue_provenance(e) if e.get("transport") else ""
             if provenance:
                 raw_text = f"[{provenance}] {raw_text}"
-            return f"→ {ts} {raw_text}" if compact else f"→ [{ts}] {raw_text}"
+            return f"→ {ts} {room_prefix}{raw_text}" if compact else f"→ [{ts}] {room_prefix}{raw_text}"
         if dir_raw == "system":
             entry_type = str(e.get("type", "")).strip() or "system"
             if isinstance(e.get("transport"), dict) and e["transport"].get("delivery"):
                 from ouroboros.dialogue_provenance import dialogue_provenance
 
                 raw_text = f"[{dialogue_provenance(e)}] {raw_text}"
-            return f"📋 {ts} [{entry_type}] {raw_text}" if compact else f"📋 [{ts}] [{entry_type}] {raw_text}"
+            return f"📋 {ts} {room_prefix}[{entry_type}] {raw_text}" if compact else f"📋 [{ts}] {room_prefix}[{entry_type}] {raw_text}"
         from ouroboros.dialogue_provenance import dialogue_author
 
         username = dialogue_author(e)
-        return f"← {ts} [{username}] {raw_text}" if compact else f"← [{ts}] [{username}] {raw_text}"
+        return f"← {ts} {room_prefix}[{username}] {raw_text}" if compact else f"← [{ts}] {room_prefix}[{username}] {raw_text}"
 
     def recent_activity_sections(
         self, task_id: str, *, own_drive: Optional["Memory"] = None,

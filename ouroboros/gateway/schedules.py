@@ -20,9 +20,15 @@ def _enabled_value(payload: dict) -> bool | str:
 
 async def api_schedules_list(_request: Request) -> JSONResponse:
     try:
-        from supervisor.queue import list_scheduled_tasks
+        from supervisor.queue import ScheduleStoreUnreadable, load_schedule_store, schedule_activity_projection
 
-        return JSONResponse(list_scheduled_tasks(request_drive_root(_request)))
+        try:
+            store = load_schedule_store(request_drive_root(_request))
+        except ScheduleStoreUnreadable as exc:
+            # "No schedules" is a claim; an unparseable table means the state is
+            # UNKNOWN, and the Activity section says so instead of showing empty.
+            return json_error(str(exc), 503)
+        return JSONResponse(schedule_activity_projection(store))
     except Exception as exc:
         return json_exception(exc)
 
@@ -77,28 +83,10 @@ async def api_schedules_upsert(request: Request) -> JSONResponse:
         enabled = _enabled_value(body)
         if isinstance(enabled, str):
             return json_error(enabled, 400)
-        completed_at = ""
-        if trigger.get("type") == "once":
-            # Exactly-once vs re-enable: a one-shot that already fired (non-empty
-            # completed_at) cannot be re-armed by flipping enabled back on — that
-            # would silently re-run the consumed task. Re-arming requires a NEW
-            # trigger.run_at, which clears the consumed receipt; a disable/edit that
-            # keeps the same run_at carries the receipt forward so GC still sees it.
-            from supervisor.queue import list_scheduled_tasks
-
-            wanted = str(body.get("id") or "").strip()
-            existing = next(
-                (item for item in list_scheduled_tasks(request_drive_root(request)).get("tasks") or []
-                 if isinstance(item, dict) and str(item.get("id") or "") == wanted), None)
-            prev = (existing or {}).get("trigger")
-            prev = prev if isinstance(prev, dict) else {}
-            if (existing is not None and str(existing.get("completed_at") or "")
-                    and str(prev.get("run_at") or "") == trigger["run_at"]):
-                if enabled:
-                    return json_error(
-                        "this one-shot schedule already fired; re-arming it requires a new "
-                        "trigger.run_at (a fresh run_at clears completed_at)", 400)
-                completed_at = str(existing.get("completed_at"))
+        # Only the fields the owner authors here. Provenance, run history, the
+        # consumed receipt and a skill row's suppression marker belong to the
+        # runtime and are merged from the CURRENT row inside the write lock —
+        # reading them here would merge a snapshot that is already stale.
         record = {
             "id": str(body.get("id") or "").strip(),
             "name": str(body.get("name") or body.get("id") or "scheduled-task").strip(),
@@ -108,11 +96,50 @@ async def api_schedules_upsert(request: Request) -> JSONResponse:
             "trigger": trigger,
             "task": task,
         }
-        if completed_at:
-            record["completed_at"] = completed_at
-        from supervisor.queue import upsert_scheduled_task
+        from supervisor.queue import ScheduleRefused, ScheduleStoreUnreadable, upsert_scheduled_task
 
-        return JSONResponse({"ok": True, "schedule": upsert_scheduled_task(record, drive_root=request_drive_root(request))})
+        try:
+            stored = upsert_scheduled_task(
+                record, drive_root=request_drive_root(request), actor="owner:gateway",
+                reason=str(body.get("reason") or "").strip())
+        except ScheduleRefused as refusal:
+            # 409 when the write could not be made SAFELY (its audit is down);
+            # 400 when the request itself asks for something this door cannot do.
+            return json_error(refusal.message, 409 if refusal.status == "audit_unavailable" else 400)
+        except ScheduleStoreUnreadable as exc:
+            return json_error(str(exc), 409)
+        return JSONResponse({"ok": stored.get("audit") == "recorded", "schedule": stored})
+    except Exception as exc:
+        return json_exception(exc)
+
+
+async def api_schedules_action(request: Request) -> JSONResponse:
+    """Apply one named lifecycle action to an existing schedule.
+
+    The owner surface names the ACTION it wants; nothing infers a command from a
+    free-text reason. Both the Activity buttons and the agent tool land on the
+    same audited seam in ``supervisor.queue_schedules``, so they cannot drift
+    apart in what a disable, a delete or a restore actually means.
+    """
+    try:
+        schedule_id = str(request.path_params.get("schedule_id") or "").strip()
+        if err := schedule_id_error(schedule_id):
+            return json_error(err, 400)
+        body = await request_json_or(request, {})
+        if not isinstance(body, dict):
+            return json_error("request body must be a JSON object", 400)
+        from supervisor.queue import SCHEDULE_ACTIONS, mutate_scheduled_task
+
+        action = str(body.get("action") or "").strip().lower()
+        if action not in SCHEDULE_ACTIONS:
+            return json_error(f"action must be one of {sorted(SCHEDULE_ACTIONS)}", 400)
+        reason = str(body.get("reason") or "").strip()
+        if not reason:
+            return json_error("reason is required for a schedule lifecycle action", 400)
+        return JSONResponse(mutate_scheduled_task(
+            action, schedule_id, reason=reason, actor="owner:gateway",
+            drive_root=request_drive_root(request),
+        ))
     except Exception as exc:
         return json_exception(exc)
 
@@ -122,8 +149,11 @@ async def api_schedules_delete(request: Request) -> JSONResponse:
         schedule_id = str(request.path_params.get("schedule_id") or "").strip()
         if err := schedule_id_error(schedule_id):
             return json_error(err, 400)
-        from supervisor.queue import remove_scheduled_task
+        from supervisor.queue import mutate_scheduled_task
 
-        return JSONResponse({"ok": remove_scheduled_task(schedule_id, drive_root=request_drive_root(request))})
+        return JSONResponse(mutate_scheduled_task(
+            "delete", schedule_id, reason="owner deleted the schedule", actor="owner:gateway",
+            drive_root=request_drive_root(request),
+        ))
     except Exception as exc:
         return json_exception(exc)

@@ -344,6 +344,12 @@ class _LocalLaneMixin:
         # returned usage alone could not attribute the call.
         usage["provider"] = "local"
         usage["resolved_model"] = "local-model"
+        # The provider's own cut marker: consolidation refuses a truncated
+        # summary by usage.response_finish_reason on every lane, this one too.
+        first_choice = choices[0] if choices and isinstance(choices[0], dict) else {}
+        finish_reason = first_choice.get("finish_reason")
+        if isinstance(finish_reason, str) and finish_reason.strip():
+            usage["response_finish_reason"] = finish_reason.strip()[:64]
         if preference:
             from ouroboros._usage_response import processing_receipt
 

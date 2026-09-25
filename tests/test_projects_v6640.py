@@ -519,7 +519,7 @@ def test_project_lifecycle_rows_render_design_system_action_static_contract():
 
     # One shared set drives render, history replay, and live fan-out.
     assert (
-        "const PROJECT_ROW_TYPES = new Set(['project_started', 'project_completion_summary']);"
+        "const PROJECT_ROW_TYPES = new Set(['project_started', 'project_handoff', 'project_completion_summary']);"
         in chat
     )
     # chat.js only delegates; the lifecycle-row module puts the one Project reference
@@ -549,7 +549,11 @@ def test_project_lifecycle_rows_render_design_system_action_static_contract():
     # which alone knows its classes and words.
     door = (root / "web" / "modules" / "project_reference.js").read_text(encoding="utf-8")
     assert "chat-live-project-card-btn" in door and "chat-live-project-card-btn" not in helpers
-    assert "projectReference(project, { layout: 'bar', state: 'background' })" in chat
+    handoff = (root / "web" / "modules" / "project_handoff.js").read_text(encoding="utf-8")
+    # Main alone owns a handoff controller; the converted card mounts through it.
+    assert "handoffs?.mount(record.root" in chat and "isMain ? createProjectHandoffs(" in chat
+    assert "projectReference({ id: projectId, name: projectName }, { layout: 'inline', taskId })" in handoff
+    assert "state: 'background'" not in handoff
     assert "projectReference(project, { layout: 'footer' })" in app
     # The project pointer is a Main-root affordance: applyTaskBindings walks
     # only Main root cards, never the Project panel's copy or nested subagents

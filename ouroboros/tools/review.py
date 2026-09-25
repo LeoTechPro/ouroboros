@@ -3,7 +3,7 @@
 import json
 import logging
 import pathlib
-from typing import Any, List, Optional
+from typing import Any, Dict, List, Optional
 
 from ouroboros.llm import LLMClient  # noqa: F401 -- facade import surface; leaves read it through the call-time handle
 from ouroboros.utils import (
@@ -109,6 +109,18 @@ def get_tools():
                             "type": "string", "enum": ["finish", "stop"],
                             "description": "Finish the current result under its review policy, or stop honestly with unfinished work. Stop never authorizes a blocked action; include rationale. Omission preserves explicit Advisory finish.",
                         },
+                        "acceptance_retry": {
+                            "type": "object",
+                            "description": "ONE-USE retry of a disclosed local acceptance-preparation failure. Name the incident id the host disclosed and the substantive basis: material_change (the requirements or material evidence really changed), repair_evidence (the cause was repaired for the same material) or owner_retry (the owner explicitly asked). Re-sending the same declaration grants nothing further; a plain re-nomination, a rephrasing or a status question is not a retry.",
+                            "properties": {
+                                "incident_id": {"type": "string"},
+                                "basis": {"type": "string", "enum": ["material_change", "repair_evidence", "owner_retry"]},
+                                "rationale": {"type": "string"},
+                                "owner_source_sha256": {"type": "string", "description": "Current observed owner source for owner_retry or material_change; Main judges whether it requests substantive retry, not status."},
+                                "verification_receipt_index": {"type": "integer", "minimum": 0, "description": "Zero-based existing task verification receipt for repair_evidence or material_change. Host resolves its content identity. Supply this OR owner_source_sha256, and no terminal stance."},
+                            },
+                            "required": ["incident_id", "basis", "rationale"],
+                        },
                         "obligation_dispositions": {
                             "type": "array",
                             "default": [],
@@ -144,6 +156,7 @@ def _handle_task_acceptance_review(
     obligation_dispositions: Optional[list] = None,
     acceptance_subject: Optional[dict] = None,
     author_action: str = "",
+    acceptance_retry: Optional[dict] = None,
 ) -> str:
     from ouroboros.config import get_task_review_mode
     from ouroboros.review_evidence import (
@@ -152,13 +165,16 @@ def _handle_task_acceptance_review(
     )
     from ouroboros.task_results import resolve_task_lineage
 
-    # v6.51.0 idea-2: build the process-aware evidence packet (full contract +
-    # first-class verification_summary + host-collected redacted repo_diff + leak-safe
-    # artifacts + provenance tags). The agent-tool (auto) path has no host-owned turn
-    # trace, so there is no tool_trajectory and include_recent_commit stays False (it
-    # cannot prove a commit happened THIS turn). The agent's own evidence is preserved
-    # under `agent_supplied` (its repo_diff demoted to agent_supplied_repo_diff) — never
-    # promoted to host-fact status; repo_diff is ALWAYS the HOST-collected structural fact.
+    # v6.51.0 idea-2: the child/off path builds the process-aware evidence packet
+    # (full contract + first-class verification_summary + host-collected redacted
+    # repo_diff + leak-safe artifacts + provenance tags) and dispatches its packet
+    # rows itself. The ROOT nomination (auto/required) never builds it: the host
+    # rebuilds the packet at its own fence, so the nomination records only the
+    # author's claims, stance and any explicit retry — which is what lets an
+    # informed finish/stop register even while that builder is broken (#1223).
+    # The agent's own evidence is preserved under `agent_supplied` (its repo_diff
+    # demoted to agent_supplied_repo_diff) — never promoted to host-fact status;
+    # repo_diff is ALWAYS the HOST-collected structural fact.
     legacy_aliases = []
     if str(agent_disposition or "").strip():
         legacy_aliases.append("agent_disposition")
@@ -253,12 +269,37 @@ def _handle_task_acceptance_review(
             agent_decision["obligation_dispositions"] = normalized_ob
         agent_evidence["agent_decision"] = agent_decision
 
-    evidence = build_task_acceptance_evidence(
-        ctx,
-        agent_evidence=agent_evidence,
-        drive_root=pathlib.Path(ctx.drive_root) if getattr(ctx, "drive_root", None) else None,
-        task_id=str(getattr(ctx, "task_id", "") or ""),
-    )
+    # ONE-USE, source-bound retry of a disclosed local preparation failure. It is
+    # a declaration about the HOST's failed assembly, not about the candidate, so
+    # it is normalized here and registered before any evidence is built.
+    retry_declaration: Dict[str, Any] = {}
+    if isinstance(acceptance_retry, dict):
+        from ouroboros.acceptance_preparation import RETRY_BASES, resolve_retry_source
+        from ouroboros.tools.tool_result import ToolResult, _publish_tool_result
+
+        if disposition or author_action:
+            return _publish_tool_result(ctx, ToolResult(status="error", code="TOOL_ARG_ERROR",
+                text="ERROR: TOOL_ARG_ERROR: acceptance_retry conflicts with a terminal author stance. "
+                     "Choose retry, or finish/stop with agent_disposition/author_action, in separate decisions."))
+
+        basis = str(acceptance_retry.get("basis") or "").strip().lower()
+        incident_id = str(acceptance_retry.get("incident_id") or "").strip()
+        retry_rationale = " ".join(str(acceptance_retry.get("rationale") or "").split())
+        if basis not in RETRY_BASES or not incident_id or not retry_rationale:
+            from ouroboros.tools.tool_result import ToolResult, _publish_tool_result
+            return _publish_tool_result(ctx, ToolResult(status="error", code="TOOL_ARG_ERROR",
+                text="ERROR: TOOL_ARG_ERROR: acceptance_retry requires the disclosed incident_id, "
+                     "a basis of material_change|repair_evidence|owner_retry, and a rationale."))
+        retry_declaration = {"incident_id": incident_id[:120], "basis": basis,
+                             "rationale": retry_rationale[:500],
+                             **{key: acceptance_retry[key] for key in (
+                                 "owner_source_sha256", "verification_receipt_index") if key in acceptance_retry}}
+        try:
+            retry_declaration["source"] = resolve_retry_source(ctx, retry_declaration)
+        except Exception as exc:
+            return _publish_tool_result(ctx, ToolResult(status="error", code="TOOL_ARG_ERROR",
+                text="ERROR: TOOL_ARG_ERROR: retry source unavailable or invalid. "
+                     + (str(exc) if isinstance(exc, ValueError) else "Read the current owner selector or verification receipts.")))
 
     metadata = (
         getattr(ctx, "task_metadata", {})
@@ -277,11 +318,23 @@ def _handle_task_acceptance_review(
     task_id = str(lineage["task_id"])
     is_root_task = bool(lineage["is_root_task"])
     if get_task_review_mode() in {"auto", "required"} and is_root_task:
-        evidence_revision = task_acceptance_evidence_revision(evidence)
+        # The ROOT nomination returns BEFORE any host evidence is built: the
+        # host rebuilds host-attested evidence at the authoritative fence, and
+        # it cannot reconstruct the agent's claims/references from the capped
+        # tool trajectory, so the redacted, bounded agent-supplied section (the
+        # same normalization the host builder applies) rides this existing
+        # trace record. An informed finish/stop and an explicit retry therefore
+        # register whatever state the host's own builder is in (#1223). This is
+        # a recorded nomination, never a reviewer verdict.
+        from ouroboros.review_evidence_sections import accept_agent_supplied_section
+
+        supplied = accept_agent_supplied_section(agent_evidence)
         deferred = {
             "status": "deferred_to_host_acceptance",
             "authoritative": False,
-            "evidence_revision": evidence_revision,
+            # The nomination's own content stamp: the host packet's revision is
+            # the host's to compute at the fence.
+            "evidence_revision": task_acceptance_evidence_revision({"agent_supplied": supplied}),
             "request": {
                 "surface": "task_acceptance",
                 "goal": str(goal or ""),
@@ -289,26 +342,23 @@ def _handle_task_acceptance_review(
                 "checklist": str(checklist or ""),
                 "task_id": task_id,
             },
-            # The host rebuilds host-attested evidence at the authoritative
-            # fence, but it cannot reconstruct the agent's claims/references
-            # from the capped tool trajectory.  Preserve the already redacted,
-            # bounded agent-supplied section in this existing trace record so
-            # the one host panel sees exactly what the cheap root call recorded.
-            "evidence_refs": {
-                "revision": evidence_revision,
-                "sections": sorted(
-                    str(key) for key in evidence if str(key) != "__provenance__"
-                ),
-                "canonical_payload": evidence.get("canonical_payload") or {},
-                "aliases": evidence.get("aliases") or {},
-                "provenance": evidence.get("__provenance__") or {},
-            },
-            "agent_supplied": evidence.get("agent_supplied") or {},
+            "agent_supplied": supplied,
             "acceptance_subject": acceptance_subject,
         }
         if agent_decision:
             deferred["agent_decision"] = agent_decision
+        if retry_declaration:
+            deferred["acceptance_retry"] = retry_declaration
         return json.dumps(deferred, ensure_ascii=False, indent=2, default=str)
+
+    # Child-task and `off`-mode acceptance builds the packet here and dispatches
+    # its packet rows itself; a builder failure propagates as before.
+    evidence = build_task_acceptance_evidence(
+        ctx,
+        agent_evidence=agent_evidence,
+        drive_root=pathlib.Path(ctx.drive_root) if getattr(ctx, "drive_root", None) else None,
+        task_id=str(getattr(ctx, "task_id", "") or ""),
+    )
 
     from ouroboros.review_substrate import (
         ReviewRequest,
@@ -478,20 +528,10 @@ def _parse_review_json(raw: str) -> Optional[list]:
     return extract_json_array(raw, normalize=True)
 
 
-def _git_show_staged(repo_dir, path: str) -> str:
-    """Return staged index content via ``git show :PATH`` or ``""``."""
-    import subprocess
-    try:
-        result = subprocess.run(
-            ["git", "show", f":{path}"],
-            cwd=str(repo_dir),
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        return result.stdout if result.returncode == 0 else ""
-    except Exception:
-        return ""
+def _git_show_staged(repo_dir, path: str) -> Optional[str]:
+    """Return indexed text (None only for absence); propagate failed reads."""
+    from ouroboros.commit_admission import read_release_file
+    return read_release_file(repo_dir, path, source="index")
 
 
 def _preflight_check(commit_message: str, staged_files: str,
@@ -508,7 +548,6 @@ def _preflight_check(commit_message: str, staged_files: str,
     the semantic checklist: docs/CHECKLISTS.md item 6 (tests_affected) and
     item 8 (version_bump).
     """
-    import re
     import string as _string
 
     # Accept either name-status lines ("A  path") or plain filenames.
@@ -537,17 +576,13 @@ def _preflight_check(commit_message: str, staged_files: str,
     active_staged = {path for status, path in file_status if status != "D"}
     # Added/Copied count as new modules; renames do not.
     new_files = {path for status, path in file_status if status in ("A", "C")}
-    version_staged = "VERSION" in active_staged
-
-    # VERSION staged but README missing.
-    if version_staged and "README.md" not in active_staged:
-        return (
-            "⚠️ PREFLIGHT_BLOCKED: Staged diff is incomplete — fix before review.\n"
-            "  Missing from staged: README.md (badge + changelog)\n"
-            f"  Currently staged: {', '.join(sorted(staged_set)) or '(none)'}\n\n"
-            "Stage all related files together. Use write_file for all files first,\n"
-            "then commit_reviewed to stage and commit everything in one diff."
-        )
+    from ouroboros.commit_admission import release_metadata_diagnostics, format_release_metadata_preflight
+    release_error = format_release_metadata_preflight(release_metadata_diagnostics(
+        repo_dir, sorted(active_staged), source="index",
+        read_text=lambda path: _git_show_staged(repo_dir, path),
+    ))
+    if release_error:
+        return release_error
 
     # The version-reference and tests-required lexical heuristics were removed
     # here (false blocks: a "conversion" commit told to bump VERSION; a
@@ -579,74 +614,6 @@ def _preflight_check(commit_message: str, staged_files: str,
             f"  New files: {new_logic_files[:5]}\n"
             f"  Currently staged: {', '.join(sorted(staged_set)) or '(none)'}"
         )
-
-    # VERSION changes must keep staged version carriers synchronized.
-    if version_staged:
-        try:
-            from ouroboros.tools.release_sync import (
-                is_release_version,
-                version_carrier_desyncs,
-            )
-            version_str = _git_show_staged(repo_dir, "VERSION").strip()
-            if is_release_version(version_str):
-                desync = version_carrier_desyncs(
-                    version_str,
-                    pyproject_text=_git_show_staged(repo_dir, "pyproject.toml"),
-                    uv_lock_text=_git_show_staged(repo_dir, "uv.lock"),
-                    web_package_text=_git_show_staged(repo_dir, "web/package.json"),
-                    web_package_lock_text=_git_show_staged(repo_dir, "web/package-lock.json"),
-                    readme_text=_git_show_staged(repo_dir, "README.md"),
-                    arch_text=_git_show_staged(repo_dir, "docs/ARCHITECTURE.md"),
-                    api_types_text=_git_show_staged(repo_dir, "web/modules/api_types.js"),
-                    download_readme_text=_git_show_staged(repo_dir, "README.md"),
-                    site_install_text=_git_show_staged(repo_dir, "site/install/index.html"),
-                    docs_install_text=_git_show_staged(repo_dir, "docs/install/index.html"),
-                    detailed=True,
-                )
-                if desync:
-                    return (
-                        f"⚠️ PREFLIGHT_BLOCKED: VERSION file says {version_str} but "
-                        "the following staged files have a different version value:\n"
-                        + "".join(f"  - {d}\n" for d in desync)
-                        + "Update all version references to match VERSION before committing.\n"
-                        f"  Currently staged: {', '.join(sorted(staged_set)) or '(none)'}"
-                    )
-        except Exception:
-            pass  # Non-fatal: LLM reviewers handle version sync
-
-    # VERSION changes need a staged README changelog row, and the staged README
-    # must respect P9 history limits.
-    if version_staged:
-        try:
-            from ouroboros.tools.release_sync import is_release_version
-            version_str = _git_show_staged(repo_dir, "VERSION").strip()
-            if is_release_version(version_str):
-                readme_text = _git_show_staged(repo_dir, "README.md")
-                if readme_text and not re.search(r'\|\s*' + re.escape(version_str) + r'\s*\|', readme_text):
-                    return (
-                        f"⚠️ PREFLIGHT_BLOCKED: VERSION is {version_str} but README.md "
-                        "changelog has no table row for this version.\n"
-                        "  Add a changelog entry in the Version History table in README.md.\n"
-                        f"  Currently staged: {', '.join(sorted(staged_set)) or '(none)'}"
-                    )
-        except Exception:
-            pass  # Non-fatal
-        try:
-            readme_staged = _git_show_staged(repo_dir, "README.md")
-            if readme_staged:
-                from ouroboros.tools.release_sync import check_history_limit
-                limit_warnings = check_history_limit(readme_staged)
-                if limit_warnings:
-                    return (
-                        "⚠️ PREFLIGHT_BLOCKED: README.md Version History exceeds BIBLE.md P9 limits.\n"
-                        + "".join(f"  - {w}\n" for w in limit_warnings)
-                        + "  Trim the oldest entry in the over-limit category before committing.\n"
-                        + "  Quick check: python -c \"from ouroboros.tools.release_sync import "
-                        "check_history_limit; print(check_history_limit(open('README.md').read()))\"\n"
-                        + f"  Currently staged: {', '.join(sorted(staged_set)) or '(none)'}"
-                    )
-        except Exception:
-            pass  # Non-fatal: LLM reviewers handle P9 limits as advisory fallback
 
     # conftest.py must not contain collectable module-level tests.
     conftest_files = [f for f in active_staged if pathlib.Path(f).name == "conftest.py"]
@@ -1048,7 +1015,10 @@ def _prepare_unified_review(ctx: ToolContext, commit_message: str,
 
     preflight_err = _preflight_check(commit_message, preflight_staged, target_repo)
     if preflight_err:
-        ctx._last_review_block_reason = "preflight"
+        from ouroboros.commit_admission import preflight_evidence_unavailable
+        ctx._last_review_block_reason = (
+            "infra_failure" if preflight_evidence_unavailable(preflight_err) else "preflight"
+        )
         result = _handle_review_block_or_warning(
             ctx, blocking_review, preflight_err,
             "Review enforcement=Advisory: preflight warning did not block commit. ",

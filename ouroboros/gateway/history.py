@@ -581,7 +581,7 @@ def _annotate_terminal_task_truth(
                 # window still holds, so its harness chip needs no "Load older".
                 message.update(terminal_receipt_by_task.get(task_id) or {})
             is_summary = str(message.get("system_type") or "") == "task_summary"
-            if is_summary or (
+            if is_summary or (not message.get("is_progress") and message.get("task_terminal_status")) or (
                 task_id not in summary_task_ids
                 and latest_progress_by_task.get(task_id) is message
             ):
@@ -680,7 +680,7 @@ def _make_thread_filter(
             return True
         if (thread_id not in project_chat_ids and isinstance(entry, dict)
                 and entry.get("summary_kind") in {"terminal_result_projection", "terminal_root_projection"}
-                and entry.get("type") not in {"project_started", "project_completion_summary"}):
+                and entry.get("type") not in {"project_started", "project_handoff", "project_completion_summary"}):
             return False
         return belongs(entry_chat, entry)
 
@@ -823,12 +823,12 @@ def _collect_chat_rows(
                 # (the key is simply ignored), and ``transport`` is the
                 # provenance surface.
             }
-            if rec["system_type"] in {"project_started", "project_completion_summary"}:
+            if rec["system_type"] in {"project_started", "project_handoff", "project_completion_summary"}:
                 # Read-side plain normalization for lifecycle rows persisted
                 # before the producer stripped markdown; a no-op on new rows.
                 # The durable chat.jsonl is never rewritten.
                 rec["text"] = strip_markdown(rec["text"])
-                for key in ("project_id", "project_name", "target_label", "status", "completion_answer"):
+                for key in ("project_id", "project_name", "target_label", "status", "completion_answer", "handoff_id"):
                     if key in entry:
                         rec[key] = str(entry.get(key) or "")
             annotation = _user_annotation(role, rec["client_message_id"], chat_annotations)
@@ -896,7 +896,7 @@ def _collect_chat_rows(
             _copy_task_summary_metadata(rec, entry)
             # Lineage, the origin label, and the host's card placement (card_row /
             # card_row_id) — a stored key is replayed verbatim, an absent one is omitted.
-            for field in (*SUBAGENT_MESSAGE_FIELDS, "initiator", "card_row", "card_row_id"):
+            for field in (*SUBAGENT_MESSAGE_FIELDS, "initiator", "card_row", "card_row_id", "narration"):
                 if field in entry:
                     rec[field] = entry[field]
             combined.append(rec)

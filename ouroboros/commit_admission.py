@@ -20,7 +20,6 @@ import json
 import logging
 import os
 import pathlib
-import re
 import subprocess
 from typing import List, NamedTuple, Optional
 
@@ -31,22 +30,27 @@ log = logging.getLogger("ouroboros.commit_admission")
 
 
 def changed_worktree_paths(
-    repo_dir: pathlib.Path, paths: list[str] | None = None
+    repo_dir: pathlib.Path, paths: list[str] | None = None, *, strict: bool = False
 ) -> list[str]:
-    """Changed paths from ``git status --porcelain`` (empty on any git error)."""
+    """Changed worktree paths; admission uses strict errors instead of empty-on-error."""
     from ouroboros.tools.review_helpers import parse_changed_paths_from_porcelain
 
     path_args = (["--"] + [str(p) for p in paths]) if paths else []
     try:
         result = subprocess.run(
-            ["git", "status", "--porcelain"] + path_args,
-            cwd=str(repo_dir), capture_output=True, text=True, timeout=10,
+            ["git", "--no-optional-locks", "status", "--porcelain"] + path_args,
+            cwd=str(repo_dir), capture_output=True, timeout=10,
         )
+        stdout = result.stdout.decode("utf-8")
     except Exception:
+        if strict:
+            raise
         return []
     if result.returncode != 0:
+        if strict:
+            raise RuntimeError("git status failed")
         return []
-    return parse_changed_paths_from_porcelain(result.stdout)
+    return parse_changed_paths_from_porcelain(stdout)
 
 
 def auto_sync_release_metadata_if_needed(
@@ -84,108 +88,126 @@ def auto_sync_release_metadata_if_needed(
         return []
 
 
+def read_release_file(repo_dir, path: str, *, source: str) -> str | None:
+    """Read exact worktree/index text; absent optional carriers differ from failed reads."""
+    if source == "worktree":
+        try:
+            return (pathlib.Path(repo_dir) / path).read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return None
+    # Establish absence independently: a failed git-show is never empty content.
+    present = subprocess.run(
+        ["git", "ls-files", "--error-unmatch", "--", path], cwd=str(repo_dir),
+        capture_output=True, timeout=10,
+    )
+    if present.returncode == 1:
+        return None
+    present.check_returncode()
+    result = subprocess.run(
+        ["git", "show", f":{path}"], cwd=str(repo_dir), capture_output=True,
+        timeout=10, check=True,
+    )
+    # Decode on the caller thread (Windows pipe-reader errors otherwise disappear),
+    # retaining the universal-newline semantics of worktree read_text().
+    return result.stdout.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
+
+
+def release_metadata_diagnostics(
+    repo_dir, paths: list[str] | None = None, *, source: str = "worktree", read_text=None,
+) -> dict:
+    """Read-only release report; an index reader may supply already-classified active paths.
+
+    Source acquisition failures are unavailable evidence, independent of candidate
+    findings. Optional carriers absent from older trees remain optional; VERSION
+    and README are required when release checks apply. No review state is read.
+    """
+    from ouroboros.tools.release_sync import CARRIER_SPAN_PATHS, release_metadata_findings
+
+    report = {"source": source, "status": "clean", "findings": [], "unavailable": []}
+    findings, unavailable = report["findings"], report["unavailable"]
+    if source not in ("worktree", "index"):
+        report.update(status="unavailable", unavailable=["source must be worktree or index"])
+        return report
+    touched = set(paths or []) if source == "worktree" or read_text else set()
+    try:
+        if source == "worktree":
+            touched.update(changed_worktree_paths(repo_dir, paths=paths, strict=True))
+        elif read_text is None:
+            result = subprocess.run(
+                ["git", "--no-optional-locks", "diff", "--cached", "--name-only", "--diff-filter=d", "-z"],
+                cwd=str(repo_dir),
+                capture_output=True, timeout=10, check=True,
+            )
+            touched.update(filter(None, result.stdout.decode("utf-8").split("\0")))
+    except Exception as exc:
+        unavailable.append(f"Changed {source} paths could not be read ({type(exc).__name__}).")
+
+    version_in_scope = "VERSION" in touched
+    if touched and not version_in_scope and source == "worktree":
+        # Same doc-only carve as the commit gate. Code-bearing standalone
+        # advisory still requires VERSION; the version-neutral index lane does not.
+        from ouroboros.tools.git_review_cycle import _diff_is_doc_only
+        if not _diff_is_doc_only(sorted(touched)):
+            findings.append(
+                "Changed files are present but VERSION is not in scope. "
+                "BIBLE.md P9 requires every commit to bump VERSION and sync release artifacts. "
+                "Stage or include VERSION plus its release carriers before advisory review. "
+                f"Currently changed/in-scope: {', '.join(sorted(touched))}"
+            )
+    if version_in_scope or findings or unavailable:
+        if source == "index" and version_in_scope and "README.md" not in touched:
+            findings.append("Missing from staged: README.md (badge + changelog). Stage all related files together.")
+        texts = {}
+        for path in sorted(CARRIER_SPAN_PATHS):
+            try:
+                content = read_text(path) if read_text else read_release_file(repo_dir, path, source=source)
+                if content is not None:
+                    texts[path] = content
+                elif path in ("VERSION", "README.md"):
+                    unavailable.append(f"{source}:{path} is missing; release checks require this source.")
+            except Exception as exc:
+                unavailable.append(f"{source}:{path} could not be read ({type(exc).__name__}).")
+        findings.extend(release_metadata_findings(texts))
+    else:
+        report["status"] = "not_applicable"
+    if unavailable:
+        report["status"] = "unavailable"
+    elif findings:
+        report["status"] = "blocked"
+    return report
+
+
+def format_release_metadata_preflight(report: dict) -> Optional[str]:
+    """Compatibility error text without collapsing unavailable evidence into a defect."""
+    if not report["findings"] and not report["unavailable"]:
+        return None
+    code = "PREFLIGHT_UNAVAILABLE" if report["unavailable"] else "PREFLIGHT_BLOCKED"
+    return (f"⚠️ {code}: Release metadata diagnostics ({report['source']}).\n"
+            + "".join(f"  - {message}\n" for message in report["findings"])
+            + "".join(f"  - Unavailable: {message}\n" for message in report["unavailable"]))
+
+
+def preflight_evidence_unavailable(message: Optional[str]) -> bool:
+    """Whether a preflight message reports unavailable evidence, not a candidate defect.
+
+    The two admission gates need that split (an unreadable source is an infra
+    failure, a bad carrier is the candidate's). Ask the one tool-result
+    classifier for the code the agent will see, so neither gate grows a second
+    private reading of the same warning text.
+    """
+    from ouroboros.tools.tool_result import LegacyTextResultAdapter
+
+    return bool(message) and LegacyTextResultAdapter.from_text(
+        "preflight_review", message,
+    ).status == "unavailable"
+
+
 def release_metadata_preflight(
-    repo_dir: pathlib.Path,
-    commit_message: str,
-    paths: list[str] | None,
+    repo_dir: pathlib.Path, commit_message: str, paths: list[str] | None,
+    *, source: str = "worktree",
 ) -> Optional[str]:
     """Cheap deterministic P9/release checks before any paid review spend."""
-    touched = set(str(p) for p in (paths or []) if str(p).strip()) | set(
-        changed_worktree_paths(repo_dir, paths=paths))
-    version_in_scope = "VERSION" in touched
-    if touched and not version_in_scope:
-        # Doc-only carve (finding W3A-F1). The commit gate ALREADY exempts a
-        # doc-only diff from its compensating preflight; this admission blocked
-        # the same diff outright, so on every install a doc-only change could
-        # never obtain a fresh advisory verdict at all — the standard
-        # preflight_review -> commit_reviewed flow degraded to the AUDITED
-        # BYPASS for every doc-only change, and hardest for the two commit
-        # classes BIBLE P9 exempts from the bump (a version-neutral external
-        # contribution, a forensic recovery snapshot), which have no VERSION to
-        # name by construction. Same classifier as the commit gate, read from
-        # its owner module: one detector, so the two gates cannot drift. Narrow
-        # on purpose, and NARROWER than those two classes — a code-bearing diff
-        # without VERSION still blocks here whatever its provenance, and every
-        # carrier-coherence check below still runs the moment VERSION IS in
-        # scope.
-        from ouroboros.tools.git_review_cycle import _diff_is_doc_only
-
-        if _diff_is_doc_only(sorted(touched)):
-            return None
-        return (
-            "⚠️ PREFLIGHT_BLOCKED: Changed files are present but VERSION is not in scope.\n"
-            "  BIBLE.md P9 requires every commit to bump VERSION and sync release artifacts.\n"
-            "  Stage or include VERSION plus pyproject.toml, web/package.json, README.md, and docs/ARCHITECTURE.md before advisory review.\n"
-            f"  Currently changed/in-scope: {', '.join(sorted(touched)) or '(none)'}"
-        )
-    if not version_in_scope:
-        return None
-    try:
-        from ouroboros.tools.release_sync import (
-            check_history_limit,
-            is_release_version,
-            version_carrier_desyncs,
-        )
-        version_path = repo_dir / "VERSION"
-        readme_path = repo_dir / "README.md"
-        pyproject_path = repo_dir / "pyproject.toml"
-        uv_lock_path = repo_dir / "uv.lock"
-        web_package_path = repo_dir / "web" / "package.json"
-        web_package_lock_path = repo_dir / "web" / "package-lock.json"
-        arch_path = repo_dir / "docs" / "ARCHITECTURE.md"
-        api_types_path = repo_dir / "web" / "modules" / "api_types.js"
-        site_install_path = repo_dir / "site" / "install" / "index.html"
-        docs_install_path = repo_dir / "docs" / "install" / "index.html"
-        version_str = version_path.read_text(encoding="utf-8").strip()
-        if not is_release_version(version_str):
-            return None
-        pyproject_text = pyproject_path.read_text(encoding="utf-8") if pyproject_path.exists() else ""
-        uv_lock_text = uv_lock_path.read_text(encoding="utf-8") if uv_lock_path.exists() else ""
-        web_package_text = web_package_path.read_text(encoding="utf-8") if web_package_path.exists() else ""
-        web_package_lock_text = (
-            web_package_lock_path.read_text(encoding="utf-8") if web_package_lock_path.exists() else ""
-        )
-        readme_text = readme_path.read_text(encoding="utf-8") if readme_path.exists() else ""
-        arch_text = arch_path.read_text(encoding="utf-8") if arch_path.exists() else ""
-        api_types_text = api_types_path.read_text(encoding="utf-8") if api_types_path.exists() else ""
-        desync = version_carrier_desyncs(
-            version_str,
-            pyproject_text=pyproject_text,
-            uv_lock_text=uv_lock_text,
-            web_package_text=web_package_text,
-            web_package_lock_text=web_package_lock_text,
-            readme_text=readme_text,
-            arch_text=arch_text,
-            api_types_text=api_types_text,
-            download_readme_text=readme_text,
-            site_install_text=(site_install_path.read_text(encoding="utf-8") if site_install_path.exists() else ""),
-            docs_install_text=(docs_install_path.read_text(encoding="utf-8") if docs_install_path.exists() else ""),
-            detailed=True,
-        )
-        if readme_text:
-            if not re.search(r'\|\s*' + re.escape(version_str) + r'\s*\|', readme_text):
-                return (
-                    f"⚠️ PREFLIGHT_BLOCKED: VERSION is {version_str} but README.md "
-                    "changelog has no table row for this version.\n"
-                    "  Add a changelog entry in the Version History table in README.md before advisory review."
-                )
-            limit_warnings = check_history_limit(readme_text)
-            if limit_warnings:
-                return (
-                    "⚠️ PREFLIGHT_BLOCKED: README.md Version History exceeds BIBLE.md P9 limits.\n"
-                    + "".join(f"  - {w}\n" for w in limit_warnings)
-                    + "  Trim the oldest entry in the over-limit category before advisory review."
-                )
-        if desync:
-            return (
-                f"⚠️ PREFLIGHT_BLOCKED: VERSION file says {version_str} but "
-                "the following worktree files have a different version value:\n"
-                + "".join(f"  - {d}\n" for d in desync)
-                + "Run release metadata sync before advisory review."
-            )
-    except Exception:
-        return None
-    return None
+    return format_release_metadata_preflight(release_metadata_diagnostics(repo_dir, paths, source=source))
 
 
 def syntax_preflight_staged_py_files(
@@ -298,7 +320,7 @@ def preflight_test_workload(
     from ouroboros.preflight_node import candidate_node_tests, resolve_node
 
     base = pathlib.Path(tempfile.gettempdir()) / "ouroboros-preflight-contract"
-    env = pr._preflight_env(base, base / "repo")
+    env = pr._preflight_env(base, base / "repo", create=False)
     environment = hashlib.sha256(json.dumps(env, sort_keys=True).encode()).hexdigest()
     python = agent_python or os.environ.get("OUROBOROS_AGENT_PYTHON") or sys.executable or "python3"
     specs = pr._preflight_pass_specs(pytest_args) if passes is None else passes

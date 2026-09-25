@@ -76,12 +76,14 @@ def test_consolidate_creates_block(tmp_paths):
     usage = consolidate(chat_path, blocks_path, meta_path, mock_llm)
 
     assert usage is not None
-    assert usage["cost"] == 0.001
+    assert usage["cost"] == pytest.approx(0.002)  # one room: draft and correction
+    assert mock_llm.chat.call_count == 2
     assert blocks_path.exists()
     blocks = json.loads(blocks_path.read_text())
     assert len(blocks) == 1
     assert blocks[0]["type"] == "summary"
     assert "Summary of events" in blocks[0]["content"]
+    assert [room["room_id"] for room in blocks[0]["rooms"]] == ["unresolved:missing"]
 
     meta = _load_meta(meta_path)
     assert meta["last_consolidated_offset"] == BLOCK_SIZE

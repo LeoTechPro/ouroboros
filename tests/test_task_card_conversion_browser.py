@@ -33,7 +33,10 @@ from tests.ui_chat_viewport_smoke import _CAPTURE_TEST_SOCKET
 wait_clone = clone_fixture
 pytestmark = [pytest.mark.serial, pytest.mark.ui_browser]
 
-ANSWER = "The converted turn finished its work."
+ANSWER = "The converted turn finished its work.\n\n" + "\n\n".join(
+    f"Verified section {i}: the complete answer remains readable in the Project and selectable in Main."
+    for i in range(12)
+)
 # The turn namer and the project namer are TOOL-LESS model calls, which the stub
 # answers with its default text — so pinning it to something the answer does not
 # contain keeps "the project name" and "the answer" separable strings, and the
@@ -66,8 +69,9 @@ def _task_rows(oracle, task_id):
 
 
 @pytest.mark.parametrize("width", [1440, 390], ids=["desktop", "mobile"])
+@pytest.mark.parametrize("engine,theme", [("chromium", "dark"), ("webkit", "light")])
 def test_running_direct_turn_converts_to_project_and_its_answer_follows(
-    wait_clone, tmp_path, monkeypatch, width,
+    wait_clone, tmp_path, monkeypatch, width, engine, theme,
 ):
     from playwright.sync_api import sync_playwright
     from tests.system_e2e.harness import KeylessIsolatedServer
@@ -97,18 +101,19 @@ def test_running_direct_turn_converts_to_project_and_its_answer_follows(
         "XDG_CONFIG_HOME": str(home / ".config"),
     })
     evidence = Path(os.environ.get("OUROBOROS_BROWSER_EVIDENCE_OUT") or tmp_path / "evidence")
-    evidence = evidence / f"convert-running-{width}"
+    evidence = evidence / f"convert-running-{engine}-{theme}-{width}"
     evidence.mkdir(parents=True, exist_ok=True)
     with ToolCallOnlyModel(steps, final_answer=CARD_NAME, gate=gate) as stub:
         server = start_server(wait_clone, tmp_path / "instance", keyless_settings(stub, OUROBOROS_MAX_WORKERS=1))
         oracle = ArtifactOracle(server.data_root)
         try:
             with sync_playwright() as pw:
-                browser = pw.chromium.launch()
+                browser = getattr(pw, engine).launch()
                 page = browser.new_page(viewport={"width": width, "height": 900}, has_touch=width < 980)
                 errors = []
                 page.on("pageerror", lambda error: errors.append(str(error)))
                 page.add_init_script(f"({_CAPTURE_TEST_SOCKET})()")
+                page.add_init_script(f"localStorage.setItem('ouroboros.theme', '{theme}')")
                 try:
                     page.goto(server.base_url, wait_until="domcontentloaded")
                     page.wait_for_function("() => window.__testSockets?.[0]?.readyState === WebSocket.OPEN")
@@ -161,6 +166,10 @@ def test_running_direct_turn_converts_to_project_and_its_answer_follows(
                     assert ANSWER not in str(project["name"]), project
                     project_chat = int(project["chat_id"])
                     assert project_chat != 1, project
+                    # The receipt is one typed word beside the binding: a captured
+                    # Main origin makes it durable, so the card carries no gap mark.
+                    assert payload["handoff_receipt"] == "durable", payload
+                    assert payload["handoff_id"].startswith("project-handoff:"), payload
 
                     # The Main card became the project chip, and stopped offering
                     # a second conversion of the same work.
@@ -170,6 +179,8 @@ def test_running_direct_turn_converts_to_project_and_its_answer_follows(
                     page.wait_for_selector(
                         f'.chat-live-card[data-task-id="{task_id}"].is-project', timeout=30000)
                     assert converted.get_attribute("data-project-id") == project["id"]
+                    assert converted.get_attribute("data-handoff-id") == payload["handoff_id"]
+                    assert converted.get_attribute("data-receipt") is None, "a durable receipt is not marked as a gap"
                     assert converted.locator(".chat-live-project-name").inner_text().strip()
                     assert page.locator(f'.chat-live-card[data-task-id="{task_id}"]'
                                         ' [data-turn-into-project]').count() == 0
@@ -194,14 +205,19 @@ def test_running_direct_turn_converts_to_project_and_its_answer_follows(
                     assert final_row["task_id"] == task_id, final_row
                     assert not [row for row in _out_rows(oracle, ANSWER) if row["chat_id"] == 1], \
                         "the final answer of a converted turn was also delivered to Main"
-                    # Main DOES get one durable row: a system pointer naming the
-                    # project that now holds the result. It carries the project's
-                    # name, never the answer.
-                    rows = _task_rows(oracle, task_id)
+                    # Main keeps the transfer receipt and a separate final-answer
+                    # mirror; the original authored row belongs to the Project.
+                    # The completion mirror is the supervisor's task_done row, written after
+                    # the worker's own final delivery: wait for it like every other durable fact.
+                    rows = wait_until(lambda: (lambda r: r if any(
+                        row["chat_id"] == 1 and row["type"] == "project_completion_summary" for row in r) else None)(
+                        _task_rows(oracle, task_id)), 60) or _task_rows(oracle, task_id)
                     main_rows = [row for row in rows if row["chat_id"] == 1]
-                    assert len(main_rows) == 1 and main_rows[0]["direction"] == "system", rows
-                    assert project["name"] in main_rows[0]["text"], main_rows
-                    assert ANSWER not in main_rows[0]["text"], main_rows
+                    handoff_rows = [row for row in main_rows if row["type"] == "project_handoff"]
+                    completion_rows = [row for row in main_rows if row["type"] == "project_completion_summary"]
+                    assert len(handoff_rows) == 1, rows
+                    assert len(completion_rows) == 1, rows
+                    assert project["name"] in handoff_rows[0]["text"], main_rows
                     assert [row for row in rows if row["chat_id"] == project_chat
                             and row["direction"] == "out"], rows
 
@@ -216,39 +232,32 @@ def test_running_direct_turn_converts_to_project_and_its_answer_follows(
                         30) or page.evaluate(_MAIN_CARD_FACTS, task_id)
                     assert reloaded["convert_buttons"] == 0, \
                         f"Main still offers to convert work that already has a project: {reloaded}"
-                    # A card that survives in Main must carry its project identity
-                    # rather than a second conversion offer. Observed on this tree:
-                    # no Main card survives at all (see the gap note below).
+                    # A surviving card names its Project instead of offering
+                    # a second conversion; the durable receipt survives separately.
                     assert not reloaded["card"] or reloaded["converted"] == "1" or reloaded["bound"] == "1", \
                         f"a surviving Main card does not name its project: {reloaded}"
                     main_text = page.locator("#page-chat").inner_text()
-                    assert ANSWER not in main_text, "Main replayed an answer that belongs to the project"
+                    page.locator('#page-chat .project-answer').filter(has_text='The converted turn finished its work.').wait_for(timeout=30000)
+                    page.wait_for_selector('#page-chat .project-answer.is-folded', timeout=30000)
+                    page.wait_for_function("() => [...document.querySelectorAll('#page-chat .project-handoff:not([hidden]) .chat-live-phase')].some(n => n.textContent === 'Done')", timeout=30000)
+                    assert page.locator('#page-chat .project-handoff:not([hidden])').count() == 1
                     assert marker in main_text, "Main lost the owner message the turn started from"
-                    # OBSERVED GAP (evidence: receipt.json "reloaded_main_history").
-                    # The Main pointer row above IS written durably, but it is
-                    # persisted as type="task_summary", not as one of the two
-                    # lifecycle types room_membership() exempts — so on replay the
-                    # Main rule "entry_chat not in project_chat_ids and not bound"
-                    # drops it, because the task is now bound. Main's reloaded
-                    # history is therefore the owner's message ALONE: the converted
-                    # chip is a live-session artifact and does not survive a reload.
-                    # Asserted here as the honest current contract, with the full
-                    # history kept as evidence rather than pinning the gap shut.
                     main_history = page.evaluate(
                         "async () => (await (await fetch('/api/chat/history?chat_id=1')).json())")
-                    replayed = [row for row in (main_history.get("messages") or [])
-                                if marker not in str(row.get("text") or "")]
-                    assert not [row for row in replayed if ANSWER in str(row.get("text") or "")], replayed
+                    replayed = main_history.get("messages") or []
+                    assert len([row for row in replayed if row.get("system_type") == "project_handoff"]) == 1
+                    answers = [row for row in replayed if row.get("system_type") == "project_completion_summary"]
+                    assert len(answers) == 1 and answers[0].get("completion_answer") == ANSWER
                     page.screenshot(path=str(evidence / "reloaded-main.png"), full_page=True, animations="disabled")
                     page.evaluate(
                         "project => window.dispatchEvent(new CustomEvent('ouro:open-project', {detail:{project}}))",
                         project)
                     page.wait_for_selector("#project-panel:not([hidden])")
-                    page.locator("#project-panel").get_by_text(ANSWER, exact=False).first.wait_for(timeout=30000)
+                    page.locator("#project-panel").get_by_text('The converted turn finished its work.', exact=False).first.wait_for(timeout=30000)
                     page.screenshot(path=str(evidence / "reloaded-project.png"), full_page=True, animations="disabled")
                     assert not errors, errors
                     (evidence / "receipt.json").write_text(json.dumps({
-                        "width": width, "task": task, "at_click": at_click,
+                        "engine": engine, "theme": theme, "width": width, "task": task, "at_click": at_click,
                         "from_task_response": payload, "binding": binding,
                         "stored_result_status": stored["status"],
                         "final_chat_row": final_row, "project_chat_id": project_chat,

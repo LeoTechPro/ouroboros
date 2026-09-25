@@ -357,3 +357,18 @@ test('computeDerivedChatStatus: budget-paused work is not Working or Queued (#32
         'Working...',
     );
 });
+
+test('sequenced failures stop stale replies without replacing a newer accepted census', () => {
+    const events = [];
+    const sequencer = createStateSnapshotSequencer(
+        (data) => events.push(data), () => 123, () => events.push('unavailable'));
+    const older = sequencer.begin();
+    const failed = sequencer.begin();
+    assert.equal(sequencer.fail(failed), true);
+    assert.equal(sequencer.apply(older, 'stale complete empty'), false);
+    assert.equal(sequencer.fail(failed), false);
+    const newer = sequencer.begin();
+    assert.equal(sequencer.apply(newer, 'fresh'), true);
+    assert.equal(sequencer.fail(older), false);
+    assert.deepEqual(events, ['unavailable', 'fresh']);
+});

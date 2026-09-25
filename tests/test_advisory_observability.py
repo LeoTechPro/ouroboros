@@ -1131,7 +1131,10 @@ class TestAdvisoryCleanSentinel:
             lambda repo_dir, commit_message, ctx, **kwargs: (adv._parse_advisory_output(raw_text), raw_text, "opus", 10),
         )
         # Release-metadata preflight (BIBLE P9) runs before the SDK branch under
-        # test, so the fake change set must carry the release artifacts.
+        # test. These cases pin the sentinel verdict, not release admission, and
+        # ``tmp_path`` is no Git worktree — isolate the admission read rather than
+        # let its honest "source unavailable" answer stand in for a verdict.
+        monkeypatch.setattr(adv, "_release_metadata_preflight", lambda *a, **kw: None)
         monkeypatch.setattr(adv, "_get_staged_diff", lambda repo_dir, paths=None: "diff --git a/x.py b/x.py")
         monkeypatch.setattr(
             adv, "_get_changed_file_list",

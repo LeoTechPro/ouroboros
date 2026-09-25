@@ -625,11 +625,23 @@ from supervisor.queue_schedules import (  # noqa: E402, F401 -- intentional publ
     _scheduled_tasks_path,
     _task_from_schedule,
     _write_scheduled_tasks,
+    SCHEDULE_ACTIONS,
+    ScheduleLockTimeout,
+    ScheduleRefused,
+    ScheduleStoreUnreadable,
     check_scheduled_tasks,
     list_scheduled_tasks,
-    remove_scheduled_task,
+    load_schedule_store,
     resync_skill_schedules,
+    schedule_activity_projection,
+    schedule_tool_projection,
+    schedule_lifecycle_status,
+    schedule_transaction,
     sync_skill_schedules,
+)
+from supervisor.schedule_lifecycle import (  # noqa: E402, F401 -- intentional public re-exports
+    mutate_scheduled_task,
+    remove_scheduled_task,
     upsert_scheduled_task,
 )
 from supervisor.queue_snapshot import (  # noqa: E402, F401 -- intentional public re-exports

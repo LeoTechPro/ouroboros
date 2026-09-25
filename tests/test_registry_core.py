@@ -305,6 +305,8 @@ def test_registry_uses_typed_required_root_not_note_or_tool_name(tmp_path, monke
         code="OK",
         text="OK\n\n⚠️ AUTO_ROUTED_TO_ACTIVE_WORKSPACE: benign additive note",
         meta={"route_note": True},
+        producer_text="OK",
+        host_annotations=("⚠️ AUTO_ROUTED_TO_ACTIVE_WORKSPACE: benign additive note",),
     )
     assert len(calls) == 1
 

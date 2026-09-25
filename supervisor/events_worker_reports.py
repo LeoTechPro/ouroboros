@@ -104,6 +104,49 @@ def _handle_task_dispatch_resolved(evt: Dict[str, Any], ctx: Any) -> None:
     ctx.persist_queue_snapshot(reason="dispatch_resolved")
 
 
+def _handle_task_focus_updated(evt: Dict[str, Any], ctx: Any) -> None:
+    """Project a root-authored focus into the existing RUNNING snapshot."""
+    from ouroboros.focus import compact_focus
+    from supervisor.queue import _queue_lock
+
+    task_id = str(evt.get("task_id") or "").strip()
+    focus = compact_focus(evt.get("focus"))
+    if not task_id or focus is None or str(focus.get("author_task_id") or "") != task_id:
+        return
+    changed = False
+    with _queue_lock:
+        meta = ctx.RUNNING.get(task_id)
+        task = meta.get("task") if isinstance(meta, dict) else None
+        if not isinstance(task, dict):
+            return
+        if str(task.get("parent_task_id") or "").strip() or str(task.get("delegation_role") or "") == "subagent":
+            return
+        # The event is advisory transport.  The canonical result remains the
+        # lifecycle authority, so a focus queued just before completion cannot
+        # resurrect a terminal task in the queue projection.
+        drive_root = meta.get("budget_drive_root") if isinstance(meta, dict) else None
+        drive_root = drive_root or task.get("budget_drive_root") or getattr(ctx, "DRIVE_ROOT", None)
+        if drive_root:
+            try:
+                from ouroboros.task_results import STATUS_RUNNING, load_task_result
+
+                durable = load_task_result(drive_root, task_id)
+                if not isinstance(durable, dict) or str(durable.get("status") or "") != STATUS_RUNNING:
+                    return
+                durable_focus = compact_focus(durable.get("focus"))
+                if durable_focus != focus:
+                    return
+            except Exception:
+                return
+        prior_task = compact_focus(task.get("focus"))
+        if prior_task and str(prior_task.get("authored_at") or "") >= str(focus.get("authored_at") or ""):
+            return
+        task["focus"] = focus
+        changed = True
+    if changed:
+        ctx.persist_queue_snapshot(reason="task_focus_updated")
+
+
 def _handle_task_metrics(evt: Dict[str, Any], ctx: Any) -> None:
     payload = {
         "ts": str(evt.get("ts") or utc_now_iso()),

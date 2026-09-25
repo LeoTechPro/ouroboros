@@ -87,7 +87,10 @@ APPROVED_DELTAS: Mapping[str, Delta] = MappingProxyType({
     "MCP_DISABLED": Delta(False, "ok", True, "unavailable", "A.3", "an MCP provider that is off is unavailable, not a success"),
     "MCP_TOOL_DISALLOWED": Delta(False, "ok", True, "blocked", "A.3", "an MCP tool refused by policy is a denial, not a success"),
     "MCP_TOOL_ERROR": Delta(True, "error", True, "mcp_error", "A.17", "the MCP error gets its own bucket, homed to the blocking partition"),
-    "MCP_TOOL_NOT_FOUND": Delta(False, "ok", True, "unavailable", "A.3", "a missing MCP tool is unavailable, not a success"),
+    # Owner decision on #1262 (item 3): a name the current MCP catalog does not list
+    # is the caller's unknown tool, not a provider outage; a known disabled server
+    # or an unlisted catalog keeps `unavailable` (MCP_DISABLED, MCP_CATALOG_UNAVAILABLE).
+    "MCP_TOOL_NOT_FOUND": Delta(False, "ok", True, "unknown_tool", "A.1262.3", "a name absent from the MCP catalog is an unknown tool, not a success and not an outage"),
     "MCP_TOOL_TIMEOUT": Delta(False, "ok", True, "timeout", "A.3", "an expired MCP call is a timeout, not a success"),
     "MUTATIVE_SUBAGENTS_DISABLED": Delta(False, "ok", True, "blocked", "A.4", "a disabled mutative subagent is a denial"),
     "OCR_PDF_SCANNED_UNAVAILABLE": Delta(True, "error", True, "unavailable", "A.18", "unavailability gets its own status name; the report bucket is unchanged"),
@@ -185,7 +188,7 @@ APPROVED_DELTAS: Mapping[str, Delta] = MappingProxyType({
     "shape:extension_async_timeout": Delta(True, "error", True, "timeout", "A.18", "an expired extension handler is named a timeout; the report bucket is unchanged"),
     "shape:extension_not_live": Delta(True, "error", True, "unavailable", "A.18", "an extension that may not dispatch is unavailable; the report bucket is unchanged"),
     "shape:mcp_disabled": Delta(False, "ok", True, "unavailable", "A.3", "same fix as MCP_DISABLED, through the native code the provider publishes"),
-    "shape:mcp_tool_not_found": Delta(False, "ok", True, "unavailable", "A.3", "same fix as MCP_TOOL_NOT_FOUND, through the native code the provider publishes"),
+    "shape:mcp_tool_not_found": Delta(False, "ok", True, "unknown_tool", "A.1262.3", "same fix as MCP_TOOL_NOT_FOUND, through the native code the provider publishes"),
     "shape:mcp_transport_timeout": Delta(False, "ok", True, "timeout", "A.3", "same fix as MCP_TOOL_TIMEOUT, through the native code the provider publishes"),
     "shape:unknown_tool_extension_down": Delta(False, "ok", True, "unavailable", "A.1",
         "a call to a tool whose extension is not live was never a success; the registry publishes the more precise `unavailable` rather than `unknown_tool`"),
@@ -270,6 +273,18 @@ APPROVED_DELTAS: Mapping[str, Delta] = MappingProxyType({
     # same defect class the 329 OSWorld rows measured, on the composition seam.
     "compose:reported:route": Delta(False, "ok", True, "tool_reported_failure", "A.24", "a tool that reported its own failure is a failure, even behind an appended host note"),
     "compose:reported:route+safety": Delta(False, "ok", True, "tool_reported_failure", "A.24", "a tool that reported its own failure is a failure, even behind two appended host notes"),
+    # A.25 — cross-focus publication refusals.  The retired text chain only
+    # recognized the generic *_UNAVAILABLE suffix; stale/liveness names were
+    # warnings, while a TOOL_ prefix was still a generic execution failure.  The one identifier register now recovers
+    # the producer's substrate/policy split as typed results: an unavailable
+    # target or projection is policy-denied availability, while a stale or
+    # unauthorized publication is an explicit policy block.
+    "FOCUS_PROJECTION_UNAVAILABLE": Delta(True, "error", True, "unavailable", "A.25", "a direct focus projection the host cannot accept is unavailable, not a generic execution error"),
+    "FOCUS_TASK_NOT_LIVE": Delta(False, "ok", True, "unavailable", "A.25", "a focus update for a settled task has no live publication target"),
+    "FOCUS_STALE": Delta(False, "ok", True, "blocked", "A.25", "a newer focus wins the CAS and blocks the stale publication"),
+    "FOCUS_SOURCE_UNRESOLVED": Delta(False, "ok", True, "unavailable", "A.25", "a focus source the named reader refused or cannot answer is unavailable evidence, not a published focus"),
+    "FOCUS_SOURCE_UNRETAINED": Delta(False, "ok", True, "unavailable", "A.25", "a focus whose source answer could not be stored has no retained evidence to publish"),
+    "TOOL_FORBIDDEN": Delta(True, "error", True, "blocked", "A.25", "an unauthorized project/focus operation is a policy denial, not a generic tool failure"),
     # Owner's recovered transport WORK-ORDER B7 / #744: these producers now
     # publish existing codes for known refusals. No text-adapter policy changed.
     "native:LEGACY_BLOCKED:CHILD_RESULT_STALE": Delta(False, "ok", True, "blocked", "A.B7", "join_ledger refuses a disposition when the inspected child result changed"),
@@ -369,6 +384,19 @@ CURRENT_PRODUCER_CONTRACTS = {
     "SCOPE_UNCONFIRMED": (True, "tool_reported_failure"),
     "TOOL_ERROR": (True, "error"),
     "native:TOOL_REPORTED_FAILURE:TOOL_ERROR": (True, "tool_reported_failure"),
+    # Release admission split its one PREFLIGHT_BLOCKED text in two: a source it
+    # could not read is unavailable evidence, not a candidate defect. The new
+    # identifier reaches its text through the `code` variable, so it is declared
+    # in the corpus' interpolated list and answered live here — the retired pair
+    # never saw a tree that emitted it.
+    "PREFLIGHT_UNAVAILABLE": (True, "unavailable"),
+    # Peer admission adds current producers; the historical fixture stays intact.
+    "TASK_CANCEL_STATE_UNAVAILABLE": (True, "unavailable"),
+    # #1262: an enabled MCP server with no current listing makes a name's existence
+    # unknown — the provider's unavailability, never the caller's unknown tool.
+    "MCP_CATALOG_UNAVAILABLE": (True, "unavailable"),
+    "TASK_FORBIDDEN": (True, "blocked"),
+    "native:LEGACY_BLOCKED:TASK_FORBIDDEN": (True, "blocked"),
 }
 
 

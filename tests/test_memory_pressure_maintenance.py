@@ -27,6 +27,8 @@ class SourceReader:
     def finish(self, prompt):
         if self.answer:
             return self.answer
+        if prompt.startswith("Compare this draft memory"):
+            return "I retain the beginning, middle and last event, checked against the complete source."
         if "scratchpad working memory has" in prompt:
             return json.dumps({"knowledge_entries": [], "compressed_block": "I retain the beginning, middle and last event, including unresolved questions."})
         if prompt.startswith("Compress these older memory blocks"):
@@ -143,7 +145,9 @@ def test_pressure_reduces_whole_chronicle_and_one_huge_block_before_normal_send(
         assert json.loads((tmp_path / ref["read"]["arguments"]["path"]).read_text(encoding="utf-8")) == [original]
     journal = [json.loads(line) for line in memory.journal_path().read_text(encoding="utf-8").splitlines()]
     assert next(row for row in journal if row["type"] == "blocks_consolidated")["source_blocks"] == [scratch]
-    assert len(actor.sources) == 3 and all(actor.received)
+    # Two contiguous runs: each is compressed and then corrected against its complete
+    # sections through the retained-source route, plus the scratchpad source.
+    assert len(actor.sources) == 5 and all(actor.received)
     assert all("CURRENT GOAL: resolve the outstanding research question." in source for source in actor.received)
     # The caller can now construct its normal first request; maintenance has
     # not changed the identity or truncated any original source to achieve fit.
@@ -166,7 +170,7 @@ def test_force_tail_is_explicit_and_advances_a_huge_short_dialogue_once(tmp_path
         fits=lambda: meta.exists() and json.loads(meta.read_text(encoding="utf-8")).get("last_consolidated_offset") == 1)
     assert result["status"] == "fitting"
     assert chat.read_bytes() == before
-    assert len(actor.calls) == 1  # the tail now fits, so no additional era call
+    assert len(actor.calls) == 2  # one draft and its correction; the tail now fits, so no era call
     assert sum(row["message_count"] for row in json.loads(blocks.read_text(encoding="utf-8"))) == 1
     assert not c.should_consolidate(meta, chat)
 

@@ -771,20 +771,38 @@ def project_terminal_result_event(
     return event
 
 
-def enqueue_terminal_delivery(
+ENQUEUE_QUEUED = "queued"
+ENQUEUE_ALREADY_DELIVERED = "already_delivered"
+ENQUEUE_QUEUED_UNREGISTERED = "queued_unregistered"
+ENQUEUE_UNAVAILABLE = "unavailable"
+ENQUEUE_OUTCOMES = (
+    ENQUEUE_QUEUED, ENQUEUE_ALREADY_DELIVERED, ENQUEUE_QUEUED_UNREGISTERED, ENQUEUE_UNAVAILABLE,
+)
+
+
+def enqueue_terminal_delivery_outcome(
     drive_root: Any, event: Dict[str, Any], *, event_queue: Any = None,
-) -> bool:
-    """Dedupe, register as owed (idempotent), and enqueue one built event.
+) -> str:
+    """Dedupe, register as owed (idempotent), enqueue; answer one typed word.
 
     The enqueue half of the seam: safe to call after the same event was already
     registered by the owed-before-settle ordering — registration is keyed by
-    ``delivery_id`` and no-ops on a repeat.
+    ``delivery_id`` and no-ops on a repeat. Four facts a caller may branch on:
+    ``queued`` (owed row written, live send queued), ``already_delivered``
+    (this id already went out — nothing is owed, nothing failed),
+    ``queued_unregistered`` (the live send is queued but the owed row could not
+    be written: a crash before the send loses it — the ``register`` seam already
+    emitted its typed event), ``unavailable`` (no event, or the queue refused).
+    A boolean collapsed the first two with the last two; a receipt consumer read
+    an idempotent repeat as a failure and a lost owed row as durable.
     """
     did = str((event or {}).get("delivery_id") or "")
     tid = str((event or {}).get("task_id") or "")
-    if not event or already_delivered(pathlib.Path(drive_root), did):
-        return False
-    register_pending_delivery(pathlib.Path(drive_root), event)
+    if not event:
+        return ENQUEUE_UNAVAILABLE
+    if already_delivered(pathlib.Path(drive_root), did):
+        return ENQUEUE_ALREADY_DELIVERED
+    registered = register_pending_delivery(pathlib.Path(drive_root), event)
     try:
         if event_queue is None:
             from supervisor import workers
@@ -793,8 +811,18 @@ def enqueue_terminal_delivery(
         event_queue.put(dict(event))
     except Exception:
         log.warning("terminal-delivery enqueue failed for %s", tid, exc_info=True)
-        return False
-    return True
+        return ENQUEUE_UNAVAILABLE
+    return ENQUEUE_QUEUED if registered else ENQUEUE_QUEUED_UNREGISTERED
+
+
+def enqueue_terminal_delivery(
+    drive_root: Any, event: Dict[str, Any], *, event_queue: Any = None,
+) -> bool:
+    """Boolean projection of ``enqueue_terminal_delivery_outcome``: was a live
+    send queued? (An already-delivered id and a refused queue both read False —
+    callers that must tell those apart use the typed outcome.)"""
+    outcome = enqueue_terminal_delivery_outcome(drive_root, event, event_queue=event_queue)
+    return outcome in (ENQUEUE_QUEUED, ENQUEUE_QUEUED_UNREGISTERED)
 
 
 def deliver_completed_result(

@@ -544,6 +544,9 @@ def _promote_chat_to_task_outcome(evt: Dict[str, Any], ctx: Any) -> Dict[str, An
                     "status": "unconfirmed",
                     "reason": str(receipt.get("reason") or "routing_receipt_persist_failed"),
                 }
+            from ouroboros.project_handoff import enqueue_project_handoff
+
+            enqueue_project_handoff(ctx.DRIVE_ROOT, str(outcome.get("task_id") or task_id))
             _publish_routing_ack(
                 ctx,
                 evt,
@@ -732,6 +735,10 @@ def _handle_ensure_project_scope(evt: Dict[str, Any], ctx: Any) -> None:
     if not isinstance(outcome, dict):
         outcome = {"status": "unconfirmed", "reason": "handler_returned_no_outcome"}
     target = str(outcome.get("project_id") or evt.get("project_id") or "")
+    if outcome.get("status") == "delivered":
+        from ouroboros.project_handoff import enqueue_project_handoff
+
+        enqueue_project_handoff(ctx.DRIVE_ROOT, str(evt.get("task_id") or ""))
     label = ""
     try:
         from ouroboros.projects_registry import get_project

@@ -106,9 +106,12 @@ _PREFLIGHT_CASES = [
     _PREFLIGHT_CASES,
     ids=[c[0] for c in _PREFLIGHT_CASES],
 )
-def test_preflight_check(case_id, message, staged_files, expected):
+def test_preflight_check(case_id, message, staged_files, expected, monkeypatch, tmp_path):
     review = _get_review_module()
-    result = review._preflight_check(message, staged_files, "/tmp")
+    values = {"VERSION": "3.24.0", "README.md":
+              "[![Version 3.24.0](https://img.shields.io/badge/version-3.24.0-green.svg)]\n| 3.24.0 | release |"}
+    monkeypatch.setattr(review, "_git_show_staged", lambda repo, path: values.get(path))
+    result = review._preflight_check(message, staged_files, tmp_path)
     if expected is None:
         assert result is None, f"expected pass, got: {result!r}"
     else:
@@ -142,7 +145,7 @@ class TestPreflightCheck7P9Limits:
                 return 'version = "4.99.0"'
             if path == "docs/ARCHITECTURE.md":
                 return "# Ouroboros v4.99.0 — "
-            return ""
+            return None
 
         monkeypatch.setattr(review, "_git_show_staged", _fake_git_show)
         staged = f"M  VERSION\nM  README.md\nM  tests/test_foo.py\n{extra_staged}".strip()
@@ -234,7 +237,7 @@ class TestPreflightCheck7P9Limits:
         def _fake_git_show(repo_dir, path: str) -> str:
             if path == "README.md":
                 return bloated_readme
-            return ""
+            return None
 
         monkeypatch.setattr(review, "_git_show_staged", _fake_git_show)
         # Only README staged — no VERSION, no ouroboros/*.py.
@@ -262,7 +265,7 @@ class TestPreflightCheck7P9Limits:
                 "README.md": readme,
                 "docs/ARCHITECTURE.md": "# Ouroboros v4.99.0 — Architecture",
             }
-            return values.get(path, "")
+            return values.get(path)
 
         monkeypatch.setattr(review, "_git_show_staged", _fake_git_show)
         result = review._preflight_check(
@@ -301,7 +304,7 @@ class TestPreflightCheck7P9Limits:
                 "README.md": readme,
                 "docs/ARCHITECTURE.md": "# Ouroboros v4.99.0 — Architecture",
             }
-            return values.get(path, "")
+            return values.get(path)
 
         monkeypatch.setattr(review, "_git_show_staged", _fake_git_show)
         result = review._preflight_check(
@@ -314,21 +317,18 @@ class TestPreflightCheck7P9Limits:
         assert result is not None and "PREFLIGHT_BLOCKED" in result
         assert 'web/package-lock.json (expected both root "version" entries = "4.99.0")' in result
 
-    def test_check7_passes_when_readme_not_staged(self, monkeypatch):
-        """VERSION staged but README not staged → check 7 silently skips
-        (git show returns empty string for an un-staged README)."""
+    def test_missing_readme_reports_staging_and_source_problems(self, monkeypatch):
+        """Missing indexed README retains the staging finding beside source unavailability."""
         review = _get_review_module()
 
         def _fake_git_show(repo_dir, path: str) -> str:
             if path == "VERSION":
                 return "4.99.0"
-            return ""  # README absent from staged index
+            return None  # README absent from staged index
 
         monkeypatch.setattr(review, "_git_show_staged", _fake_git_show)
         result = review._preflight_check(
             "v4.99.0 bump", "M  VERSION\nM  tests/test_foo.py", "/repo"
         )
-        # Check 1 fires first (README.md missing from staged when VERSION staged).
-        # This is acceptable — the missing README is caught by check 1, not check 7.
-        # Either result is valid here; we just verify no crash.
-        assert result is None or "PREFLIGHT_BLOCKED" in result
+        assert result is not None and "Missing from staged: README.md" in result
+        assert "PREFLIGHT_UNAVAILABLE" in result

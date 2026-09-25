@@ -32,12 +32,20 @@ CORE_TOOL_NAMES: frozenset[str] = frozenset({
     # can register it without an enable_tools detour. Deliberately absent from
     # the subagent profiles below — a child may not mint future root tasks.
     "schedule_followup",
-    "schedule_subagent", "integrate_subagent_patch", "compare_subagent_patches",
+    "schedule_subagent", "manage_schedules", "integrate_subagent_patch", "compare_subagent_patches",
     "integrate_delegated_patch",
     "wait_task", "wait_tasks", "get_task_result",
+    # Serial addressed turns: wait for an unread mailbox entry without spending
+    # model rounds (slot held, clamped to the per-call ceiling, delivers nothing).
+    "await_messages",
     # D#7 soft-join child controls (siblings of steer_task): inspect/decide a child's fate
     # before finalizing (peek = pure read, discard = explicit abandon, cancel = real stop).
     "cancel_task", "peek_task", "discard_child_result", "override_delegation_constraint",
+    # The same family (#1196, owner Q9): a resumed parent selects each of its OWN
+    # budget-paused children explicitly. It belongs in the round-one envelope for
+    # the reason cancel_task does — a task that just came back from a pause must
+    # not need an enable_tools detour to continue the children it still needs.
+    "resume_child_task",
     # Task-tree coordination must be in the round-one envelope so a parent can publish the
     # shared frame BEFORE fanning out interdependent children (no enable_tools detour).
     "tree_note", "tree_read",
@@ -48,7 +56,7 @@ CORE_TOOL_NAMES: frozenset[str] = frozenset({
     "list_projects", "route_to_project", "promote_chat_to_task", "steer_task",
     "ensure_project_scope",
     *COGNITIVE_MEMORY_TOOL_NAMES,
-    "recent_tasks",
+    "recent_tasks", "live_roots", "update_focus",
     "web_search",
     "browse_page", "browser_action", "analyze_screenshot", "view_image",
     "ocr_pdf", "youtube_transcript", "extract_video_frames",
@@ -81,9 +89,18 @@ LOCAL_READONLY_SUBAGENT_TOOL_NAMES: frozenset[str] = frozenset({
     "vcs_status", "vcs_diff",
     "knowledge_read", "knowledge_list",
     "chat_history", "recent_tasks", "get_task_result", "wait_task", "wait_tasks",
+    "await_messages",
     "escalate",
     "forward_to_worker", "peek_task", "cancel_task", "discard_child_result",
+    # A recursive parent selects its OWN budget-paused children (#1196, Q9); the
+    # supervisor checks lineage and the root's live grant, so no authority the
+    # child lacks is widened — the same reasoning as cancel_task above.
+    "resume_child_task",
     "schedule_subagent",
+    # Reading the schedule table is research: a child asked about what this mind
+    # has standing can see it. The tool's own authority check refuses every
+    # MUTATING action to a delegated task, so the name grants no control here.
+    "manage_schedules",
     # Task-tree coordination: a child reads the shared frame and raises beacons. tree_note
     # is a bounded tree-scoped write; its tagged child-result disposition branch also
     # updates the existing child result through join_ledger's lineage/hash authority.
@@ -97,6 +114,9 @@ LOCAL_READONLY_SUBAGENT_TOOL_NAMES: frozenset[str] = frozenset({
     "web_search", "browse_page", "browser_action", "analyze_screenshot", "vlm_query", "view_image",
     # Bounded media projection: writes derived frames only under artifact_store/video_frames.
     "ocr_pdf", "youtube_transcript", "extract_video_frames",
+    # Reads this child's own callable catalog (the name-miss answer points here);
+    # it grants nothing, unlike enable_tools, which stays Nano schema selection.
+    "list_available_tools",
 })
 
 ACTING_SUBAGENT_MODE: str = "acting_subagent"
@@ -122,8 +142,10 @@ ACTING_SUBAGENT_TOOL_NAMES: frozenset[str] = frozenset({
     "start_service", "service_status", "service_logs", "stop_service",
     "integrate_subagent_patch", "compare_subagent_patches",
     "schedule_subagent", "wait_task", "wait_tasks", "get_task_result",
+    "await_messages",
     "escalate",
     "forward_to_worker", "peek_task", "cancel_task", "discard_child_result",
+    "resume_child_task",
     "verify_and_record",
     "knowledge_read", "knowledge_list",
     "tree_note", "tree_read", "override_delegation_constraint",
@@ -190,6 +212,7 @@ UNTRUNCATED_TOOL_RESULTS: frozenset[str] = frozenset({
     "get_task_result",
     "wait_task",
     "wait_tasks",
+    "await_messages",
 })
 
 # Cognitive artifacts must not be truncated.
@@ -231,6 +254,12 @@ TOOL_RESULT_LIMITS: dict[str, int] = {
     # tree_read returns the shared task-tree coordination tail (up to 200 entries); the 15k
     # default would truncate the swarm blackboard and defeat the coordination contract.
     "tree_read": 80_000,
+    # live_roots pages up to 100 catalogue rows of structured JSON; the 15k
+    # default would head-truncate a valid page into unparseable text.
+    "live_roots": 80_000,
+    # A selected discovery namespace lists every callable tool of one MCP server
+    # or the whole built-in set with purposes; the default cap would cut it.
+    "list_available_tools": 80_000,
     # apply_patch results carry per-hunk diagnostics, edit_batch per-edit ones
     # (an aborted batch reports EVERY failed edit so one retry can fix them all);
     # write_file appends the overwrite diff.
@@ -307,7 +336,7 @@ OBSERVE_WORLD_MUTATION_TOOLS: frozenset[str] = frozenset({
     # starting or steering work (steer_task stays: the nanny of a running campaign)
     "promote_chat_to_task", "schedule_subagent", "schedule_followup", "plan_task",
     "route_to_project", "ensure_project_scope", "delegate_start", "initiate_presence",
-    "cancel_task", "override_delegation_constraint", "request_deep_self_review",
+    "cancel_task", "resume_child_task", "override_delegation_constraint", "request_deep_self_review",
     # writing files, running processes, integrating patches
     "write_file", "edit_text", "apply_patch", "edit_batch",
     "run_command", "run_script", "start_service", "stop_service", "verify_and_record",
@@ -316,6 +345,12 @@ OBSERVE_WORLD_MUTATION_TOOLS: frozenset[str] = frozenset({
     "vcs_pull_ff", "vcs_restore", "vcs_revert",
     "fetch_pr_ref", "create_integration_branch", "cherry_pick_pr_commits",
     "stage_adaptations", "stage_pr_merge",
+    # disposing a captured patch — into a Git root, or LIVE into an installed
+    # skill payload; an orphan capture may belong to an unrelated earlier task,
+    # so a read-only-children rule alone does not cover this path
+    "integrate_delegated_patch", "integrate_subagent_patch",
+    # pushes docs/evolution.json to the public dashboard through the GitHub API
+    "generate_evolution_stats",
     # the world beyond the repository: forms, skills, project notes
     "browser_action", "submit_skill_to_hub", "toggle_skill", "skill_owner_action",
     "journal_write", "workpad_write",

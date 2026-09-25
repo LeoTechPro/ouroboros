@@ -325,11 +325,12 @@ def test_consciousness_prompt_is_the_wake_message_of_an_ordinary_main_turn():
     is its USER message: no private capability catalog, no round or interval limits."""
     consciousness = _read("prompts/CONSCIOUSNESS.md")
 
-    assert consciousness.startswith("[Wake-up · {reason}]")
-    assert "Doing nothing is a fine outcome" in consciousness
-    assert "`set_next_wakeup`" in consciousness and "`escalate`" in consciousness
-    assert "recent_tasks" in consciousness
-    for retired in ("You can:", "up to 10 rounds", "Default wakeup", "background consciousness mode"):
+    assert consciousness.startswith("You are Ouroboros. No one has asked for a task; this turn is yours.")
+    assert "A pause is a legitimate decision" in consciousness
+    assert "Distinguish incremental cash cost from subscription quota" in consciousness
+    assert "ordinary turn, not an assigned deliverable" in consciousness
+    for retired in ("You can:", "up to 10 rounds", "Default wakeup", "background consciousness mode",
+                    "Doing nothing is a fine outcome", "`set_next_wakeup`", "`escalate`"):
         assert retired not in consciousness, retired
 
 

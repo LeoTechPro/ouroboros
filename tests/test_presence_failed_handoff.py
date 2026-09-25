@@ -19,6 +19,7 @@ def _failed_parent(tmp_path, *, outcome="deferred", admission="scheduled", usage
     created = []
     text = "Current partial result after the parent stopped."
     terminal_usage = {"execution_status": "infra_failed", "reason_code": "provider_unavailable",
+                      "terminal_origin": "model_final",
                       "terminal_provider_notice": "Provider unavailable; child work remains admitted."} if usage is None else usage
 
     class Agent:
@@ -52,7 +53,8 @@ def test_failed_parent_and_cached_result_keep_admitted_child_pollable(tmp_path, 
     result, stored, text = _failed_parent(tmp_path, outcome=outcome, request_text=request_text)
     assert result.outcome == "deferred" and result.work_ref == "managed-work"
     assert result.delivery_reporting_version == 1
-    assert result.text.startswith(text) and result.text.count("[Host status]") == 1
+    assert result.text == text
+    assert stored["terminal_provider_notice"] == "Provider unavailable; child work remains admitted."
     assert "Outdated proposed reply" not in result.text
     assert stored["metadata"]["presence_outcome"] == "deferred"
     assert stored["metadata"]["presence_result_text"] == result.text
@@ -62,7 +64,8 @@ def test_failed_parent_and_cached_result_keep_admitted_child_pollable(tmp_path, 
 
 @pytest.mark.parametrize("admission", ["scheduled", "unconfirmed", "rejected", ""])
 def test_forced_best_effort_requires_positive_admission_and_keeps_current_body(tmp_path, admission):
-    usage = {"execution_status": "failed", "reason_code": "round_limit", "_best_effort_extracted": True}
+    usage = {"execution_status": "failed", "reason_code": "round_limit", "_best_effort_extracted": True,
+             "terminal_origin": "model_final"}
     result, stored, text = _failed_parent(tmp_path, outcome="silent", admission=admission,
                                         usage=usage, accepted=True)
     assert result.outcome == ("deferred" if admission == "scheduled" else "message")
@@ -74,7 +77,7 @@ def test_forced_best_effort_requires_positive_admission_and_keeps_current_body(t
 
 @pytest.mark.parametrize("outcome", ["deferred", "silent", "tool_delivered"])
 def test_successful_replacement_answer_does_not_inherit_old_outcome(tmp_path, outcome):
-    result, stored, text = _failed_parent(tmp_path, outcome=outcome, usage={})
+    result, stored, text = _failed_parent(tmp_path, outcome=outcome, usage={"terminal_origin": "model_final"})
     assert result.outcome == "message" and result.text == text
     assert result.work_ref == "managed-work"
     assert stored["status"] == "completed" and stored["outcome_axes"]["execution"]["status"] == "ok"
@@ -82,6 +85,6 @@ def test_successful_replacement_answer_does_not_inherit_old_outcome(tmp_path, ou
 
 @pytest.mark.parametrize("outcome", ["silent", "tool_delivered"])
 def test_accepted_successful_nonmessage_remains_nonmessage(tmp_path, outcome):
-    result, stored, _text = _failed_parent(tmp_path, outcome=outcome, usage={}, accepted=True)
+    result, stored, _text = _failed_parent(tmp_path, outcome=outcome, usage={"terminal_origin": "model_final"}, accepted=True)
     assert result.outcome == outcome and result.text == ""
     assert stored["status"] == "completed"
