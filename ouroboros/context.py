@@ -1359,6 +1359,8 @@ def _capture_context_core(
         presence_section = build_presence_context_section(
             pathlib.Path(env.drive_root),
             task_metadata.get("presence"),
+            str(task.get("id") or ""),
+            status_root=canonical_root,  # a forked promoted root finds its binding's work canonically
         )
         if presence_section:
             dynamic_parts.append(presence_section)
