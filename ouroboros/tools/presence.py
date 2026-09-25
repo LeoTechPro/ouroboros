@@ -302,7 +302,7 @@ def _initiate_presence(
 def _cancel_presence_work(ctx: ToolContext, work_ref: str, reason: str = "") -> str:
     """Cancel work started from this presence binding (any of its conversations) or this turn's own tree."""
 
-    from ouroboros.presence_authority import presence_work_refusal
+    from ouroboros.presence_authority import presence_caller_binding, presence_work_refusal
     from ouroboros.task_results import validate_task_id
     from ouroboros.tool_access import canonical_data_root
     from ouroboros.tools.join_ledger import _cancel_task
@@ -312,7 +312,8 @@ def _cancel_presence_work(ctx: ToolContext, work_ref: str, reason: str = "") -> 
     except ValueError as exc:
         return _publish_tool_result(ctx, ToolResult(status="error", code="TOOL_ARG_ERROR", text=(f"ERROR: PRESENCE_WORK_REF_INVALID: {exc}")))
     refusal = presence_work_refusal(ctx, task_id, drive_root=canonical_data_root(ctx), same_tree=True)
-    if refusal or not isinstance((getattr(ctx, "task_metadata", {}) or {}).get("presence"), dict):
+    # A speaker, or a root acting only for its binding: the binding authority decides, not speaker metadata.
+    if refusal or presence_caller_binding(ctx) is None:
         return _publish_tool_result(ctx, ToolResult(status="blocked", code="ACCESS_BLOCKED", text=(
             "ERROR: PRESENCE_WORK_NOT_CORRELATED: " + (refusal.split(": ", 1)[-1] or "this is not a presence task."))))
     return _cancel_task(ctx, task_id, reason)

@@ -385,3 +385,48 @@ def test_forced_prompt_and_facts_read_the_canonical_root_on_a_forked_drive(tmp_p
                                           metadata={"budget_drive_root": str(canonical)})
     prompt = str(calls[-1][-1]["content"])
     assert 'Sends confirmed for this task so far: "Canonical receipt"' in prompt
+
+
+EARLIER = "Earlier record: Q1 figures verified; Q2 not yet checked."
+
+
+@pytest.mark.parametrize("body,record,outcome,spoken,declaration", [
+    # A valid keep retains the earlier answer as the record and still speaks its declaration.
+    ({"delivery_control": "keep"}, EARLIER, "message", "Fresh reply", {"status": "declared"}),
+    ({"delivery_control": "replace", "full_answer": RECORD}, RECORD, "message", "Fresh reply", {"status": "declared"}),
+    # A rejected envelope keeps the earlier answer as the record: its fresh reply is never spoken beside it.
+    ({"delivery_control": "replace", "full_answer": ""}, EARLIER, "silent", "",
+     {"status": "invalid", "reason": "the delivery-control envelope was rejected"}),
+    ({"delivery_control": "revise", "full_answer": RECORD}, EARLIER, "silent", "",
+     {"status": "invalid", "reason": "the delivery-control envelope was rejected"}),
+    ({"full_answer": RECORD}, EARLIER, "silent", "",
+     {"status": "invalid", "reason": "the delivery-control envelope was rejected"}),
+], ids=["keep", "replace", "empty_replace_rejected", "unknown_verb_rejected", "missing_verb_rejected"])
+def test_a_declaration_speaks_only_beside_the_answer_its_own_envelope_authorized(
+        tmp_path, monkeypatch, body, record, outcome, spoken, declaration):
+    from tests.test_delivery_forced_finalization import _arm_latch_with_candidate, _forced_test_context
+
+    monkeypatch.setenv("OUROBOROS_TASK_REVIEW_MODE", "off")
+    forced_loop, registry, limit_ctx, trace = _forced_test_context(tmp_path)
+    ctx = registry._ctx
+    ctx.task_contract = {"capability_ceiling": presence_ceiling_payload(_admission().capability_ceiling)}
+    ctx.task_metadata = {**ctx.task_metadata, "presence": _presence()}
+    _arm_latch_with_candidate(forced_loop, registry, limit_ctx, trace, text=EARLIER)  # a live earlier answer
+    reply = json.dumps({**body, "presence_finish": {"outcome": "message", "message": "Fresh reply"}})
+    monkeypatch.setattr(forced_loop, "call_llm_with_retry",
+                        lambda *_a, **_k: ({"role": "assistant", "content": reply}, 0.0))
+
+    text, usage, trace = forced_loop._forced_final_answer(
+        limit_ctx, prompt="finalize", fallback_text="fallback", reason_code="round_limit")
+    task = {"id": "parent1", "type": "presence", "_presence_turn": True, "chat_id": 7, "text": "Please help",
+            "metadata": {"presence": _presence()}, "_skip_post_task_synthesis": True}
+    events = []
+    pipeline.emit_task_results(SimpleNamespace(drive_root=tmp_path, repo_dir=tmp_path), None, None,
+                               events, task, text, usage, trace, 0.0, tmp_path / "logs", ctx=ctx)
+    result = next(row for row in events if row["type"] == "presence_result")
+    stored = load_task_result(tmp_path, "parent1")
+
+    assert text.startswith(record) and stored["result"].startswith(record)
+    assert (result["outcome"], result["text"]) == (outcome, spoken)
+    assert stored["metadata"]["presence_declaration"] == declaration
+    assert stored["metadata"]["presence_result_text"] == spoken

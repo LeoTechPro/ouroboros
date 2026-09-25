@@ -935,6 +935,7 @@ def _resolve_forced_delivery_control_body(
         control_kind != "none"
         or (parsed is None and strip_protocol_fence(raw).startswith("{"))
         or bool(getattr(parsed, "has_duplicate_keys", False))
+        or bool(envelope_keys and isinstance(parsed, dict) and set(parsed).intersection(envelope_keys))
     )
     if not protocol_intent:
         # Ordinary prose under an armed latch stands (a control object quoted

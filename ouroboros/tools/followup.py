@@ -440,11 +440,15 @@ def _register_followup(ctx: ToolContext, task_id: str, drive_root: Any,
     record["task"]["metadata"].update(consciousness_origin_metadata(metadata_src))
     # The same Presence carrier a promote keeps: a speaker's metadata, or the binding a
     # promoted descendant root acts for; the ceiling rides by value and no Project is chosen.
+    # A new root authors its own objective, context and acceptance premises;
+    # only the origin's authority and general constraints survive by value.
     contract = getattr(ctx, "task_contract", None)
     carrier = presence_root_carrier(metadata_src, task_contract=contract)
     if carrier and isinstance(contract, dict):
         record["task"]["metadata"].update(carrier)
-        record["task"]["task_contract"] = dict(contract)
+        record["task"]["task_contract"] = {
+            key: value for key, value in contract.items()
+            if key not in {"objective", "context", "expected_output", "acceptance_claims", "success_criteria"}}
         record["task"].pop("project_id", None)
     from supervisor.queue import ScheduleRefused, ScheduleStoreUnreadable
 

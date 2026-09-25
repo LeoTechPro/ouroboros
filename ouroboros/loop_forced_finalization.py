@@ -1117,6 +1117,15 @@ def _resolve_forced_delivery_control(
             envelope_keys=("presence_finish",) if presence_armed else (),
         )
     )
+    if presence_armed and isinstance(tools_ctx._presence_forced_pending, dict):
+        from ouroboros.loop_delivery import _parse_delivery_control_body
+
+        parsed, _, _ = _parse_delivery_control_body(extracted)
+        if degraded or not (isinstance(parsed, dict) and parsed.get("delivery_control") in {"keep", "replace"}):
+            # A declaration cannot speak unless its outer control positively chose the final record.
+            tools_ctx._presence_forced_pending = None
+            tools_ctx._presence_forced_declaration = {
+                "status": "invalid", "reason": "the delivery-control envelope was rejected"}
     if consumed:
         tools_ctx._delivery_control_required = False
         from ouroboros.loop_delivery import _parse_delivery_control_body, apply_delivery_subject_decision

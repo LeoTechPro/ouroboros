@@ -368,6 +368,31 @@ def test_selected_cancel_and_forward_refuse_foreign_work_before_any_effect(tmp_p
         "forward_to_worker", {"task_id": "mine", "message": "new fact"})
 
 
+def test_a_root_acting_only_for_its_binding_cancels_that_bindings_work_and_nothing_foreign(tmp_path):
+    from ouroboros.tools.presence import get_tools
+
+    _work(tmp_path, "queued-thread", "scheduled", key=THREAD, root_task_id="queued-thread")
+    _queue(tmp_path, pending=[{"id": "queued-thread", "delegation_role": "root",
+                               "metadata": {"presence": _presence(key=THREAD)}}])
+    _work(tmp_path, "foreign", "running", binding=OTHER)
+    _work(tmp_path, "owner-root", "running", binding="")
+    cancel = next(item for item in get_tools() if item.name == "presence_cancel_work").handler
+    # A root a delegated descendant promoted holds the binding authority, never speaker metadata.
+    ctx = _cancel_ctx(tmp_path)
+    ctx.task_id = "descendant-root"
+    ctx.task_metadata = {"presence_binding_authority": {"binding_id": BINDING},
+                         "delegation_role": "root", "root_task_id": "descendant-root"}
+
+    for target in ("foreign", "owner-root"):
+        assert cancel(ctx, target, "stop").startswith("ERROR: PRESENCE_WORK_NOT_CORRELATED")
+    ordinary = types.SimpleNamespace(**{**vars(ctx), "task_metadata": {}, "task_contract": {}})
+    assert cancel(ordinary, "queued-thread").startswith("ERROR: PRESENCE_WORK_NOT_CORRELATED")
+    assert _intents(tmp_path) == {}
+    out = cancel(ctx, "queued-thread", "superseded by the new audit")
+    assert out.startswith("Cancel requested: queued-thread"), out
+    assert "queued-thread" in json.dumps(_intents(tmp_path))
+
+
 # --- canonical provenance from admission; the work endpoint and context read it ----
 
 def test_scheduled_presence_promotion_is_canonical_and_pollable_while_queued(tmp_path, monkeypatch):
