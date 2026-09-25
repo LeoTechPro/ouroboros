@@ -805,3 +805,49 @@ test('a late answer says where it went', async () => {
         } finally { fx.restore(); }
     }
 });
+
+test('the host facts line sits under the question when the card carries it and is absent otherwise', () => {
+    const fx = fixture();
+    const facts = 'Asked by task t-1, started by your message of 2026-09-25 00:21 UTC; '
+        + 'your last message in this chat: 2026-09-25 00:21 UTC (47 minutes before this question).';
+    try {
+        const card = fx.decision.buildQuizCard({ ...WS_MSG, quiz_id: 'qz-facts', host_facts: facts });
+        const line = card.querySelector('.chat-quiz-host-facts');
+        assert.equal(line.textContent, facts);
+        // Plain text directly under the question, never through the markdown pipeline.
+        assert.equal(line.innerHTML, undefined);
+        const question = card.querySelector('.chat-quiz-question');
+        assert.equal(question.nextElementSibling, line);
+        // A stored history row nests the quiz; the sentence rides the nested block.
+        const replay = fx.decision.buildQuizCard({ task_id: 't-1', text: WS_MSG.question,
+            quiz: { ...WS_MSG, quiz_id: 'qz-facts-replay', host_facts: facts } });
+        assert.equal(replay.querySelector('.chat-quiz-host-facts').textContent, facts);
+        const bare = fx.decision.buildQuizCard({ ...WS_MSG, quiz_id: 'qz-bare' });
+        assert.equal(bare.querySelector('.chat-quiz-host-facts'), null);
+        const empty = fx.decision.buildQuizCard({ ...WS_MSG, quiz_id: 'qz-empty', host_facts: '' });
+        assert.equal(empty.querySelector('.chat-quiz-host-facts'), null);
+        // A later, richer delivery of an already rendered card adds the line once.
+        assert.equal(fx.decision.buildQuizCard({ ...WS_MSG, quiz_id: 'qz-bare', host_facts: facts }), null);
+        assert.equal(bare.querySelectorAll('.chat-quiz-host-facts').length, 1);
+        assert.equal(bare.querySelector('.chat-quiz-question').nextElementSibling.textContent, facts);
+        fx.decision.buildQuizCard({ ...WS_MSG, quiz_id: 'qz-bare', host_facts: facts });
+        assert.equal(bare.querySelectorAll('.chat-quiz-host-facts').length, 1);
+    } finally { fx.restore(); }
+});
+
+test('a Main mirror of a Project question carries the host facts line from its pointer row', () => {
+    const column = new NodeStub();
+    const fx = fixture({ isMain: true,
+        frameNode: (_msg, card) => { const bubble = new NodeStub(); bubble.append(card); return bubble; },
+        insertMessageNode: (node) => { column.append(node); return true; } });
+    const row = { role: 'system', system_type: 'project_question_pointer', task_id: 't-9', quiz_id: 'qz-9',
+        project_id: 'p1', project_chat_id: 23, project_name: 'Storage', ts: '2026-09-25T00:00:00+00:00',
+        quiz_state: 'open', question: 'Merge now?', options: ['Yes', 'No'] };
+    try {
+        assert.ok(fx.decision.appendQuestionPointer({ ...row, host_facts: 'Asked by task t-9, origin unknown.' }));
+        const card = column.children[0].children[0];
+        assert.equal(card.querySelector('.chat-quiz-host-facts').textContent, 'Asked by task t-9, origin unknown.');
+        assert.ok(fx.decision.appendQuestionPointer({ ...row, task_id: 't-10' }));
+        assert.equal(column.children[1].children[0].querySelector('.chat-quiz-host-facts'), null);
+    } finally { fx.restore(); }
+});

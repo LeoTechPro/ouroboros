@@ -206,6 +206,7 @@ def write_owner_message(
     client_surface: Optional[Dict[str, Any]] = None,
     attachment_manifest: Optional[List[Dict[str, Any]]] = None,
     client_message_id: str = "",
+    late_answer: Optional[Dict[str, Any]] = None,
 ) -> bool:
     """Write an owner message or typed control entry to a task's mailbox.
 
@@ -213,6 +214,11 @@ def write_owner_message(
     (additively, like ``client_surface``) only when the writer knows it
     STRUCTURALLY — never parsed back out of ``msg_id``, whose shape is a
     transport key each producer composes for its own dedupe.
+
+    ``late_answer`` is the typed ``{task_id, quiz_id}`` provenance of an owner
+    message that answers a finished task's quiz card (stored additively when
+    valid): the drain rebuilds the card's frame for the model from it, while
+    ``text`` stays the owner's own words.
     """
     path = _mailbox_path(drive_root, task_id)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -224,6 +230,11 @@ def write_owner_message(
     }
     if str(client_message_id or ""):
         entry["client_message_id"] = str(client_message_id)
+    from ouroboros.owner_quiz import late_answer_ref
+
+    late_ref = late_answer_ref(late_answer)
+    if late_ref is not None:
+        entry["late_answer"] = late_ref
     if isinstance(client_surface, dict) and client_surface:
         # Owner Surface Fact (additive, like ``ts``): which client surface sent
         # this follow-up, so the loop can note a mid-task device change.
@@ -680,6 +691,10 @@ def drain_owner_entries(
                 # out here is a written fact nobody can read.
                 if str(entry.get("client_message_id") or ""):
                     drained["client_message_id"] = str(entry["client_message_id"])
+                # Same for a late quiz answer's typed provenance: the drain
+                # rebuilds the card frame for the model from it.
+                if isinstance(entry.get("late_answer"), dict):
+                    drained["late_answer"] = dict(entry["late_answer"])
                 if isinstance(entry.get("attachment_manifest"), list):
                     drained["attachment_manifest"] = [
                         dict(item) for item in entry["attachment_manifest"]

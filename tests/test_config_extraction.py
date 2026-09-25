@@ -318,5 +318,6 @@ def test_settings_extraction_size_bounds_have_meaningful_headroom():
     }
     assert counts["ouroboros.config"] <= 1000
     assert all(count <= 1000 for count in counts.values())
-    assert counts["ouroboros.settings_defaults"] <= 500
+    # 500 -> 520: the Z.ai direct provider adds its key and plan rows to the leaf (PR #1207).
+    assert counts["ouroboros.settings_defaults"] <= 520
     assert (PACKAGE / "config.py").is_file()

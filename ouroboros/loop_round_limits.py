@@ -197,10 +197,21 @@ def _drain_incoming_messages(
                 )
                 acknowledge_transcript_entry(drive_root, task_id, entry)
                 continue
+            # A LATE quiz answer: the owner's row and this entry's text are the
+            # owner's own words; the model reads (and the owner corpus keeps) the
+            # FULL card frame rebuilt from the stored block on the canonical root.
+            model_msg = dmsg
+            if entry.get("late_answer") is not None:
+                from ouroboros.owner_quiz import late_answer_model_text
+
+                model_msg = late_answer_model_text(
+                    str(getattr(owner_ctx, "budget_drive_root", "") or "") or drive_root,
+                    entry.get("late_answer"), dmsg,
+                )
             _loop()._record_owner_directive(
                 owner_ctx,
                 source="owner_mailbox",
-                content=dmsg,
+                content=model_msg,
                 msg_id=str(entry.get("msg_id") or ""),
             )
             _stamp_owner_delivery(
@@ -213,7 +224,7 @@ def _drain_incoming_messages(
             from ouroboros.client_surface import noted_owner_text
 
             _loop()._append_or_merge_user_message(
-                messages, _loop()._owner_marked_content(noted_owner_text(owner_ctx, entry, dmsg)),
+                messages, _loop()._owner_marked_content(noted_owner_text(owner_ctx, entry, model_msg)),
                 slot=owner_ctx,
             )
             acknowledge_transcript_entry(drive_root, task_id, entry)

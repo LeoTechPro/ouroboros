@@ -22,6 +22,7 @@ from ouroboros.model_wait import dispatch_deadline_remaining_sec
 from ouroboros.openrouter_attribution import OPENROUTER_APP_HEADERS
 from ouroboros.provider_models import (
     DEEPSEEK_BASE_URL,
+    resolve_zai_base_url,
     PROVIDER_PREFIXES,
     normalize_anthropic_model_id,
     normalize_model_identity,
@@ -304,6 +305,8 @@ class _ProviderRoutingMixin:
             return f"minimax/{resolved_model}"
         if provider == "deepseek":
             return f"deepseek/{resolved_model}"
+        if provider == "zai":
+            return f"zai/{resolved_model}"
         if provider == "claudexor":
             return f"claudexor::{resolved_model}"
         return f"openai-compatible/{resolved_model}"
@@ -387,6 +390,20 @@ class _ProviderRoutingMixin:
                 # previous assistant turn's reasoning_content (v4-pro enforces
                 # with a 400; "" is accepted for foreign turns — probed 2026-09-01).
                 "requires_reasoning_echo": True,
+                "supports_openrouter_extensions": False,
+                "supports_generation_cost": False,
+            }
+
+        if provider == "zai":
+            return {
+                "provider": provider,
+                "resolved_model": resolved_model,
+                "usage_model": usage_model,
+                "api_key": configured("ZAI_API_KEY", ""),
+                # Plan-selected official endpoint (PAYG default; the Coding
+                # Plan endpoint is intended for supported tools only).
+                "base_url": resolve_zai_base_url(configured("ZAI_PLAN", "")),
+                "default_headers": {},
                 "supports_openrouter_extensions": False,
                 "supports_generation_cost": False,
             }
