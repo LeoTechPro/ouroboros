@@ -587,3 +587,56 @@ def test_record_without_details_from_an_older_skill_still_answers(tmp_path, monk
                 reply=(200, {"ok": True, "state": "answered", "answered_index": 0}))
     assert posts[0][1]["option_index"] == 0
     assert _LAST_CLIENT[-1].edits[0][2].endswith("\nAnswered: 1. sqlite")
+
+
+class _CardClient:
+    """Records what send_quiz_card sends; message ids count up from 500."""
+
+    def __init__(self):
+        self.sent, self.next_id = [], 500
+
+    async def send_message(self, chat_id, text, parse_mode="HTML"):
+        self.sent.append(("plain", text)); self.next_id += 1
+        return self.next_id
+
+    async def send_message_with_inline_keyboard(self, chat_id, text, keyboard, parse_mode="HTML"):
+        self.sent.append(("keyboard", text)); self.next_id += 1
+        return self.next_id
+
+
+def _send_card_direct(body, hint="tap"):
+    import asyncio
+    from skills.telegram.lib import telegram_quiz as quiz
+
+    client = _CardClient()
+    message_id, overflowed = asyncio.run(quiz.send_quiz_card(
+        client, 42, body=body, compact="1. a\n2. b", hint_text=hint, keyboard=[[{"text": "1. a", "callback_data": "x"}]]))
+    return client, message_id, overflowed
+
+
+def test_card_that_fits_only_without_its_answered_edit_goes_out_as_parts():
+    """Both directions: a card leaves room for "Answered: <echo>", or it is split (Opus L1)."""
+    from skills.telegram.lib import telegram_quiz as quiz
+
+    fits = "q" * (quiz._TELEGRAM_TEXT_LIMIT - quiz._ANSWERED_EDIT_RESERVE - len("\ntap"))
+    client, message_id, overflowed = _send_card_direct(fits)
+    assert not overflowed and [kind for kind, _ in client.sent] == ["keyboard"]
+    assert quiz._u16len(client.sent[0][1]) + quiz._ANSWERED_EDIT_RESERVE <= quiz._TELEGRAM_TEXT_LIMIT
+
+    barely = fits + "q" * 8  # fits the message limit alone, not with the answered edit
+    assert quiz._u16len(f"{barely}\ntap") <= quiz._TELEGRAM_TEXT_LIMIT
+    client, message_id, overflowed = _send_card_direct(barely)
+    assert overflowed and [kind for kind, _ in client.sent] == ["plain", "keyboard"]
+    assert client.sent[0][1] == barely and message_id == 502
+
+
+def test_card_length_is_measured_in_utf16_units_not_code_points():
+    """Astral characters count double in Telegram's limit; len() would let this card through (Opus L2)."""
+    from skills.telegram.lib import telegram_quiz as quiz
+
+    budget = quiz._TELEGRAM_TEXT_LIMIT - quiz._ANSWERED_EDIT_RESERVE - len("\ntap")
+    body = "\U0001F600" * (budget // 2 + 4)  # fewer code points than the budget, more UTF-16 units
+    assert len(body) < budget < quiz._u16len(body)
+    client, _message_id, overflowed = _send_card_direct(body)
+    assert overflowed and [kind for kind, _ in client.sent] == ["plain", "keyboard"]
+    assert client.sent[0][1] == body

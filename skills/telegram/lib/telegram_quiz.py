@@ -37,6 +37,9 @@ _MAX_REMEMBERED = 50
 _CALLBACK_PREFIX = "qz:"
 _BUTTON_LABEL_MAX = 40
 _ANSWER_ECHO_MAX = 200
+# The answered edit appends "Answered: <echo>" to the remembered single message; a card is sent
+# as ONE message only when that edit still fits Telegram's limit (echo + label + prefix + newline).
+_ANSWERED_EDIT_RESERVE = _ANSWER_ECHO_MAX + 32
 
 HostPost = Callable[[Any, str, Dict[str, Any]], Awaitable[Tuple[int, Dict[str, Any]]]]
 
@@ -170,13 +173,13 @@ async def send_quiz_card(client, chat_id: int, *, body: str, compact: str, hint_
                          keyboard: List[List[dict]]) -> Tuple[int, bool]:
     """Send the card; return the keyboard message id and whether it overflowed.
 
-    A card that fits Telegram's per-message limit (UTF-16 units) is one message
-    with the keyboard. A longer one is sent as ordered plain parts through the
-    client's chunker, then the compact keyboard message; nothing authored is
-    truncated.
+    A card that fits Telegram's per-message limit (UTF-16 units) WITH room for
+    its later answered edit is one message with the keyboard. A longer one is
+    sent as ordered plain parts through the client's chunker, then the compact
+    keyboard message; nothing authored is truncated.
     """
     full = f"{body}\n{hint_text}"
-    if _u16len(full) <= _TELEGRAM_TEXT_LIMIT:
+    if _u16len(full) + _ANSWERED_EDIT_RESERVE <= _TELEGRAM_TEXT_LIMIT:
         message_id = await client.send_message_with_inline_keyboard(
             chat_id, full, keyboard, parse_mode="")
         return int(message_id or 0), False
