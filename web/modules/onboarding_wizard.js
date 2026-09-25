@@ -75,10 +75,8 @@ import { accountRowFacts } from './harness_accounts.js';
         subagentsOpen: false,
         reviewersOpen: false,
         localSourceOpen: Boolean(INITIAL_STATE.localSource),
-        moreProvidersOpen: Boolean(
-            INITIAL_STATE.cloudruKey || INITIAL_STATE.minimaxKey || INITIAL_STATE.deepseekKey
-            || INITIAL_STATE.compatibleBaseUrl || INITIAL_STATE.compatibleApiKey,
-        ),
+        moreProvidersOpen: Boolean(INITIAL_STATE.cloudruKey || INITIAL_STATE.minimaxKey || INITIAL_STATE.deepseekKey
+            || INITIAL_STATE.zaiKey || INITIAL_STATE.compatibleBaseUrl || INITIAL_STATE.compatibleApiKey),
         localStatusText: 'Status: Offline',
         localStatusTone: 'muted',
         localTestResult: '',
@@ -266,7 +264,7 @@ import { accountRowFacts } from './harness_accounts.js';
                 ['OPENAI_API_KEY', 'openai'],
                 ['CLOUDRU_FOUNDATION_MODELS_API_KEY', 'cloudru'],
                 ['MINIMAX_API_KEY', 'minimax'],
-                ['DEEPSEEK_API_KEY', 'deepseek'],
+                ['DEEPSEEK_API_KEY', 'deepseek'], ['ZAI_API_KEY', 'zai'],
                 ['ANTHROPIC_API_KEY', 'anthropic'],
             ].filter(([settingKey]) => configured[settingKey]);
             if (hasOpenrouter) return 'openrouter';
@@ -613,6 +611,7 @@ import { accountRowFacts } from './harness_accounts.js';
         if (trim(state.cloudruKey)) rows.splice(1, 0, ['Cloud.ru', 'configured']);
         if (trim(state.minimaxKey)) rows.splice(1, 0, ['MiniMax', 'configured']);
         if (trim(state.deepseekKey)) rows.splice(1, 0, ['DeepSeek', 'configured']);
+        if (trim(state.zaiKey)) rows.splice(1, 0, ['Z.ai (GLM)', trim(state.zaiPlan) === 'coding' ? 'configured · coding plan' : 'configured']);
         if (trim(state.anthropicKey)) rows.splice(1, 0, ['Anthropic', 'configured']);
         if (hasLocalModel()) {
             rows.splice(

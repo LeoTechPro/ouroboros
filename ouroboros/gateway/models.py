@@ -18,6 +18,7 @@ from ouroboros.provider_models import (
     ALL_PROVIDER_CREDENTIAL_KEYS,
     ACTIVE_MODEL_SETTING_KEYS,
     DEEPSEEK_BASE_URL,
+    resolve_zai_base_url,
     DIRECT_PROVIDER_DEFAULTS,
     MINIMAX_REGION_ENDPOINTS,
     OPENROUTER_DEFAULTS,
@@ -41,6 +42,7 @@ def _provider_label_from_model_id(model_id: str) -> str:
         "qwen": "Qwen",
         "mistralai": "Mistral",
         "deepseek": "DeepSeek",
+        "zai": "Z.ai (GLM)",
         "perplexity": "Perplexity",
     }.get(prefix, prefix.title() if prefix else "Other")
 
@@ -267,6 +269,20 @@ def _provider_specs(
                 "DeepSeek",
                 deepseek_api_key,
                 DEEPSEEK_BASE_URL,
+            ),
+        ))
+    zai_api_key = str(settings.get("ZAI_API_KEY", "") or "").strip()
+    if zai_api_key:
+        # Z.ai serves an OpenAI-compatible GET /models on its plan-selected
+        # official host, so the catalog is fetched live like the other providers.
+        specs.append((
+            "zai",
+            lambda client: _fetch_openai_compatible_model_catalog(
+                client,
+                "zai",
+                "Z.ai (GLM)",
+                zai_api_key,
+                resolve_zai_base_url(str(settings.get("ZAI_PLAN", "") or "")),
             ),
         ))
 
