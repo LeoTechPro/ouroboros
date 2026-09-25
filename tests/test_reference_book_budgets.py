@@ -86,7 +86,17 @@ CHAPTER_BYTE_BUDGETS: dict[str, int] = {
     # bounded authored focus (cross-focus awareness).
     # 30900 -> 31150 (issue #1142): the crash counter's shutdown exemption names WHERE the stop
     # event is set (the uvicorn signal handler, then the lifespan teardown) and why both are needed.
-    "docs/architecture/05-supervisor-loop.md": 31150,
+    # 31150 -> 31300 (issue #1002): the budget-projection paragraph states what the persisted
+    # projection carries (totals only) and where per-root money lives; the chapter had no
+    # sentence about the shape of the persisted projection to replace.
+    # 31300 -> 31500 (issue #1230): the reconciliation sentence states the two-read rule of
+    # task reconciliation (decide on a status-only read, materialize only the healed row)
+    # and the cadence stamp at pass end; the older clause it extends is kept, not duplicated.
+    # 31500 -> 32400: the tick description names the bounded events batch and the one
+    # projection write per turn (the unbounded drain and per-event write they replace had
+    # no sentence of their own), and the projection paragraph states the writer's slim read,
+    # its retry interval and the crossing rule of the OpenRouter check.
+    "docs/architecture/05-supervisor-loop.md": 32400,
     # 286850 -> 287600: "an answer that has not arrived is a gap" is a new invariant of
     # plan review and task acceptance (the slot census vocabulary, the `awaiting`
     # projection, the only-awaited task outcome); the in-flight sentence it grew from is
@@ -143,8 +153,13 @@ CHAPTER_BYTE_BUDGETS: dict[str, int] = {
     # after the long-work continuity merge, 308678 after the Claudexor 3.14.0 pin, #1264);
     # the run-origin sentences replace the "request decides what the run was for" and the
     # owner-turn descriptions (+144 on the merged base) rather than appending to them.
-    "docs/architecture/06-agent-core.md": 308900,
-    "docs/architecture/07-configuration.md": 36991,
+    # 308900 -> 309800 (#1262): the one name-miss answer, every-mode discovery and the MCP
+    # lookup-before-safety facts are mechanisms no older text held; the "Not found"
+    # sentence they sit in was compressed rather than appended to (measured 309712).
+    "docs/architecture/06-agent-core.md": 309800,
+    # 36991 -> 37300: the facade paragraph names the three loop constants runtime_limits.py
+    # gained (events batch bound, budget-projection retry interval); no older text to displace.
+    "docs/architecture/07-configuration.md": 37300,
     # 18947 -> 19287: CI failure collection now documents diagnostic desktop builds while release remains gated.
     # 19287 -> 20560 (#1215): three contracts the chapter had no older text for — the
     # ONE reusable browser lane and the two triggers that share it (the unfiltered
@@ -225,7 +240,9 @@ CHAPTER_BYTE_BUDGETS: dict[str, int] = {
     # system-message-actions bullet and adds what no older text held: the door, the
     # regenerate-and-read-the-neighbours duty and what enforces each half.
     "docs/development/11-design-system.md": 28300,
-    "docs/development/12-mcp-client-integration.md": 3313,
+    # 3313 -> 3520 (#1262): the missed-name rule (catalog-only answer, no guess, alias,
+    # cross-server hint or automatic call, before safety); no older text held it (measured 3506).
+    "docs/development/12-mcp-client-integration.md": 3520,
     "docs/development/13-gateway-boundary-pattern.md": 2228,
     # 14958 -> 16100: release proof now records diagnostic signing/attestation side effects, authority asymmetry, and fail-closed prerequisites.
     # 16100 -> 19350 (#1215): the safe-launch recipe an operator must copy exactly,

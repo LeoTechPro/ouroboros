@@ -152,79 +152,10 @@ from ouroboros.nanny_pacing import (
 
 
 def _setup_dynamic_tools(tools_registry, tool_schemas, messages, context_mode="max"):
-    """Attach list/enable tool handlers and mutate the active schema list."""
-    enabled_extra: set = set()
-    active_tool_names = {
-        name for schema in tool_schemas
-        if (name := str(schema.get("function", {}).get("name") or "").strip())
-    }
+    """Bind the one discovery implementation to this loop's resident schema list."""
+    from ouroboros.tools.tool_discovery import bind_resident_schemas
 
-    def _handle_list_tools(ctx=None, **kwargs):
-        omissions = (
-            tools_registry.capability_omissions()
-            if hasattr(tools_registry, "capability_omissions")
-            else []
-        )
-        non_core = [
-            t for t in list_non_core_tools(tools_registry, context_mode=context_mode)
-            if t["name"] not in active_tool_names
-        ]
-        if not non_core:
-            if not omissions:
-                return "All tools are already in your active set."
-            lines = ["All currently discovered tools are already in your active set.", ""]
-            lines.extend(format_capability_omissions(omissions))
-            return "\n".join(lines)
-        lines = [f"**{len(non_core)} additional tools available** (use `enable_tools` to activate):\n"]
-        for t in non_core:
-            lines.append(f"- **{t['name']}**: {t['description'][:120]}")
-        if omissions:
-            lines.extend(format_capability_omissions(
-                omissions, header="\n" + CAPABILITY_OMISSION_HEADER,
-            ))
-        return "\n".join(lines)
-
-    def _handle_enable_tools(ctx=None, tools: str = "", **kwargs):
-        names = [n.strip() for n in tools.split(",") if n.strip()]
-        enabled, hidden, not_found = [], [], []
-        for name in names:
-            schema = tools_registry.get_schema_by_name(name)
-            if schema and name not in active_tool_names:
-                tool_schemas.append(schema)
-                invalidate_task_cache_splits(getattr(ctx, "task_id", ""))
-                enabled_extra.add(name)
-                active_tool_names.add(name)
-                enabled.append(f"{name} (registered late)")
-            elif name in active_tool_names:
-                enabled.append(f"{name} (already active)")
-            else:
-                # A policy-filtered tool is distinct from an unknown name.
-                reason = (
-                    tools_registry.policy_hidden_reason(name)
-                    if hasattr(tools_registry, "policy_hidden_reason") else None
-                )
-                if reason:
-                    hidden.append(f"{name} — {reason}")
-                else:
-                    not_found.append(name)
-        parts = []
-        if enabled:
-            parts.append(
-                "✅ Tools are registered in the active capability envelope: "
-                + ", ".join(enabled)
-            )
-        if hidden:
-            parts.append(
-                "🚫 Hidden by policy (the tool exists but this task cannot use it): "
-                + "; ".join(hidden)
-            )
-        if not_found:
-            parts.append(f"❌ Not found: {', '.join(not_found)}")
-        return "\n".join(parts) if parts else "No tools specified."
-
-    tools_registry.override_handler("list_available_tools", _handle_list_tools)
-    tools_registry.override_handler("enable_tools", _handle_enable_tools)
-
+    enabled_extra = bind_resident_schemas(tools_registry, tool_schemas)
     non_core_count = len(list_non_core_tools(tools_registry, context_mode=context_mode))
     if non_core_count > 0:
         _append_or_merge_user_message(
@@ -482,9 +413,6 @@ def run_llm_loop(
         # A resumed/late-started tree member must see tree spend before its
         # first pacing surface, not a process-local empty stash.
         _loop_tree_accounting(refresh=True, max_age_sec=0.0)
-    from ouroboros.tools import tool_discovery as _td
-    _td.set_registry(tools)
-
     continuation = saved or saved_pause
     tool_schemas = continuation["tool_schemas"] if continuation else initial_tool_schemas(tools, context_mode=active_context_mode)
     tool_schemas, _enabled_extra_tools = _setup_dynamic_tools(tools, tool_schemas, messages, context_mode=active_context_mode)
