@@ -37,16 +37,39 @@ def _consolidation_route() -> Tuple[str, bool]:
     return resolve_credentialed_model(lane.model), False
 
 
+def _light_dispatch_binding() -> Dict[str, Any]:
+    """The EFFECTIVE Light binding a call dispatches on NOW, in dispatch's own field names.
+
+    The configured lane, then the Light account pin, then the live model-wait
+    override for the role — exactly what ``_call_consolidation_llm`` sends, so a
+    key derived here changes whenever the physical dispatch would."""
+    from ouroboros.model_slots import MODEL_ACCOUNTS_KEY, model_role_option
+    from ouroboros.model_wait import current_model_wait
+
+    model, use_local = _consolidation_route()
+    binding: Dict[str, Any] = {"model": model, "use_local": use_local,
+                               "model_account_override": model_role_option(MODEL_ACCOUNTS_KEY, "light")}
+    waiter = current_model_wait()
+    if waiter:
+        binding.update(waiter.overrides.get("light", {}))
+    return binding
+
+
 def _light_route() -> Any:
-    """The CONFIGURED Light route — the route a call would dispatch on now.
+    """The ``era_retry`` dispatch key: the effective binding of ``_light_dispatch_binding``.
 
     A dispatch key, never a provenance stamp: what actually answered is
-    ``knowledge.observed_route_stamp`` over the returned usage (a model-wait
-    override or account rotation changes the answer, not the configuration)."""
+    ``knowledge.observed_route_stamp`` over the returned usage. An account pin or
+    a model-wait override changes this key (the paid retry is allowed) exactly
+    because it changes the dispatch; an empty (Auto) account is omitted so a
+    record keyed before the account joined still holds on an unchanged route."""
     try:
-        return dict(zip(("model", "use_local"), _consolidation_route()))
+        binding = _light_dispatch_binding()
     except Exception:
         return "unknown"
+    account = binding.get("model_account_override") or ""
+    return {"model": binding["model"], "use_local": binding["use_local"],
+            **({"model_account_override": account} if account else {})}
 
 
 def _route_stamp(usage: Any) -> Any:
@@ -486,11 +509,14 @@ def _merge_consolidation_usage(*usages: Dict[str, Any]) -> Dict[str, Any]:
         merged[key] = None if None in values else sum(values)
     for key in ("ledger_attempt_ids", "_consolidation_errors"):
         merged[key] = [value for usage in usages for value in usage.get(key, [])]
-    # The route that answered the LAST physical send of this unit; a physical
-    # usage carries provider/resolved_model, a merged one its forwarded stamp.
-    routes = [route for route in (observed_route_stamp(usage) for usage in usages) if isinstance(route, dict)]
-    if routes:
-        merged["_observed_route"] = routes[-1]
+    # The route that answered the LAST send of this unit, and only that one: a
+    # physical usage carries provider/resolved_model, a merged one its forwarded
+    # stamp, and a final call without a physical fact reads unknown — an earlier
+    # call's stamp never masquerades as the final call's.
+    if usages:
+        last = observed_route_stamp(usages[-1])
+        if isinstance(last, dict):
+            merged["_observed_route"] = last
     return merged
 
 
@@ -674,7 +700,11 @@ class KnowledgeReadContext:
             # The host records what THIS operation actually read. Model-supplied
             # revision text cannot attest an unread note; absent read permits
             # creation only, because the common writer requires existing CAS.
-            bound.append({**entry, "scope": address.scope,
+            # Underscore keys are host facts (``_nomination_route`` and any later
+            # one): a model-supplied value is dropped here, so a forged route can
+            # never reach history — the host stamps only after this binding.
+            bound.append({**{key: value for key, value in entry.items() if not str(key).startswith("_")},
+                          "scope": address.scope,
                           "expected_revision": self.reads.get((address.scope, address.topic)),
                           "canonical_root": str(address.canonical_root),
                           "task_id": str(getattr(self.context, "task_id", "") or "")})
@@ -730,7 +760,6 @@ def _call_consolidation_llm(
         _failed_route_evidence, _route_calibration_ratio, estimate_context_prompt_tokens, resolve_context_fit_route,
     )
     from ouroboros.tools.compact_context import record_context_view
-    from ouroboros.model_slots import MODEL_ACCOUNTS_KEY, model_role_option
     from ouroboros.model_wait import current_model_wait
     from ouroboros.provider_models import parse_claudexor_model, provider_for_model
 
@@ -827,14 +856,12 @@ def _call_consolidation_llm(
                 "measurement_basis": "canonical_visible_estimate", "strict_bound_proven": False}
 
     try:
-        model, use_local = _consolidation_route()
-        values = dict(messages=[{"role": "user", "content": prompt}], model=model,
+        # The same effective binding keys era_retry (``_light_route``): a refusal
+        # recorded under one binding never suppresses the retry under another.
+        values = dict(messages=[{"role": "user", "content": prompt}],
                       model_role="light", tools=knowledge.tools if knowledge else None,
                       reasoning_effort=reasoning_effort, max_tokens=16384,
-                      use_local=use_local,
-                      model_account_override=model_role_option(MODEL_ACCOUNTS_KEY, "light"))
-        if waiter:
-            values.update(waiter.overrides.get("light", {}))
+                      **_light_dispatch_binding())
         # Carry part-to-part evidence only on initial preparation. A wait's
         # reprepare without an observed receipt rediscovers Auto after rotation.
         try:
@@ -1529,8 +1556,11 @@ def _write_knowledge_entries(
 
     ``stamp`` is the caller's ``writer``/``route``/``writer_input_ref`` history
     stamp (see ``write_knowledge_note``); an unnamed caller leaves ``unknown``. An
-    entry carrying its own ``_nomination_route`` (stamped where it was nominated)
-    outranks the caller's block-level ``route``: provenance is per nomination."""
+    entry carrying its own ``_nomination_route`` outranks the caller's block-level
+    ``route``: provenance is per nomination. That field is HOST-authored only —
+    ``KnowledgeReadContext.bind_entries`` strips every underscore key a model
+    supplied, and the room seam stamps it after binding from the correction
+    call's own usage — so the writer never trusts model output for it."""
     from ouroboros.knowledge import KnowledgeAddress, sanitize_topic, write_knowledge_note
     from ouroboros.tools.knowledge import _address, _record_backlog_history
 

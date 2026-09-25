@@ -26,7 +26,6 @@ from ouroboros.memory import Memory
 from ouroboros.tools import knowledge as knowledge_tools
 from ouroboros.tools.registry import ToolContext
 from tests import test_consolidator_context_fit as fit_helpers
-from tests.test_consolidation_honesty import _Nominating
 from tests.test_consolidator_context_fit import _LLM, _paths, _write_chat
 
 fit = fit_helpers.fit
@@ -215,6 +214,54 @@ def test_each_run_keeps_its_own_refusal_and_a_success_erases_only_its_own(tmp_pa
     assert [b["type"] for b in json.loads(blocks_path.read_text(encoding="utf-8"))] == ["era", "gap", "era"]
 
 
+def test_era_retry_is_keyed_on_the_effective_binding_dispatch_uses(tmp_path, fit, monkeypatch):
+    # Round 2 (critical 2): dispatch applies the Light account pin and the live
+    # model-wait override; a refusal recorded under one effective binding must not
+    # suppress the paid retry under another, while an unchanged binding still does.
+    from contextlib import nullcontext
+
+    from ouroboros import model_slots, model_wait
+
+    blocks_path = tmp_path / "memory" / "dialogue_blocks.json"
+    meta_path = tmp_path / "memory" / "dialogue_meta.json"
+    blocks_path.parent.mkdir(parents=True)
+    blocks_path.write_text(json.dumps(_summary_blocks(3)), encoding="utf-8")
+    c.atomic_write_json(meta_path, {})
+    seen = _fake_era(monkeypatch, shorter=False)
+
+    def record():
+        (row,) = c._era_retry_runs(json.loads(meta_path.read_text(encoding="utf-8"))).values()
+        return row["route"]
+
+    c._compact_chronicle(blocks_path, _LLM(), "", None, meta_path=meta_path)
+    c._compact_chronicle(blocks_path, _LLM(), "", None, meta_path=meta_path)
+    assert len(seen) == 1 and record() == {"model": "test/model", "use_local": False}  # unchanged: suppressed
+
+    # The Light account pin changes; the configured lane does not.
+    monkeypatch.setattr(model_slots, "model_role_option", lambda key, role, **_kw: "acct-B" if role == "light" else "")
+    c._compact_chronicle(blocks_path, _LLM(), "", None, meta_path=meta_path)
+    assert len(seen) == 2 and record() == {"model": "test/model", "use_local": False, "model_account_override": "acct-B"}
+    c._compact_chronicle(blocks_path, _LLM(), "", None, meta_path=meta_path)
+    assert len(seen) == 2  # the same pin: suppressed again
+
+    # A model-wait override rebinds the role; lane and pin are unchanged.
+    override = {"model": "override/model", "use_local": False, "model_account_override": "acct-B"}
+    waiter = SimpleNamespace(overrides={"light": override}, register_reprepare=lambda role, callback: nullcontext())
+    monkeypatch.setattr(model_wait, "current_model_wait", lambda: waiter)
+    c._compact_chronicle(blocks_path, _LLM(), "", None, meta_path=meta_path)
+    assert len(seen) == 3 and record() == override
+    c._compact_chronicle(blocks_path, _LLM(), "", None, meta_path=meta_path)
+    assert len(seen) == 3
+    assert [e["attempted"] for e in _events(tmp_path, "era_not_shorter")] == [True, False, True, False, True, False]
+
+    # One helper feeds both sites: the key IS the binding a real call dispatches on.
+    assert c._light_dispatch_binding() == override
+    llm = _LLM()
+    assert c._call_consolidation_llm(llm, "prompt", "probe")[0] == "summary-1"
+    sent = llm.calls[0]
+    assert {key: sent[key] for key in override} == override
+
+
 def test_a_legacy_single_era_retry_record_is_read_as_one_run(tmp_path):
     legacy = {"era_retry": {"source_sha256": "abc", "route": {"model": "m", "use_local": False}}}
     assert c._era_retry_runs(legacy) == {"abc": {"route": {"model": "m", "use_local": False}}}
@@ -366,6 +413,55 @@ def test_project_scoped_reflection_skips_are_typed_events(tmp_path):
     assert not (tmp_path / "memory" / "scratchpad_blocks.json").exists()
 
 
+def _reflect(tmp_path, llm, task_id="t-skip", project_id="proj_x"):
+    return reflection.generate_reflection(
+        {"id": task_id, "text": "the episode", "drive_root": str(tmp_path), "project_id": project_id},
+        {}, "trace", llm, {"rounds": 1, "cost": 0.1})
+
+
+_REJECTED_RAW = [
+    {"type": "knowledge_write", "topic": "people/alex", "content": "   "},
+    {"type": "knowledge_write", "content": "topic-less"},
+    {"type": "delete_everything", "content": "nope"},
+    {"type": "scratchpad_append", "content": "a kept lesson"},
+]
+
+
+def test_rejected_raw_reflection_actions_are_typed_events_on_the_real_path(tmp_path, fit):
+    # Round 2 (critical 3): production drops empty and topic-less actions in the
+    # validator, before apply_memory_actions ever runs; the event must fire there.
+    from tests.test_knowledge_consolidation import MemoryLLM
+
+    entry = _reflect(tmp_path, MemoryLLM("Reflection.\nMEMORY_ACTIONS_JSON: " + json.dumps(_REJECTED_RAW)))
+    assert entry["reflection"] == "Reflection." and [a["type"] for a in entry["memory_actions"]] == ["scratchpad_append"]
+    events = _events(tmp_path, "reflection_memory_action_skipped")
+    assert [(e["action_type"], e["reason"], e["content_chars"]) for e in events] == [
+        ("knowledge_write", "empty_content", 3), ("knowledge_write", "missing_topic", len("topic-less")),
+        ("delete_everything", "unsupported_type", len("nope"))]
+    assert all((e["task_id"], e["project_id"]) == ("t-skip", "proj_x") for e in events)
+    # The retained exact task input the model answered is the source to reread.
+    assert entry["source_ref"]["kind"] == "task_source"
+    assert all(e["reflection_ref"] == entry["source_ref"] for e in events)
+
+
+def test_a_failed_validator_skip_event_cannot_abort_the_reflection(tmp_path, fit, monkeypatch, caplog):
+    from tests.test_knowledge_consolidation import MemoryLLM
+
+    original = reflection.append_jsonl
+
+    def broken_event(path, row, **kwargs):
+        if row.get("type") == "reflection_memory_action_skipped":
+            raise OSError("event store unavailable")
+        return original(path, row, **kwargs)
+
+    monkeypatch.setattr(reflection, "append_jsonl", broken_event)
+    entry = _reflect(tmp_path, MemoryLLM("Reflection.\nMEMORY_ACTIONS_JSON: " + json.dumps(_REJECTED_RAW)))
+    assert entry["reflection"] == "Reflection."  # not "(reflection generation failed ...)"
+    assert [a["content"] for a in entry["memory_actions"]] == ["a kept lesson"]
+    assert caplog.text.count("Reflection memory skip event could not be written") == 3
+    assert _events(tmp_path, "reflection_memory_action_skipped") == []
+
+
 def test_failed_skip_event_cannot_discard_later_reflection_lessons(tmp_path, monkeypatch, caplog):
     env = SimpleNamespace(drive_root=tmp_path, repo_dir=tmp_path)
     original = reflection.append_jsonl
@@ -430,8 +526,12 @@ def test_the_route_stamp_is_what_answered_never_the_configuration():
     assert store.observed_route_stamp(None) == store.UNKNOWN_STAMP
     assert store.observed_route_stamp({"provider": "openrouter", "resolved_model": "openai/gpt-x"}) == {
         "provider": "openrouter", "model": "openai/gpt-x"}
-    assert store.observed_route_stamp({"provider": "local"}, model="cfg/model", use_local=True) == {
-        "provider": "local", "model": "cfg/model"}
+    # Round 2 (advisory 5): a partial physical fact leaves the missing field unknown,
+    # never the caller's configured model; the local lane stamps its own resolved_model.
+    assert store.observed_route_stamp({"provider": "openrouter"}) == {"provider": "openrouter", "model": "unknown"}
+    assert store.observed_route_stamp({"resolved_model": "local-model"}) == {"provider": "unknown", "model": "local-model"}
+    assert store.observed_route_stamp({"provider": "local", "resolved_model": "local-model"}) == {
+        "provider": "local", "model": "local-model"}
     # The production-shaped served route names the account as credentialProfileId.
     served = {"provider": "claudexor", "resolved_model": "claude-fable", "claudexor": {"route": {
         "source": "claude", "model": "claude-fable", "credentialProfileId": "acct-B", "accountFingerprint": "fp-B"}}}
@@ -448,6 +548,32 @@ def test_the_route_stamp_is_what_answered_never_the_configuration():
     assert "_observed_route" not in c._merge_consolidation_usage({"cost": 0.01})
 
 
+def test_the_route_stamp_never_reads_a_configured_route_from_an_empty_usage():
+    # Round 2 (advisory 5): the former ``model``/``use_local`` fallback turned an
+    # empty usage into the configured route. Only physical facts are read now.
+    import inspect
+
+    assert list(inspect.signature(store.observed_route_stamp).parameters) == ["usage"]
+    assert store.observed_route_stamp({}) == store.UNKNOWN_STAMP
+    assert store.observed_route_stamp({"cost": 0.0, "prompt_tokens": 0}) == store.UNKNOWN_STAMP
+    assert store.observed_route_stamp({"_observed_route": "unknown"}) == store.UNKNOWN_STAMP  # not a dict stamp
+
+
+def test_a_merge_never_lets_an_earlier_stamp_masquerade_as_the_final_call():
+    # Round 2 (advisory 5): the final call of a unit answered without a physical
+    # fact (a released send, an exception's usage); an earlier known stamp must not
+    # be forwarded as if that call had produced it.
+    stamped = {"cost": 0.01, "provider": "openrouter", "resolved_model": "a"}
+    merged = c._merge_consolidation_usage(stamped, {"cost": 0.01})
+    assert "_observed_route" not in merged and store.observed_route_stamp(merged) == store.UNKNOWN_STAMP
+    # A forwarded merged stamp counts as the (known) last call when it IS the last usage ...
+    again = c._merge_consolidation_usage({"cost": 0.01}, c._merge_consolidation_usage(stamped))
+    assert again["_observed_route"] == {"provider": "openrouter", "model": "a"}
+    # ... and an unknown-last merged unit stays unknown through a further merge.
+    nested = c._merge_consolidation_usage(stamped, c._merge_consolidation_usage(stamped, {"cost": 0.01}))
+    assert store.observed_route_stamp(nested) == store.UNKNOWN_STAMP
+
+
 def test_a_direct_turn_stamps_itself_and_its_observed_route_when_the_loop_recorded_one(tmp_path):
     ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id="turn-1")
     assert "✅" in knowledge_tools._knowledge_write(ctx, "notes/a", "Plain observation.")
@@ -461,34 +587,71 @@ def test_a_direct_turn_stamps_itself_and_its_observed_route_when_the_loop_record
     assert second["writer"] == "turn" and second["route"] == {"provider": "openrouter", "model": "openai/gpt-x"}
 
 
-def test_dialogue_consolidation_stamps_its_seam_route_and_source(tmp_path, fit):
-    class _RoutedNominating(_Nominating):
-        # Review N2: provenance is per nomination. The correction that releases a
-        # room's entries may run on another account than the block's other calls.
-        rotation = ["acct-1", "acct-2"]
+class _ThreeRoomNominating:
+    """One block of three rooms; each room's correction answers on its own route.
 
-        def chat(self, **kwargs):
-            msg, usage = super().chat(**kwargs)
-            account = self.rotation[self.count % 2] if kwargs["messages"][0]["content"].startswith(
-                "Compare this draft memory") else "acct-draft"
-            return msg, {**usage, "provider": "claudexor", "resolved_model": "light/served",
-                         "claudexor": {"route": {"source": "codex", "credentialProfileId": account}}}
+    Review N2 / round 2 (advisory 6): provenance is per nomination. Room A's
+    correction has no physical route fact (unknown), rooms B and C answer on two
+    different accounts, and every correction also tries to forge the host stamp.
+    """
+    topics = {"A": "people/alex", "B": "people/bob", "C": "people/cara"}
+    accounts = {"A": None, "B": "acct-1", "C": "acct-2"}
 
+    def __init__(self):
+        self.corrections = []
+
+    @staticmethod
+    def _served(account):
+        return {"provider": "claudexor", "resolved_model": "light/served",
+                "claudexor": {"route": {"source": "codex", "credentialProfileId": account}}}
+
+    def chat(self, **kwargs):
+        prompt = kwargs["messages"][0]["content"]
+        if prompt.startswith("Compare this draft memory"):
+            room = next(name for name in "ABC" if f"## Draft memory\nEpisode {name}." in prompt)
+            self.corrections.append(room)
+            account = self.accounts[room]
+            usage = {"cost": 0.01, **({} if account is None else self._served(account))}
+            return {"content": f"Episode {room}, checked.\nKNOWLEDGE_ENTRIES_JSON: " + json.dumps([
+                {"topic": self.topics[room], "content": f"Understanding {room}.", "_nomination_route": _FORGED}])}, usage
+        room = "A" if "entry-0 " in prompt else "B" if "entry-34 " in prompt else "C"
+        return {"content": f"Episode {room}.\nKNOWLEDGE_ENTRIES_JSON: " + json.dumps([
+            {"topic": self.topics[room], "content": f"Understanding {room}."}])}, {"cost": 0.01, **self._served("acct-draft")}
+
+
+def test_dialogue_consolidation_stamps_each_nomination_with_its_own_correction_route(tmp_path, fit):
     chat, blocks, meta = _paths(tmp_path)
-    _write_chat(chat, count=100, text_size=0)
+    chat.parent.mkdir(parents=True, exist_ok=True)
+    rows = [{"ts": f"2026-01-01T{index // 60:02d}:{index % 60:02d}:00Z", "direction": "in",
+             "text": f"entry-{index} ", "chat_id": 1 if index < 34 else 2 if index < 67 else 3} for index in range(100)]
+    chat.write_text("\n".join(json.dumps(row) for row in rows) + "\n", encoding="utf-8")
     ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id="consolidate")
-    c.consolidate(chat, blocks, meta, _RoutedNominating(), knowledge_context=ctx)
-    captures = [row for row in _history(tmp_path) if row.get("publication") == "source_capture"]
-    assert captures and all(row["writer"] == "consolidation" for row in captures)
-    # Each nomination carries the account of the correction that released IT (rotation
-    # per part), never the configured Light route and never one block-wide aggregate.
-    assert {row["route"]["account"] for row in captures} <= {"acct-1", "acct-2"}
-    assert all(row["route"]["provider"] == "claudexor" and row["route"]["model"] == "light/served" for row in captures)
-    capture = captures[0]
+    llm = _ThreeRoomNominating()
+    usage = c.consolidate(chat, blocks, meta, llm, knowledge_context=ctx)
+    assert llm.corrections == ["A", "B", "C"] and usage["_blocks_written"] == 1
+    # The block-wide stamp is the LAST call's known route (room C's correction) ...
+    assert c._route_stamp(usage)["account"] == "acct-2"
+    captures = {row["topic"]: row for row in _history(tmp_path) if row.get("publication") == "source_capture"}
+    assert set(captures) == {"people/alex", "people/bob", "people/cara"}
+    assert all(row["writer"] == "consolidation" for row in captures.values())
+    # ... yet each nomination carries the route of the correction that released IT:
+    # an explicit unknown outranks the known block stamp, two known routes stay
+    # distinct within one block, and the forged model stamp reached none of them.
+    assert captures["people/alex"]["route"] == store.UNKNOWN_STAMP
+    assert captures["people/bob"]["route"] == {
+        "provider": "claudexor", "model": "light/served", "source": "codex", "account": "acct-1"}
+    assert captures["people/cara"]["route"] == {
+        "provider": "claudexor", "model": "light/served", "source": "codex", "account": "acct-2"}
     block = json.loads(blocks.read_text(encoding="utf-8"))[0]
-    assert capture["writer_input_ref"] == block["knowledge_source_ref"]
-    assert capture["writer_input_ref"]["entry_id"]
+    assert all(row["writer_input_ref"] == block["knowledge_source_ref"] for row in captures.values())
+    assert block["knowledge_source_ref"]["entry_id"] and len(block["knowledge_writes"]) == 3
     assert "_nomination_route" not in block  # a history stamp, never a persisted block field
+    # The retained nominations row keeps the HOST stamp per entry, never the model's.
+    nominations = _history(tmp_path)[0]
+    assert nominations["type"] == "dialogue_knowledge_nominations"
+    assert [(entry["topic"], entry["_nomination_route"]) for entry in nominations["nominations"][0]["entries"]] == [
+        ("people/alex", store.UNKNOWN_STAMP), ("people/bob", captures["people/bob"]["route"]),
+        ("people/cara", captures["people/cara"]["route"])]
 
 
 def test_scratchpad_consolidation_stamps_its_journal_source(tmp_path):
@@ -501,6 +664,58 @@ def test_scratchpad_consolidation_stamps_its_journal_source(tmp_path):
     assert capture["route"] == {"provider": "openrouter", "model": "light/served"}
     assert capture["writer_input_ref"] == memory.load_scratchpad_blocks()[0]["metadata"]["source_ref"]
     assert _events(tmp_path, "scratchpad_consolidation")[0]["knowledge_writes"] == {"ok": 1, "failed": 0}
+
+
+_FORGED = {"provider": "forged", "model": "forged/model", "account": "forged-acct"}
+
+
+def test_a_model_supplied_nomination_route_never_reaches_history_from_scratchpad(tmp_path):
+    # Round 2 (critical 1): the scratchpad producer binds every key the model wrote
+    # before the writer ran; a forged host stamp must be dropped at that binding.
+    memory = _scratchpad(tmp_path)
+    c.consolidate_scratchpad(memory, tmp_path / "memory" / "knowledge", _Scratch(json.dumps({
+        "knowledge_entries": [{"topic": "lessons/one", "content": "A durable lesson.", "_nomination_route": _FORGED,
+                               "_expected_revision": "forged", "_task_id": "forged"}],
+        "compressed_block": "compressed"})))
+    capture = next(row for row in _history(tmp_path) if row.get("publication") == "source_capture")
+    assert capture["topic"] == "lessons/one" and capture["writer"] == "scratchpad_consolidation"
+    assert capture["route"] == {"provider": "openrouter", "model": "light/served"}  # the host's observed stamp
+    assert _events(tmp_path, "scratchpad_consolidation")[0]["knowledge_writes"] == {"ok": 1, "failed": 0}
+    journal = [json.loads(line) for line in memory.journal_path().read_text(encoding="utf-8").splitlines() if line.strip()]
+    (bound,) = next(row for row in journal if row.get("type") == "blocks_consolidated")["knowledge_entries"]
+    assert not [key for key in bound if key.startswith("_")]  # nothing model-written survives as a host key
+
+
+def test_a_model_supplied_nomination_route_never_reaches_history_from_knowledge_maintenance(tmp_path, fit):
+    from tests.test_memory_pressure_maintenance import setup_memory
+
+    memory, ctx = setup_memory(tmp_path)
+    assert store.write_knowledge_note(store.resolve_knowledge_address(tmp_path, "overview", "global"),
+                                      "---\nsummary: Orientation.\n---\n" + "Detailed understanding. " * 200).ok
+
+    class Forging:
+        def chat(self, **_kwargs):
+            return {"content": json.dumps({"knowledge_entries": [
+                {"topic": "lessons/forged", "scope": "global", "content": "A shorter detail note.",
+                 "_nomination_route": _FORGED}]})}, {
+                "cost": 0.02, "provider": "claudexor", "resolved_model": "light/served",
+                "claudexor": {"route": {"source": "codex", "credentialProfileId": "acct-real"}}}
+
+    result = c.maintain_memory_pressure(memory, Forging(), ctx, fits=lambda: False)
+    action = next(row for row in result["actions"] if row["owner"] == "knowledge_maintenance")
+    assert [(row["topic"], row["scope"], row["ok"]) for row in action["writes"]] == [("lessons/forged", "global", True)]
+    capture = next(row for row in _history(tmp_path) if row.get("publication") == "source_capture"
+                   and row["topic"] == "lessons/forged")
+    assert capture["writer"] == "knowledge_maintenance"
+    assert capture["route"] == {"provider": "claudexor", "model": "light/served", "source": "codex", "account": "acct-real"}
+
+
+def test_bind_entries_keeps_model_fields_and_drops_every_host_key(tmp_path):
+    reads = c.KnowledgeReadContext(ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id="op-1"))
+    (bound,) = reads.bind_entries([{"topic": "people/alex", "content": "Observed.", "scope": "global",
+                                    "_nomination_route": _FORGED, "_anything": 1, "extra": "kept"}])
+    assert bound == {"topic": "people/alex", "content": "Observed.", "scope": "global", "extra": "kept",
+                     "expected_revision": None, "canonical_root": str(tmp_path), "task_id": "op-1"}
 
 
 def test_project_reflection_action_uses_actor_readable_exact_source(tmp_path):

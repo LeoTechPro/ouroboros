@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import functools
 import json
 import logging
 import pathlib
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from ouroboros._outcome_tool_errors import _OK_TOOL_STATUSES
 from ouroboros.utils import utc_now_iso, append_jsonl, write_text_atomic
@@ -350,11 +351,44 @@ def _extract_trailing_json(text: str, marker: str) -> tuple[str, Optional[list]]
     return remainder, value if isinstance(value, list) else None
 
 
-def _validate_memory_actions(raw: Any, task_id: str) -> List[Dict[str, Any]]:
-    """Keep only well-formed, allowed-type memory actions (max 3)."""
+def record_memory_action_skip(events: pathlib.Path, action: Dict[str, Any], reason: str, *,
+                              project_id: str = "", reflection_ref: Any = None) -> None:
+    """A lesson the host declines is a fact, not silence (I4).
+
+    One writer for every rejection seam — the validator on the model's raw output
+    and ``apply_memory_actions`` on a bound action — so the event names the reason
+    and the reflection source to reread wherever the lesson was dropped. It can
+    warn, never raise: an audit-write failure must not discard the independent
+    later lessons of the same batch."""
+    try:
+        recorded = append_jsonl(events, {"ts": utc_now_iso(), "type": "reflection_memory_action_skipped",
+                                         "task_id": str(action.get("task_id") or ""), "project_id": project_id,
+                                         "action_type": str(action.get("type") or "")[:80], "reason": reason,
+                                         "content_chars": len(str(action.get("content") or "")),
+                                         "reflection_ref": reflection_ref})
+        if not recorded:
+            log.warning("Reflection memory skip event was not recorded: task=%s reason=%s",
+                        action.get("task_id"), reason)
+    except Exception:
+        log.warning("Reflection memory skip event could not be written: task=%s reason=%s",
+                    action.get("task_id"), reason, exc_info=True)
+
+
+def _validate_memory_actions(raw: Any, task_id: str, *,
+                             on_skip: Optional[Callable[[Dict[str, Any], str], None]] = None) -> List[Dict[str, Any]]:
+    """Keep only well-formed, allowed-type memory actions (max 3).
+
+    ``on_skip(action, reason)`` hears every dropped dict item (``unsupported_type``,
+    ``empty_content``, ``missing_topic``): this is the seam the model's output
+    actually crosses, so the skip event fires here, before any action is bound."""
     out: List[Dict[str, Any]] = []
     if not isinstance(raw, list):
         return out
+
+    def skip(item: Dict[str, Any], action_type: str, reason: str) -> None:
+        if on_skip is not None:
+            on_skip({"type": action_type, "content": str(item.get("content") or ""), "task_id": task_id}, reason)
+
     for item in raw[:10]:
         if len(out) >= 3:
             break
@@ -362,15 +396,18 @@ def _validate_memory_actions(raw: Any, task_id: str) -> List[Dict[str, Any]]:
             continue
         action_type = str(item.get("type") or "").strip()
         if action_type not in _ALLOWED_MEMORY_ACTION_TYPES:
+            skip(item, action_type, "unsupported_type")
             continue
         content = (str(item.get("content") or "") if action_type == "knowledge_write"
                    else _truncate_with_notice(item.get("content", ""), 1200)).strip()
         if not content:
+            skip(item, action_type, "empty_content")
             continue
         action: Dict[str, Any] = {"type": action_type, "content": content, "task_id": task_id}
         if action_type == "knowledge_write":
             topic = str(item.get("topic") or "").strip()
             if not topic:
+                skip(item, action_type, "missing_topic")
                 continue
             action["topic"] = topic
             if item.get("scope") is not None:
@@ -598,7 +635,11 @@ def generate_reflection(
                     "priority": _truncate_with_notice(raw.get("priority", "med"), 10).strip().lower() or "med",
                     "kind": _truncate_with_notice(raw.get("kind", "improvement"), 40).strip() or "improvement",
                 })
-        memory_actions = _validate_memory_actions(raw_memory_actions, task_id_str)
+        # A rejected raw action is a typed event HERE, where production drops it
+        # (apply_memory_actions never sees it); the retained task input is its source.
+        memory_actions = _validate_memory_actions(raw_memory_actions, task_id_str, on_skip=functools.partial(
+            record_memory_action_skip, pathlib.Path(knowledge_context.drive_root) / "logs" / "events.jsonl",
+            project_id=str(getattr(knowledge_context, "project_id", "") or ""), reflection_ref=source_ref))
         memory_actions = [bound for action in memory_actions for bound in (
             knowledge.bind_entries([action]) if action["type"] == "knowledge_write" else [action])]
 
@@ -685,22 +726,7 @@ def apply_memory_actions(env: Any, actions: List[Dict[str, Any]], *, project_id:
         return ref if isinstance(ref, dict) and ref.get("kind") == "task_source" else fallback_ref
 
     def skipped(action: Dict[str, Any], reason: str) -> None:
-        # A lesson the host declines is a fact, not silence (I4): name it where
-        # Health and the owner can count it, with the reflection row to reread.
-        try:
-            recorded = append_jsonl(events, {"ts": utc_now_iso(), "type": "reflection_memory_action_skipped",
-                                             "task_id": str(action.get("task_id") or ""), "project_id": pid,
-                                             "action_type": str(action.get("type") or ""), "reason": reason,
-                                             "content_chars": len(str(action.get("content") or "")),
-                                             "reflection_ref": input_ref(action)})
-            if not recorded:
-                log.warning("Reflection memory skip event was not recorded: task=%s reason=%s",
-                            action.get("task_id"), reason)
-        except OSError:
-            # An audit-write failure is visible, but cannot discard independent
-            # later lessons in this batch by escaping the action loop.
-            log.warning("Reflection memory skip event could not be written: task=%s reason=%s",
-                        action.get("task_id"), reason, exc_info=True)
+        record_memory_action_skip(events, action, reason, project_id=pid, reflection_ref=input_ref(action))
 
     for action in (actions or [])[:3]:
         atype = str(action.get("type") or "")

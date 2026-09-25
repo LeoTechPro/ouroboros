@@ -1441,7 +1441,7 @@ def call_llm_with_retry(
                           "_last_llm_status_code", "_last_llm_provider_code"):
                 accumulated_usage.pop(stale, None)
             cost, display_model, provider, cost_estimated = _normalize_usage_cost(usage, model=model, use_local=use_local)
-            accumulated_usage["_observed_route"] = observed_route_stamp(usage, model=model, use_local=use_local)
+            accumulated_usage["_observed_route"] = observed_route_stamp(usage)
             add_usage(accumulated_usage, usage)
             fold_retrieval_usage(accumulated_usage, usage)
             response_ref = persist_observed_call(

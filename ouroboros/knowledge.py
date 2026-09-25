@@ -29,24 +29,25 @@ _INDEX_HEADER = "# Knowledge Base Index\n<!-- ouroboros:knowledge-index:1 -->\n\
 _LEGACY_INDEX_MARKER = "\n<!-- ouroboros:legacy-knowledge-index -->\n"
 
 
-def observed_route_stamp(usage: Any, *, model: str = "", use_local: Any = None) -> Any:
+def observed_route_stamp(usage: Any) -> Any:
     """The route a physical usage row says ANSWERED, as the history ``route`` stamp.
 
     Every wire lane stamps ``provider`` and ``resolved_model`` on the usage it
     returns (a model-wait override or account rotation changes them, the
     configured route does not), and the Claudexor lane adds its ``route`` with
-    the serving ``source``/``account``. A usage that carries no such fact — a
-    released send, a fake in a test — is the honest ``unknown``, never the
-    configuration the caller expected to run on. An already derived stamp
-    (``_observed_route``, forwarded by usage merges) is returned as is.
+    the serving ``source``/``account``. Only those physical facts are read: a
+    usage without any — a released send, a fake in a test — is the honest
+    ``unknown``, and a partial one leaves the missing field ``unknown``; the
+    configured or requested route never fills a gap, so no caller argument can.
+    An already derived stamp (``_observed_route``, forwarded by usage merges as
+    the LAST call's stamp only) is returned as is.
     """
     if not isinstance(usage, dict):
         return UNKNOWN_STAMP
     prior = usage.get("_observed_route")
     if isinstance(prior, dict):
         return prior
-    provider = usage.get("provider") or ("local" if use_local else "")
-    resolved = usage.get("resolved_model") or (model if provider else "")
+    provider, resolved = usage.get("provider"), usage.get("resolved_model")
     if not provider and not resolved:
         return UNKNOWN_STAMP
     stamp: Dict[str, Any] = {"provider": str(provider or UNKNOWN_STAMP), "model": str(resolved or UNKNOWN_STAMP)}
