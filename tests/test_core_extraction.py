@@ -122,9 +122,14 @@ def test_core_catalog_schema_bytes_and_handler_owners_are_stable():
     # names its peer addressees (your own parent or a sibling, delivered as a message from a
     # peer task naming the relation; relay refused there), the 8000-char body bound and the
     # await_messages companion (395 -> 698 bytes); the `message` parameter description states
-    # the bound. Diffing the whole catalog base to head shows exactly those edits and nothing else.
+    # the bound. Rolled again for the truthful owner-question work (PR1, owner 1D/2A): the
+    # escalate description and its nine field descriptions were replaced (the card is written
+    # for a reader outside the room, names the source of the fork, and the question has no
+    # quiz-specific length cap); schema shape, types, defaults and required keys are unchanged,
+    # and the entry's literal moved beside its validator in core_artifacts (byte-identical
+    # serialization). Diffing the whole catalog base to head shows exactly those edits and nothing else.
     assert hashlib.sha256(schema_bytes).hexdigest() == (
-        "7195a7459f276f4bdf8758864b079218f518ae446613cc8351967692f31472cd"
+        "86cf723bf9aa0744b379a0e584034519bc178db1787f82dfd33ed6cddfa6f4d4"
     )
     assert {
         entry.name: (entry.handler.__module__, entry.handler.__name__)
