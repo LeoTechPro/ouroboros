@@ -19,7 +19,9 @@ from tests.candidate_checkout import (
 )
 from ouroboros.test_environment import isolated_environment
 from tests.fixtures_mock_llm import MockLLMServer
-from tests.ui_chat_viewport_smoke import _CAPTURE_TEST_SOCKET, _emit_ws_frame
+from tests.ui_chat_viewport_smoke import (
+    _CAPTURE_TEST_SOCKET, _OBSERVE_STATE_READS, _emit_ws_frame, _wait_state_reads_quiescent,
+)
 
 REPO_ROOT = os.path.dirname(os.path.dirname(__file__))
 
@@ -975,11 +977,16 @@ def test_ui_smoke_collapsed_activity_line_named_vs_unnamed(
                     )
                     page = context.new_page()
                     page.add_init_script(f"({_CAPTURE_TEST_SOCKET})()")
+                    page.add_init_script(f"({_OBSERVE_STATE_READS})()")
                     page.goto(url, wait_until="domcontentloaded", timeout=30_000)
                     page.wait_for_function(
                         "() => window.__testSockets?.some(socket => socket.readyState === WebSocket.OPEN)",
                         timeout=30_000,
                     )
+                    # The running card below is emitted on the test socket only: let
+                    # the socket-open census land first, or a census that starts after
+                    # the frame concludes it by absence between the two row measurements.
+                    _wait_state_reads_quiescent(page)
                     named = page.locator('.chat-live-card[data-task-id="named-act"]')
                     named.wait_for(state="attached", timeout=30_000)
                     unnamed = page.locator('.chat-live-card[data-task-id="unnamed-act"]')
