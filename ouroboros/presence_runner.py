@@ -11,6 +11,7 @@ import logging
 import os
 import threading
 import time
+from datetime import datetime, timezone
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -354,6 +355,96 @@ def presence_turn_task_id(binding_id: str, source_event_id: str) -> str:
     return f"presence-{digest[:24]}"
 
 
+def presence_retry_proof(task: Mapping[str, Any], usage: Mapping[str, Any],
+                         trace: Mapping[str, Any], ctx: Any) -> dict[str, str]:
+    """Certificate for the narrow first-round engine-not-started refusal.
+
+    Missing evidence, a received response, an earlier tool, a handoff, or an
+    undated refusal cannot mint it. A private host diagnostic is not speech;
+    the absence of a delivery receipt is NOT used as proof of no effect.
+    """
+    refusal = usage.get("resource_refusal")
+    metadata = task.get("metadata") if isinstance(task.get("metadata"), Mapping) else {}
+    if not (usage.get("_presence_pre_dispatch_only") is True
+            and isinstance(refusal, Mapping) and refusal.get("temporary") is True
+            and not usage.get("rounds") and not trace.get("tool_calls")
+            and not getattr(ctx, "_swarm_handoff_attempt", None)
+            and isinstance(metadata.get("presence_event_identity"), str)):
+        return {}
+    reset_at = str(refusal.get("reset_at") or "")
+    try:
+        reset = datetime.fromisoformat(reset_at.replace("Z", "+00:00"))
+    except ValueError:
+        return {}
+    if reset.tzinfo is None or reset <= datetime.now(timezone.utc):
+        return {}
+    return {"kind": "first_round_engine_not_started", "event_identity": metadata["presence_event_identity"],
+            "reset_at": reset_at, "task_id": str(task.get("id") or "")}
+
+
+def _successor_id(task_id: str) -> str:
+    return "presence-" + hashlib.sha256(f"presence-retry\0{task_id}".encode("utf-8")).hexdigest()[:24]
+
+
+def _retry_target(drive_root: Path, first_id: str, identity: str, *, claim: bool = False) -> str:
+    """Follow immutable predecessor links; only the conversation-lock holder may claim one.
+
+    The current failed row stays intact. A crashed claim points at an unused
+    successor, whose own RUNNING barrier still precedes every model/tool effect.
+    """
+    from ouroboros.task_results import write_task_result
+
+    current_id = first_id
+    visited: set[str] = set()
+    while current_id not in visited:
+        visited.add(current_id)
+        row = _stored_turn(drive_root, current_id, identity)
+        next_id = str(row.get("presence_retry_next") or "")
+        if next_id:
+            if next_id != _successor_id(current_id):
+                raise PresenceTurnError("presence_result_unreadable", "source_event_id", turn_ref=current_id)
+            current_id = next_id
+            continue
+        if str(row.get("reason_code") or "") != "resource_refusal_no_resend":
+            return current_id
+        metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+        proof = metadata.get("presence_retry_proof")
+        if not (isinstance(proof, dict) and proof.get("kind") == "first_round_engine_not_started"
+                and proof.get("event_identity") == identity and proof.get("task_id") == current_id):
+            return current_id
+        try:
+            reset = datetime.fromisoformat(str(proof.get("reset_at") or "").replace("Z", "+00:00"))
+        except ValueError:
+            return current_id
+        if reset.tzinfo is None or reset > datetime.now(timezone.utc) or not claim:
+            return current_id
+        successor = _successor_id(current_id)
+
+        def link(existing: dict, _fields: dict) -> dict | None:
+            _assert_event_identity(existing, current_id, identity)
+            if existing.get("presence_retry_next") == successor:
+                return None
+            existing_meta = existing.get("metadata") if isinstance(existing.get("metadata"), dict) else {}
+            if (existing.get("status") != STATUS_FAILED or
+                    existing.get("reason_code") != "resource_refusal_no_resend" or
+                    existing_meta.get("presence_retry_proof") != proof or
+                    existing.get("presence_retry_next")):
+                raise PresenceTurnError("presence_result_unreadable", "source_event_id", turn_ref=current_id)
+            return {"presence_retry_next": successor}
+
+        try:
+            write_task_result(drive_root, current_id, STATUS_FAILED,
+                              strict_existing_dict=True, _field_projector=link)
+        except (OSError, ValueError) as exc:
+            if isinstance(exc, PresenceTurnError):
+                raise
+            raise PresenceTurnError("presence_result_unreadable", "source_event_id", turn_ref=current_id) from exc
+        if _stored_turn(drive_root, current_id, identity).get("presence_retry_next") != successor:
+            raise PresenceTurnError("presence_result_unreadable", "source_event_id", turn_ref=current_id)
+        current_id = successor
+    raise PresenceTurnError("presence_result_unreadable", "source_event_id", turn_ref=current_id)
+
+
 def _task_id(admission: PresenceAdmission, event: PresenceTurnEvent) -> str:
     return presence_turn_task_id(admission.binding_id, event.source_event_id)
 
@@ -419,8 +510,21 @@ def _stored_turn(drive_root: Path, task_id: str, identity: str = "") -> dict[str
 
 
 def _cached_result(drive_root: Path, task_id: str, identity: str = "") -> PresenceTurnResult | None:
+    if identity:
+        task_id = _retry_target(drive_root, task_id, identity)
     stored = _stored_turn(drive_root, task_id, identity)
     if str(stored.get("reason_code") or "") == "resource_refusal_no_resend":
+        metadata = stored.get("metadata") if isinstance(stored.get("metadata"), dict) else {}
+        if identity and isinstance(metadata.get("presence_retry_proof"), dict):
+            proof = metadata["presence_retry_proof"]
+            try:
+                reset = datetime.fromisoformat(str(proof.get("reset_at") or "").replace("Z", "+00:00"))
+            except ValueError:
+                reset = None
+            if (proof.get("kind") == "first_round_engine_not_started" and
+                    proof.get("event_identity") == identity and proof.get("task_id") == task_id and
+                    reset is not None and reset.tzinfo is not None and reset <= datetime.now(timezone.utc)):
+                return None  # the conversation-lock holder claims its successor
         # A failed quota/fallback attempt is not a completed/silent transport answer;
         # retain the event with its adapter and never replay a draft as external speech.
         _notify_unresolved_turn(drive_root, task_id)
@@ -560,7 +664,7 @@ def presence_turn_replay(drive_root: Path, task_id: str, conversation_key: str,
                          identity: str = "") -> PresenceTurnResult | None:
     """A settled turn's durable answer, returned without the gate; None when the turn must (re)run."""
     cached = _cached_result(Path(drive_root), task_id, identity)
-    return None if cached is None or _pointer_behind(Path(drive_root), conversation_key, task_id) else cached
+    return None if cached is None or _pointer_behind(Path(drive_root), conversation_key, cached.task_id) else cached
 
 
 def _delivery_state(reporting_version: int, sends: Sequence[str] | None, text: str) -> str:
@@ -633,12 +737,13 @@ def _build_task(
     *,
     drive_root: Path,
     staged_files: Sequence[Path],
+    physical_task_id: str = "",
     lost_attempt: bool = False,
     prior_rows: Sequence[Mapping[str, Any]] = (),
 ) -> dict[str, Any]:
     from ouroboros.config import runtime_setting
 
-    task_id = _task_id(admission, event)
+    task_id = physical_task_id or _task_id(admission, event)
     chat_id = _stable_numeric_id("presence-conversation", event.conversation_key)
     actor_id = _stable_numeric_id(
         "presence-actor",
@@ -800,15 +905,20 @@ def run_presence_turn(
                                      delivery=_delivery_state(second_cached.delivery_reporting_version, sends,
                                                               second_cached.text))
             return second_cached
+        return _execute_live()
+
+    def _execute_live() -> PresenceTurnResult:
+        nonlocal task_id
+        task_id = _retry_target(Path(drive_root), task_id, identity, claim=True)
         with _LIVE_LOCK:
             _LIVE_PRESENCE_TASKS.add(task_id)
         try:
-            return _execute_live()
+            return _run_current()
         finally:
             with _LIVE_LOCK:
                 _LIVE_PRESENCE_TASKS.discard(task_id)
 
-    def _execute_live() -> PresenceTurnResult:
+    def _run_current() -> PresenceTurnResult:
         # Both locks are held: no other execution of this conversation runs, so a running or
         # interrupted row of this task (not yet reconciled) belongs to a lost attempt too.
         stored = _stored_turn(Path(drive_root), task_id, identity)
@@ -844,6 +954,7 @@ def run_presence_turn(
             event,
             drive_root=Path(drive_root),
             staged_files=tuple(Path(item) for item in staged_files),
+            physical_task_id=task_id,
             lost_attempt=lost_attempt,
             prior_rows=prior_rows,
         )
@@ -853,7 +964,8 @@ def run_presence_turn(
         # A lost attempt logged the message (here or in a rotated archive); an attempt that died before its
         # running write left only that row. Re-logging would also let a later retry mistake the fresh row
         # for complete receipt coverage, so the row is written only when no attempt has a trace at all.
-        if not lost_attempt and not any(row.get("direction") == "in" for row in prior_rows):
+        if (not lost_attempt and task_id == _task_id(admission, event)
+                and not any(row.get("direction") == "in" for row in prior_rows)):
             _log_dialogue(
                 Path(drive_root),
                 direction="in",

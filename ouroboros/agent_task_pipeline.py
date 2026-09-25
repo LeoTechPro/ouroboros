@@ -549,6 +549,12 @@ def emit_task_results(
     if ctx is not None and failed_or_forced:
         ctx._presence_completion_accepted = False
     reason_code = str(loop_outcome.get("reason_code") or "")
+    if is_presence_task(task) and reason_code == "resource_refusal_no_resend":
+        from ouroboros.presence_runner import presence_retry_proof
+
+        proof = presence_retry_proof(task, usage, llm_trace, ctx)
+        if proof:
+            task["metadata"] = {**task["metadata"], "presence_retry_proof": proof}
     _root_outbox = _is_root_post_task(task)   # durable outbox (no model call): pre-marker predicate
     if getattr(ctx, "_skip_post_task_synthesis", False):   # "Stop now": paid root predicates see it
         task["_skip_post_task_synthesis"] = True

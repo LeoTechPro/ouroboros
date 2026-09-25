@@ -80,6 +80,9 @@ TERMINAL_WRITERS = {
     # an existing, unresolved turn. This field projection preserves the exact
     # stored status; it cannot terminalize or regenerate the lost attempt.
     ('ouroboros/presence_runner.py::_notify_unresolved_turn', 'str(stored["status"])'): 'dynamic',
+    # Same terminal status under the locked projector; this records only the
+    # deterministic successor link after a positive first-round no-effect proof.
+    ('ouroboros/presence_runner.py::_retry_target', 'STATUS_FAILED'): 'terminal',
     # #1154: the compare-and-clear of a settled terminal-projection obligation.
     # It preserves the record's CURRENT status inside the projector and publishes
     # no lifecycle transition of its own; the status argument is only the

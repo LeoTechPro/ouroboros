@@ -23,7 +23,7 @@ from ouroboros.deadline_utils import (
     main_transport_timeout_sec as _main_transport_timeout,
 )
 from ouroboros.llm import LLMClient, LocalContextTooLargeError, add_usage
-from ouroboros.llm_claudexor import propagate_model_error
+from ouroboros.llm_claudexor import propagate_model_error, presence_refusal_unstarted
 from ouroboros.llm_substitution import same_route_refusal, stamp_substitutions
 from ouroboros.model_wait import current_model_wait, model_wait_reason, propagate_model_control
 from ouroboros.openai_chat_dispatch import CUSTOM_RECEIPTS_USAGE_KEY, pop_custom_validation_receipts
@@ -33,11 +33,7 @@ from ouroboros.pricing import emit_llm_usage_event, estimate_cost_optional, infe
 from ouroboros.task_pacing import main_loop_wire_options
 from ouroboros.transport_custody import attempt_custody_event_fields, is_pre_dispatch_transport_failure, is_retryable_transport_death
 from ouroboros._usage_response import provider_cost_value as _provider_cost_value
-from ouroboros.usage_accounting import (
-    PhysicalAttemptContext,
-    UsageAccountingError,
-    bind_physical_attempt_context,
-)
+from ouroboros.usage_accounting import PhysicalAttemptContext, UsageAccountingError, bind_physical_attempt_context
 from ouroboros.utils import (
     append_jsonl,
     emit_cognitive_operation_event,
@@ -920,6 +916,10 @@ def _record_llm_call_error(
     """
     safe_error = sanitize_tool_result_for_log(repr(error))
     classification = classify_llm_exception(error, safe_error)
+    if ctx.task_type == "presence":
+        ctx.accumulated_usage["_presence_pre_dispatch_only"] = bool(
+            ctx.accumulated_usage.get("_presence_pre_dispatch_only", True)
+            and presence_refusal_unstarted(error, ctx.round_idx))
     provider_message = _exception_provider_message(error, safe_error)
     # Display metadata must not enter the classifier's text heuristics.
     display_message = getattr(error, "display_message", None)
@@ -1489,6 +1489,7 @@ def call_llm_with_retry(
             )
             tool_calls = msg.get("tool_calls") or []
             content = msg.get("content")
+            if task_type == "presence": accumulated_usage["_presence_pre_dispatch_only"] = False  # a response reached the model
             _replace_response_meta(response_meta_out, usage, msg)
             if not tool_calls and (not content or not content.strip()):
                 event_type, is_provider_glitch, permanent_body_error = _record_and_emit_empty_response(

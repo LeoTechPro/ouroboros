@@ -1,13 +1,15 @@
 """Recovery disposition is a producer fact, not a guess from an HTTP status."""
 import asyncio
 import json
+from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 
 import pytest
 
 from ouroboros.gateway import host_service
 from ouroboros.presence_admission import PresenceAdmissionError
 from ouroboros.presence_runner import PresenceTurnError
-from ouroboros.presence_runner import PresenceTurnGate, presence_turn_task_id, run_presence_turn
+from ouroboros.presence_runner import PresenceTurnGate, presence_turn_task_id, presence_retry_proof, run_presence_turn
 from ouroboros.presence_runner import _notify_unresolved_turn
 from ouroboros.task_results import load_task_result, task_result_path, write_task_result
 from tests.test_host_service_responsiveness import _answer, _event, _presence_app, _request, _turn
@@ -257,6 +259,130 @@ def test_resource_refusal_never_returns_a_prepared_reply_as_completed(tmp_path):
         assert body["disposition"] == "retry" and not body.get("text")
         assert not ctx.presence_turns.live() and not any(ctx._inflight.values())
     assert len(invoked) == 1  # retry cannot regenerate work behind an already terminal row
+
+
+def test_only_positive_first_round_not_started_proves_retry_eligibility():
+    task = {"id": "presence-a", "metadata": {"presence_event_identity": "event-identity"}}
+    usage = {"_presence_pre_dispatch_only": True, "resource_refusal": {
+        "temporary": True, "reset_at": (datetime.now(timezone.utc) + timedelta(minutes=5)).isoformat()}}
+    ctx = SimpleNamespace(_swarm_handoff_attempt=None)
+    assert presence_retry_proof(task, usage, {"tool_calls": []}, ctx)["task_id"] == "presence-a"
+    for changed_usage, trace, changed_ctx in (
+        ({**usage, "_presence_pre_dispatch_only": False}, {"tool_calls": []}, ctx),
+        ({**usage, "rounds": 1}, {"tool_calls": []}, ctx),
+        (usage, {"tool_calls": [{"name": "send"}]}, ctx),
+        (usage, {"tool_calls": []}, SimpleNamespace(_swarm_handoff_attempt={"status": "scheduled"})),
+        ({**usage, "resource_refusal": {"temporary": True}}, {"tool_calls": []}, ctx),
+    ):
+        assert not presence_retry_proof(task, changed_usage, trace, changed_ctx)
+
+
+def test_terminal_pipeline_stamps_no_effect_certificate_only_on_typed_proof(tmp_path):
+    from ouroboros import agent_task_pipeline
+    from tests.test_presence_runner import _admission as admitted, _event as incoming
+    from ouroboros.presence_runner import _build_task
+
+    event = incoming()
+    admission = admitted()
+    task = _build_task(admission, event, drive_root=tmp_path, staged_files=())
+    reset = (datetime.now(timezone.utc) + timedelta(minutes=5)).isoformat()
+    usage = {"execution_status": "infra_failed", "reason_code": "resource_refusal_no_resend",
+             "resource_refusal": {"temporary": True, "reset_at": reset},
+             "_presence_pre_dispatch_only": True}
+    ctx = SimpleNamespace(_swarm_handoff_attempt=None, task_contract=task["task_contract"],
+                          task_metadata=task["metadata"])
+    env = SimpleNamespace(drive_root=tmp_path, repo_dir=tmp_path)
+    agent_task_pipeline.emit_task_results(env, None, None, [], task, "refused", usage,
+                                          {"tool_calls": []}, 0.0, tmp_path / "logs", ctx=ctx)
+    row = load_task_result(tmp_path, task["id"])
+    assert row["reason_code"] == "resource_refusal_no_resend"
+    assert row["metadata"]["presence_retry_proof"]["kind"] == "first_round_engine_not_started"
+
+
+def test_producer_records_only_terminal_engine_not_started_as_no_effect(tmp_path):
+    from ouroboros.llm_claudexor import ClaudexorModelNotDispatched
+    from ouroboros.loop_llm_call import _LlmErrorContext, _record_llm_call_error
+    from ouroboros.usage_accounting import PhysicalAttemptCapture
+    from dataclasses import replace
+
+    usage = {}
+    context = _LlmErrorContext(task_id="presence-test", task_type="presence", execution_id="e",
+                               round_id="r", llm_call_id="c", round_idx=1, attempt=0,
+                               model="claudexor::codex=model", request_ref=None,
+                               drive_logs=tmp_path / "logs", event_queue=None,
+                               accumulated_usage=usage)
+    refusal = ClaudexorModelNotDispatched({
+        "code": "subscription_window_exhausted", "message": "quota",
+        "context": {"resetsAt": "2099-01-01T00:00:00+00:00"}})
+    refusal.physical_attempt_capture = PhysicalAttemptCapture(
+        attempt_id="a", model="m", provider="claudexor", state="released",
+        candidate_measurement_kind="canonical_json_v1")
+    refusal.presence_all_operations_not_started = True
+    _record_llm_call_error(refusal, context)
+    assert usage["_presence_pre_dispatch_only"] is True
+    # One questionable physical outcome poisons the entire attempt, even if a
+    # subsequent route has a clean not-started refusal.
+    refusal.physical_attempt_capture = replace(refusal.physical_attempt_capture, state="unresolved")
+    _record_llm_call_error(refusal, context)
+    refusal.physical_attempt_capture = PhysicalAttemptCapture(
+        attempt_id="a", model="m", provider="claudexor", state="released",
+        candidate_measurement_kind="canonical_json_v1")
+    _record_llm_call_error(refusal, context)
+    assert usage["_presence_pre_dispatch_only"] is False
+
+
+def test_host_retries_only_attested_no_effect_after_reset_with_new_physical_identity(tmp_path, monkeypatch):
+    from ouroboros import presence_runner
+
+    invoked = []
+    reset = (datetime.now(timezone.utc) + timedelta(minutes=5)).isoformat()
+
+    class Agent:
+        def handle_task(self, task):
+            invoked.append(task["id"])
+            if len(invoked) == 1:
+                proof = presence_retry_proof(task, {
+                    "_presence_pre_dispatch_only": True,
+                    "resource_refusal": {"temporary": True, "reset_at": reset},
+                }, {"tool_calls": []}, SimpleNamespace(_swarm_handoff_attempt=None))
+                assert proof
+                write_task_result(tmp_path, task["id"], "failed", metadata={
+                    **task["metadata"], "presence_retry_proof": proof},
+                    reason_code="resource_refusal_no_resend", result="private diagnostic")
+                return [{"type": "presence_result", "outcome": "message", "text": "draft must not speak"}]
+            write_task_result(tmp_path, task["id"], "completed", metadata=task["metadata"],
+                              terminal_origin="model_final", result="Recovered reply")
+            return [{"type": "presence_result", "outcome": "message", "text": "Recovered reply"}]
+
+    app, binding, ctx = _presence_app(tmp_path, lambda **kwargs: run_presence_turn(
+        repo_dir=tmp_path, drive_root=tmp_path, gate=PresenceTurnGate(1),
+        agent_factory=lambda **_kw: Agent(), **kwargs))
+    first_id = presence_turn_task_id(binding, "event")
+    first = asyncio.run(_turn(app, binding, "event"))
+    assert first.status_code == 409 and not json.loads(first.body).get("text")
+    waiting = asyncio.run(_turn(app, binding, "event"))
+    assert waiting.status_code == 409 and invoked == [first_id]
+
+    actual_datetime = datetime
+
+    class LaterDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return actual_datetime.now(tz) + timedelta(minutes=10)
+
+    monkeypatch.setattr(presence_runner, "datetime", LaterDatetime)
+    recovered = asyncio.run(_turn(app, binding, "event"))
+    assert recovered.status_code == 200 and json.loads(recovered.body)["text"] == "Recovered reply"
+    second_id = json.loads(recovered.body)["turn_ref"]
+    assert second_id != first_id and invoked == [first_id, second_id]
+    assert load_task_result(tmp_path, first_id)["presence_retry_next"] == second_id
+    assert load_task_result(tmp_path, first_id)["status"] == "failed"
+    assert load_task_result(tmp_path, second_id)["status"] == "completed"
+    assert asyncio.run(_turn(app, binding, "event")).body == recovered.body
+    assert invoked == [first_id, second_id] and ctx.presence_turns.live() == []
+    rows = [json.loads(line) for line in (tmp_path / "logs" / "chat.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert len([row for row in rows if row.get("direction") == "in" and
+                row.get("client_message_id") == "event"]) == 1
 
 
 def test_late_source_bound_terminal_outweighs_old_quarantine(tmp_path):

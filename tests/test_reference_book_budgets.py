@@ -186,7 +186,9 @@ CHAPTER_BYTE_BUDGETS: dict[str, int] = {
     # 12500 -> 14300 (TZ3): the source-bound pre-effect Presence start and event
     # identity, auth saturation, and retry/receipt boundary add contracts the old
     # chapter could not describe. Existing transport and companion rules remain.
-    "docs/architecture/12-host-service-companions-and-chat-ids.md": 14300,
+    # 14300 -> 14800 (TZ3): source-bound first-round no-effect proof and successor
+    # identity must be explained beside existing Host retry/receipt custody; no new store.
+    "docs/architecture/12-host-service-companions-and-chat-ids.md": 14800,
     # 7764 -> 8600 (#1195): the fresh selected-subject + immutable peer projection
     # execution check (`skill_peer_inventory.py`, `skill_conflicts.py`) replaces
     # whole-inventory hashing; the chapter had no description of that seam to swap out.

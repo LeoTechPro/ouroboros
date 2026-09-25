@@ -412,8 +412,9 @@ def test_proven_never_started_quota_attempts_do_not_spend_generation_limit(setup
     gateway.results, gateway.dispatch = [refused] * 3 + [result()], ["not_started"] * 3 + ["response_received"]
     with ua.physical_attempt_limit(1):
         for _ in range(3):
-            with pytest.raises(transport.ClaudexorModelNotDispatched):
+            with pytest.raises(transport.ClaudexorModelNotDispatched) as no_start:
                 client.chat([], MODEL)
+            assert no_start.value.presence_all_operations_not_started is True
         client.chat([], MODEL)
         with pytest.raises(ua.PhysicalAttemptLimitExceeded):
             client.chat([], MODEL)
@@ -447,8 +448,22 @@ def test_confirmed_provider_failure_settles_real_usage_before_raising(setup):
     assert error.code == "subscription_window_exhausted" and error.model_role == "vision"
     assert error.reset_at == "2099-01-01T00:00:00Z"
     assert error.physical_attempt_capture.state == "settled"
+    assert getattr(error, "presence_all_operations_not_started", False) is False
     assert ledger(root)[-1]["cost_usd"] == 0.13 and ledger(root)[-1]["prompt_tokens"] == 20
     assert retained(root) == gateway.results[0]
+
+
+def test_earlier_dispatched_rotation_cannot_hide_behind_final_not_started(setup):
+    _root, gateway, client = setup
+    refusal = {"code": "subscription_window_exhausted", "message": "quota", "retryable": True,
+               "context": {"resetsAt": "2099-01-01T00:00:00Z", "httpStatus": 429}}
+    gateway.results = [result(outcome="failed", problem=refusal),
+                       result(outcome="failed", problem=refusal)]
+    gateway.dispatch = ["response_received", "not_started"]
+    with pytest.raises(transport.ClaudexorModelNotDispatched) as caught:
+        client.chat([{"role": "user", "content": "hi"}], MODEL)
+    assert caught.value.presence_all_operations_not_started is False
+    assert len(gateway.accepted_operations) == 2
 
 
 @pytest.mark.parametrize("asynchronous", [False, True])
