@@ -544,104 +544,60 @@ class TestDockerignore:
 
 
 class TestDockerfile:
-    """The Docker base must bundle Playwright Chromium/WebKit for child images."""
+    """One self-contained Dockerfile ships Chromium/WebKit for the locked Playwright.
 
-    def test_application_image_uses_dependency_base(self):
+    The pins below are the contract the tag-only ``docker-ui-smoke`` and
+    ``docker-portable-test`` lanes rely on: browsers land in the shared
+    ``/ms-playwright`` the runtime honors as-is, they are downloaded ABOVE the
+    lock copy (every release rewrites ``pyproject.toml``/``uv.lock``), and CI
+    exercises the image's own browsers instead of re-downloading them.
+    """
+
+    def test_build_is_self_contained(self):
+        """``docker build -t ouroboros-web .`` must not depend on a locally built base tag."""
         src = _read("Dockerfile")
-        assert "ARG OUROBOROS_BASE_IMAGE=ouroboros-base:local" in src
-        assert "FROM ${OUROBOROS_BASE_IMAGE}" in src
+        assert "FROM python:3.10-slim" in src
+        assert "FROM ${" not in src, "the image must not start from an unpublished local tag"
 
-    def test_application_owns_project_environment(self):
-        app = _read("Dockerfile")
-        base = _read("docker/Dockerfile.base")
-        assert "UV_PROJECT_ENVIRONMENT=/opt/venv" in app
-        assert 'PATH="/opt/venv/bin:$PATH"' in app
-        assert "uv sync --locked --no-dev --extra browser --no-install-project" in app
-        assert "UV_PROJECT_ENVIRONMENT" not in base
-        assert "uv sync" not in base
-
-    def test_base_installs_project_certificates(self):
-        src = _read("docker/Dockerfile.base")
-        assert "COPY docker/certs/ /usr/local/share/ca-certificates/" in src
-        assert "update-ca-certificates" in src
-
-    def test_playwright_install_chromium_present(self):
-        src = _read("docker/Dockerfile.base")
-        assert "playwright install chromium webkit" in src, (
-            "Dockerfile must call 'playwright install chromium webkit' to bundle the browsers"
-        )
-
-    def test_playwright_uses_shared_browser_path(self):
-        src = _read("docker/Dockerfile.base")
-        assert "PLAYWRIGHT_BROWSERS_PATH=/ms-playwright" in src
-
-    def test_base_playwright_version_matches_lock(self):
-        src = _read("docker/Dockerfile.base")
+    def test_playwright_pin_matches_lock(self):
+        src = _read("Dockerfile")
         match = re.search(r'\[\[package\]\]\nname = "playwright"\nversion = "([^"]+)"', _read("uv.lock"))
-        assert match is not None
-        assert f"PLAYWRIGHT_VERSION={match.group(1)}" in src
-
-    def test_playwright_install_deps_present(self):
-        """Dockerfile must use 'playwright install-deps chromium webkit' (the authoritative
-        Playwright dependency resolver) rather than a hand-curated apt library list.
-        This ensures all runtime native libs required by Chromium/WebKit are present."""
-        src = _read("docker/Dockerfile.base")
-        assert "playwright install-deps chromium webkit" in src, (
-            "Dockerfile must call 'playwright install-deps chromium webkit' to install all "
-            "native system libraries required by Chromium/WebKit via Playwright's authoritative "
-            "dependency resolver"
+        assert match is not None, "uv.lock must lock playwright"
+        assert f"PLAYWRIGHT_VERSION={match.group(1)}" in src, (
+            "Dockerfile must pin the browser installer to the locked Playwright version"
         )
 
-    def test_install_deps_before_install_chromium(self):
-        """Native system dependencies must be installed BEFORE the Chromium binary
-        is downloaded, so the binary can find its runtime libraries on first launch."""
-        src = _read("docker/Dockerfile.base")
+    def test_shared_browser_path_is_the_image_environment(self):
+        src = _read("Dockerfile")
+        assert "PLAYWRIGHT_BROWSERS_PATH=/ms-playwright" in src
+        assert "PLAYWRIGHT_BROWSERS_PATH=0" not in src, (
+            "browsers must not live in the package tree: the dependency layer is rebuilt on every release"
+        )
+
+    def test_browsers_install_before_the_lock_copy(self):
+        src = _read("Dockerfile")
         deps_pos = src.find("playwright install-deps chromium webkit")
-        src.find("playwright install chromium webkit")
-        # binary_pos must not match the install-deps line itself
-        # find the standalone 'playwright install chromium webkit' (not install-deps)
-        import re as _re
-        binary_match = _re.search(r"(?<!install-deps )playwright install chromium webkit", src)
-        assert deps_pos != -1, "playwright install-deps chromium webkit not found in Dockerfile"
-        assert binary_match is not None, "standalone playwright install chromium webkit not found in Dockerfile"
-        assert deps_pos < binary_match.start(), (
-            "playwright install-deps must appear BEFORE playwright install chromium webkit in Dockerfile"
+        install_pos = src.find("playwright install chromium webkit")
+        lock_pos = src.find("COPY pyproject.toml uv.lock")
+        assert deps_pos != -1 and install_pos != -1 and lock_pos != -1
+        assert deps_pos < install_pos < lock_pos, (
+            "install-deps, then the browser download, then the lock copy — otherwise a release "
+            f"bump re-downloads the browsers (deps {deps_pos}, install {install_pos}, lock {lock_pos})"
         )
 
-    def test_playwright_package_before_playwright_install_deps(self):
-        """uv pip must install Playwright BEFORE playwright install-deps — the
-        playwright Python package must be importable when install-deps runs."""
-        src = _read("docker/Dockerfile.base")
-        install_pos = src.find("uv pip install --system")
-        deps_pos = src.find("playwright install-deps chromium webkit")
-        assert install_pos != -1, "Playwright package install not found in Dockerfile"
-        assert deps_pos != -1, "playwright install-deps chromium webkit not found in Dockerfile"
-        assert install_pos < deps_pos, (
-            "Playwright package must be installed before playwright install-deps "
-            f"(install at char {install_pos}, install-deps at {deps_pos})"
+    def test_no_runtime_uv_project_environment(self):
+        """A baked ``UV_PROJECT_ENVIRONMENT`` makes an agent's ``uv sync`` in a task
+        workspace rewrite Ouroboros's own venv."""
+        assert "UV_PROJECT_ENVIRONMENT" not in _read("Dockerfile")
+
+    def test_ci_docker_lanes_use_the_shipped_browsers(self):
+        """The release-gate container commands must not redirect Playwright away from the image."""
+        ci = _read(".github/workflows/ci.yml")
+        assert "docker build -t ouroboros-web:test ." in ci
+        assert "PLAYWRIGHT_BROWSERS_PATH=0" not in ci, (
+            "a PLAYWRIGHT_BROWSERS_PATH=0 prefix hides /ms-playwright and makes the lane download at test time"
         )
-
-    def test_playwright_package_before_all_playwright_invocations(self):
-        """uv pip must install Playwright before every ``python3 -m playwright`` invocation
-        in the Dockerfile — both ``install-deps`` and ``install chromium webkit``.
-        Otherwise the module invocation raises ModuleNotFoundError."""
-        src = _read("docker/Dockerfile.base")
-        install_pos = src.find("uv pip install --system")
-        assert install_pos != -1, "Playwright package install not found in Dockerfile"
-
-        import re as _re
-        playwright_invocations = [
-            m.start() for m in _re.finditer(r"python3 -m playwright", src)
-        ]
-        assert playwright_invocations, "No 'python3 -m playwright' invocations found in Dockerfile"
-
-        earliest_playwright = min(playwright_invocations)
-        assert install_pos < earliest_playwright, (
-            "Playwright package install must appear before its first module invocation "
-            f"(install at char {install_pos}, earliest playwright at {earliest_playwright}). "
-            f"Found {len(playwright_invocations)} playwright invocation(s) at positions: "
-            f"{playwright_invocations}"
-        )
+        assert "playwright install --only-shell" not in ci, "the portable lane measures the shipped image"
 
 
 @pytest.mark.parametrize(

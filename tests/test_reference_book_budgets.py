@@ -175,7 +175,10 @@ CHAPTER_BYTE_BUDGETS: dict[str, int] = {
     # 20560 -> 20800 (PR #1255; measured 20768): the Docker subsection maps the new root
     # .dockerignore (what it keeps out of image layers and why .git/tests/ must stay in),
     # a config BIBLE P6 requires on the map.
-    "docs/architecture/08-git-branching-ci-and-build.md": 20800,
+    # 20800 -> 22000 (PR #1300; measured 21921): the Docker subsection maps the single-Dockerfile layout
+    # (browsers above the lock copy, the shared browser path, cache mounts, the CI lanes that exercise
+    # them) and points at the extra-CA setting; the base sat 16 bytes under the previous budget.
+    "docs/architecture/08-git-branching-ci-and-build.md": 22000,
     # 12405 -> 14400 (issue #1142): the ordinary-close paragraph gains the mechanism the chapter had
     # no text for — graceful stop signals the server PID only, the server half (stop event at the
     # signal, bounded uvicorn drain) is self-sufficient against an old group-SIGTERM launcher.

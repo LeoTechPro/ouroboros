@@ -1,4 +1,0 @@
-**
-!docker/
-!docker/certs/
-!docker/certs/*.crt
