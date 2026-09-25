@@ -25,3 +25,26 @@ With the flag enabled, Ouroboros still warns when saving a non-localhost bind
 without `OUROBOROS_NETWORK_PASSWORD`, but the Settings UI no longer blocks
 ordinary settings saves such as API-key updates. Do not use this flag on an
 open LAN or public port.
+
+## Extra CA Certificates
+
+Ouroboros verifies its own provider calls (OpenRouter, OpenAI-compatible endpoints,
+Anthropic, GigaChat, model catalogs and Provider Test) against the `certifi`
+bundle, never the operating-system store. A deployment behind a TLS-inspecting
+proxy, or one that talks to an endpoint signed by a CA `certifi` lacks (for
+example the Russian Trusted Root CA behind GigaChat), sets
+`OUROBOROS_EXTRA_CA_BUNDLE` to a PEM file holding the missing CA certificates.
+The file is added on top of the defaults, so every other provider keeps working;
+a path that cannot be read fails the call loudly instead of silently falling
+back to the defaults. In Docker, mount the file and pass the setting:
+
+```bash
+docker run --rm -p 8765:8765 \
+  -v "$PWD/extra-ca.pem:/certs/extra-ca.pem:ro" \
+  -e OUROBOROS_EXTRA_CA_BUNDLE=/certs/extra-ca.pem \
+  ouroboros-web
+```
+
+On a desktop install the same key lives in Settings → Advanced. It covers
+Ouroboros's own HTTP clients only: `git`, `uv`, `pip`, the Claudexor engine and
+the browsers keep their own trust stores.

@@ -33,7 +33,9 @@ CHAPTER_BYTE_BUDGETS: dict[str, int] = {
     # (measured 165470 on the merged chapter).
     # 165500 -> 165550: the long-work continuity merge landed the chapter at 165507 (over by
     # 7 bytes on the official line); re-based here, no text of this chapter was touched.
-    "docs/architecture/01-high-level-architecture.md": 165550,
+    # 165550 -> 165900 (PR #1300): the net_transport row and the data-layout row for the merged
+    # extra-CA bundle; the base sat 174 bytes under the previous budget.
+    "docs/architecture/01-high-level-architecture.md": 165900,
     # 15517 -> 16200 (#1195): the session-custodied startup historical audit is a
     # new node of the startup flow (readiness no longer waits for the historical
     # seal diagnostic); the chapter had no older description of that pass to replace.
@@ -159,13 +161,16 @@ CHAPTER_BYTE_BUDGETS: dict[str, int] = {
     # 309800 -> 310100 (TZ2 + #1262 merge, measured 309985): the Presence task-message
     # own-binding boundary and forced declaration remain beside #1262's name-miss
     # contract; both are independent rules in the same chapter, not duplicate prose.
-    "docs/architecture/06-agent-core.md": 310100,
+    # 310100 -> 310700 (PR #1300): the transport paragraph gains the trust-bundle seam every first-party
+    # client shares; no older text to displace.
+    "docs/architecture/06-agent-core.md": 310700,
     # 36991 -> 37300: the facade paragraph names the three loop constants runtime_limits.py
     # gained (events batch bound, budget-projection retry interval); no older text to displace.
     # 37300 -> 38400 (PR #1207): the Z.ai (`zai::`) direct provider gets its own route
     # paragraph (plan-selected endpoint, low/high/max projection, 1113 billing) plus two
     # settings rows; the base sat 95 bytes under the previous budget, no older text to displace.
-    "docs/architecture/07-configuration.md": 38400,
+    # 38400 -> 38700 (PR #1300): one settings row for the extra-CA trust bundle; the base sat 33 bytes under.
+    "docs/architecture/07-configuration.md": 38700,
     # 18947 -> 19287: CI failure collection now documents diagnostic desktop builds while release remains gated.
     # 19287 -> 20560 (#1215): three contracts the chapter had no older text for — the
     # ONE reusable browser lane and the two triggers that share it (the unfiltered

@@ -845,6 +845,18 @@ export function renderSettingsPage() {
                     </div>
 
                     <div class="form-section">
+                        <h3>Extra CA Certificates</h3>
+                        <div class="settings-section-copy">Only for a network whose TLS certificates the default bundle does not trust: a TLS-inspecting proxy, or an endpoint behind a national CA such as GigaChat's. Ouroboros adds the file to its defaults for every provider call; everything else keeps working.</div>
+                        <div class="form-row">
+                            <div class="form-field ui-field">
+                                <label for="s-extra-ca-bundle">Extra CA bundle (PEM)</label>
+                                <input id="s-extra-ca-bundle" placeholder="/path/to/extra-ca.pem" class="ui-control" name="s-extra-ca-bundle" type="text" aria-describedby="s-extra-ca-bundle-help">
+                                <div class="settings-inline-note ui-field-help" id="s-extra-ca-bundle-help">Absolute or <code>~</code>-prefixed path to a PEM file on this machine. Leave empty unless a provider fails with a certificate error.</div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="form-section">
                         <h3>Local Model Runtime</h3>
                         <div class="settings-section-copy">Only fill this in when you want Ouroboros to start and route to a GGUF model on this machine.</div>
                         <div class="form-grid two">

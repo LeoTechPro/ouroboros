@@ -520,7 +520,9 @@ class _ProviderRoutingMixin:
         headers = tuple(sorted(
             (str(k), str(v)) for k, v in dict(target.get("default_headers") or {}).items()
         ))
-        cache_key = (str(target.get("provider") or ""), base_url, api_key, headers)
+        from ouroboros.net_transport import extra_ca_bundle
+
+        cache_key = (str(target.get("provider") or ""), base_url, api_key, headers, extra_ca_bundle())
         if cache_key not in self._remote_clients:
             self._remote_clients[cache_key] = self._new_remote_client(target)
         return self._remote_clients[cache_key]
@@ -565,7 +567,9 @@ class _ProviderRoutingMixin:
         api_key = str(target.get("api_key") or "")
         headers_dict = dict(target.get("default_headers") or {})
         headers = tuple(sorted((str(k), str(v)) for k, v in headers_dict.items()))
-        cache_key = (str(target.get("provider") or ""), base_url, api_key, headers)
+        from ouroboros.net_transport import extra_ca_bundle
+
+        cache_key = (str(target.get("provider") or ""), base_url, api_key, headers, extra_ca_bundle())
 
         client = self._async_remote_clients.get(cache_key)
         if client is None:

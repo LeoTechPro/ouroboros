@@ -351,8 +351,10 @@ def probe_provider_readiness(
 
             def send_anthropic(payload):
                 from ouroboros.llm_attempt import processing_contract_headers
+                from ouroboros.net_transport import requests_verify_kwargs
                 response = requests.post(
                     url, headers={**headers, **processing_contract_headers(target, payload)}, json=payload, timeout=float(timeout),
+                    **requests_verify_kwargs(),
                 )
                 response.raise_for_status()
                 return response
@@ -460,7 +462,8 @@ def upstream_transport_reachable(llm: Any, model: str, *, timeout: float,
         # Metadata carries no cognitive in-flight lease. Reuse the ordinary
         # connection allowance for every HEAD phase, not the LLM read window.
         timeout = min(float(timeout), float(llm._no_proxy_timeout(timeout).connect))
-        with httpx.Client(trust_env=False, timeout=timeout, follow_redirects=False) as client:
+        from ouroboros.net_transport import verify_kwargs
+        with httpx.Client(trust_env=False, timeout=timeout, follow_redirects=False, **verify_kwargs()) as client:
             response = client.head(url)
         # An upstream HTTP refusal still proves connectivity. A gateway/server
         # outage does not. This says nothing about the old generation's outcome.
