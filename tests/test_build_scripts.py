@@ -544,28 +544,48 @@ class TestDockerignore:
 
 
 class TestDockerfile:
-    """Dockerfile must install Playwright Chromium/WebKit binaries so browser tools work
-    out of the box in the container without additional setup."""
+    """The Docker base must bundle Playwright Chromium/WebKit for child images."""
+
+    def test_application_image_uses_dependency_base(self):
+        src = _read("Dockerfile")
+        assert "ARG OUROBOROS_BASE_IMAGE=ouroboros-base:local" in src
+        assert "FROM ${OUROBOROS_BASE_IMAGE}" in src
+
+    def test_application_owns_project_environment(self):
+        app = _read("Dockerfile")
+        base = _read("docker/Dockerfile.base")
+        assert "UV_PROJECT_ENVIRONMENT=/opt/venv" in app
+        assert 'PATH="/opt/venv/bin:$PATH"' in app
+        assert "uv sync --locked --no-dev --extra browser --no-install-project" in app
+        assert "UV_PROJECT_ENVIRONMENT" not in base
+        assert "uv sync" not in base
+
+    def test_base_installs_project_certificates(self):
+        src = _read("docker/Dockerfile.base")
+        assert "COPY docker/certs/ /usr/local/share/ca-certificates/" in src
+        assert "update-ca-certificates" in src
 
     def test_playwright_install_chromium_present(self):
-        src = _read("Dockerfile")
+        src = _read("docker/Dockerfile.base")
         assert "playwright install chromium webkit" in src, (
             "Dockerfile must call 'playwright install chromium webkit' to bundle the browsers"
         )
 
-    def test_playwright_browsers_path_zero_set(self):
-        src = _read("Dockerfile")
-        assert "PLAYWRIGHT_BROWSERS_PATH=0" in src, (
-            "Dockerfile must set PLAYWRIGHT_BROWSERS_PATH=0 so Chromium installs "
-            "inside the pip package tree (not into a user cache that won't survive "
-            "image layer boundaries)"
-        )
+    def test_playwright_uses_shared_browser_path(self):
+        src = _read("docker/Dockerfile.base")
+        assert "PLAYWRIGHT_BROWSERS_PATH=/ms-playwright" in src
+
+    def test_base_playwright_version_matches_lock(self):
+        src = _read("docker/Dockerfile.base")
+        match = re.search(r'\[\[package\]\]\nname = "playwright"\nversion = "([^"]+)"', _read("uv.lock"))
+        assert match is not None
+        assert f"PLAYWRIGHT_VERSION={match.group(1)}" in src
 
     def test_playwright_install_deps_present(self):
         """Dockerfile must use 'playwright install-deps chromium webkit' (the authoritative
         Playwright dependency resolver) rather than a hand-curated apt library list.
         This ensures all runtime native libs required by Chromium/WebKit are present."""
-        src = _read("Dockerfile")
+        src = _read("docker/Dockerfile.base")
         assert "playwright install-deps chromium webkit" in src, (
             "Dockerfile must call 'playwright install-deps chromium webkit' to install all "
             "native system libraries required by Chromium/WebKit via Playwright's authoritative "
@@ -575,7 +595,7 @@ class TestDockerfile:
     def test_install_deps_before_install_chromium(self):
         """Native system dependencies must be installed BEFORE the Chromium binary
         is downloaded, so the binary can find its runtime libraries on first launch."""
-        src = _read("Dockerfile")
+        src = _read("docker/Dockerfile.base")
         deps_pos = src.find("playwright install-deps chromium webkit")
         src.find("playwright install chromium webkit")
         # binary_pos must not match the install-deps line itself
@@ -588,26 +608,26 @@ class TestDockerfile:
             "playwright install-deps must appear BEFORE playwright install chromium webkit in Dockerfile"
         )
 
-    def test_uv_sync_before_playwright_install_deps(self):
-        """uv sync must appear BEFORE playwright install-deps chromium webkit — the
+    def test_playwright_package_before_playwright_install_deps(self):
+        """uv pip must install Playwright BEFORE playwright install-deps — the
         playwright Python package must be importable when install-deps runs."""
-        src = _read("Dockerfile")
-        sync_pos = src.find("uv sync")
+        src = _read("docker/Dockerfile.base")
+        install_pos = src.find("uv pip install --system")
         deps_pos = src.find("playwright install-deps chromium webkit")
-        assert sync_pos != -1, "uv sync step not found in Dockerfile"
+        assert install_pos != -1, "Playwright package install not found in Dockerfile"
         assert deps_pos != -1, "playwright install-deps chromium webkit not found in Dockerfile"
-        assert sync_pos < deps_pos, (
-            "uv sync must appear BEFORE playwright install-deps chromium webkit in Dockerfile "
-            f"(sync at char {sync_pos}, install-deps at {deps_pos})"
+        assert install_pos < deps_pos, (
+            "Playwright package must be installed before playwright install-deps "
+            f"(install at char {install_pos}, install-deps at {deps_pos})"
         )
 
-    def test_uv_sync_before_all_playwright_invocations(self):
-        """uv sync must appear BEFORE every ``python3 -m playwright ...`` invocation
+    def test_playwright_package_before_all_playwright_invocations(self):
+        """uv pip must install Playwright before every ``python3 -m playwright`` invocation
         in the Dockerfile — both ``install-deps`` and ``install chromium webkit``.
-        If *any* playwright invocation precedes dependency sync, ModuleNotFoundError occurs."""
-        src = _read("Dockerfile")
-        sync_pos = src.find("uv sync")
-        assert sync_pos != -1, "uv sync step not found in Dockerfile"
+        Otherwise the module invocation raises ModuleNotFoundError."""
+        src = _read("docker/Dockerfile.base")
+        install_pos = src.find("uv pip install --system")
+        assert install_pos != -1, "Playwright package install not found in Dockerfile"
 
         import re as _re
         playwright_invocations = [
@@ -616,9 +636,9 @@ class TestDockerfile:
         assert playwright_invocations, "No 'python3 -m playwright' invocations found in Dockerfile"
 
         earliest_playwright = min(playwright_invocations)
-        assert sync_pos < earliest_playwright, (
-            "uv sync must appear BEFORE the earliest 'python3 -m playwright' invocation "
-            f"in the Dockerfile (sync at char {sync_pos}, earliest playwright at {earliest_playwright}). "
+        assert install_pos < earliest_playwright, (
+            "Playwright package install must appear before its first module invocation "
+            f"(install at char {install_pos}, earliest playwright at {earliest_playwright}). "
             f"Found {len(playwright_invocations)} playwright invocation(s) at positions: "
             f"{playwright_invocations}"
         )

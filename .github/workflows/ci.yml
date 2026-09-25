@@ -42,6 +42,7 @@ on:
       - 'build_linux.sh'
       - 'build_windows.ps1'
       - 'Dockerfile'
+      - 'docker/**'
       - 'scripts/**'
       - 'devtools/**'
       - 'packaging/**'
@@ -532,7 +533,9 @@ jobs:
       - uses: actions/checkout@v4
       - name: Build Docker image
         id: docker_build
-        run: docker build -t ouroboros-web:test .
+        run: |
+          docker build -f docker/Dockerfile.base -t ouroboros-base:local .
+          docker build -t ouroboros-web:test .
       - uses: ./.github/actions/setup-python-env
         id: setup_python
       - name: Install UI smoke browser binaries
@@ -561,7 +564,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Build Docker image
-        run: docker build -t ouroboros-web:test .
+        run: |
+          docker build -f docker/Dockerfile.base -t ouroboros-base:local .
+          docker build -t ouroboros-web:test .
       - name: Run portable detail tests in Docker
         run: |
           docker run --rm --entrypoint sh -e OUROBOROS_EXPECT_HEADLESS_SHELL=1 ouroboros-web:test -c \

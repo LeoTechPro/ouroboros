@@ -1,39 +1,31 @@
-# Ouroboros — Docker image for web UI runtime
+# syntax=docker/dockerfile:1
+
+# Ouroboros — application image for web UI runtime
 # Usage:
+#   docker build -f docker/Dockerfile.base -t ouroboros-base:local .
 #   docker build -t ouroboros-web .
 #   docker run --rm -p 8765:8765 ouroboros-web
 
-FROM ghcr.io/astral-sh/uv:0.12.1 AS uv
-FROM python:3.10-slim
+ARG OUROBOROS_BASE_IMAGE=ouroboros-base:local
+FROM ${OUROBOROS_BASE_IMAGE}
 
-COPY --from=uv /uv /uvx /bin/
-
-# System dependencies (git + Playwright/Chromium native libs installed via playwright install-deps)
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    git \
-    && rm -rf /var/lib/apt/lists/*
-
-# Working directory
-ENV APP_HOME=/app
+# Application environment
+ENV APP_HOME=/app \
+    UV_LINK_MODE=copy \
+    UV_COMPILE_BYTECODE=1 \
+    UV_PROJECT_ENVIRONMENT=/opt/venv \
+    PATH="/opt/venv/bin:$PATH"
 WORKDIR ${APP_HOME}
 
-# Resolve only from the reviewed lock. Keeping dependencies in their own layer
-# lets source edits reuse the expensive Python package and browser downloads.
-ENV UV_LINK_MODE=copy \
-    UV_COMPILE_BYTECODE=1 \
-    PATH="/app/.venv/bin:$PATH"
+# Install locked project dependencies separately so source edits reuse this layer.
 COPY pyproject.toml uv.lock ./
-RUN uv sync --locked --no-dev --extra browser --no-install-project
-
-# Install all Playwright native system dependencies for Chromium/WebKit (authoritative list from Playwright)
-RUN python3 -m playwright install-deps chromium webkit
-
-# Install Playwright Chromium/WebKit browser binaries so browser tools work out of the box
-RUN PLAYWRIGHT_BROWSERS_PATH=0 python3 -m playwright install chromium webkit
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --locked --no-dev --extra browser --no-install-project
 
 # Copy application
 COPY . .
-RUN uv sync --locked --no-dev --extra browser --no-editable
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --locked --no-dev --extra browser --no-editable
 
 # Default environment
 ENV OUROBOROS_SERVER_HOST=0.0.0.0 \

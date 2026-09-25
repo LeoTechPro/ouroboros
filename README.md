@@ -346,6 +346,7 @@ uv export --locked --no-dev --extra browser --no-emit-project --no-hashes --no-a
 ### Docker
 
 ```bash
+docker build -f docker/Dockerfile.base -t ouroboros-base:local .
 docker build -t ouroboros-web .
 docker run --rm -p 8765:8765 \
   -e OUROBOROS_NETWORK_PASSWORD='choose-a-password' \
@@ -354,7 +355,10 @@ docker run --rm -p 8765:8765 \
   ouroboros-web
 ```
 
-Docker runs the web runtime, not the native desktop shell. It bundles Chromium and WebKit support; use [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) for network and container policy.
+The base image contains only runtime prerequisites: Playwright, Chromium/WebKit,
+their system libraries, Git, and trusted certificates from `docker/certs`.
+The application image owns the project environment and locked dependencies. Docker runs
+the web runtime, not the native desktop shell; use [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) for network and container policy.
 
 ### Release tag prerequisite
 
