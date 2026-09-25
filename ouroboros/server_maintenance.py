@@ -226,7 +226,8 @@ def _periodic_supervisor_maintenance(
     watchdog and pending child-ref promotion replay (every 20s), custody reap of
     orphaned task-scoped processes (every 600s) + review-job zombie reconcile
     (every 300s). Each cadence gates itself via its own last-run marker, updated on
-    the LOOP thread; the first two cadences then do their work on a daemon thread.
+    the LOOP thread: the first two stamp before handing their work to a daemon
+    thread; the inline zombie reconcile stamps when its pass ends.
     ``stop_event`` is the loop's per-generation token, handed to the custody pass so
     it stops mutating when that generation ends. ``on_orphans_healed(count)`` fires
     when the zombie reconcile terminalized orphaned RUNNING task rows (the alarm
@@ -249,8 +250,12 @@ def _periodic_supervisor_maintenance(
             latch.release()
             log.warning("Periodic custody sweep could not start", exc_info=True)
     if time.time() - last_review_reconcile[0] > 300:
-        last_review_reconcile[0] = time.time()
-        _periodic_zombie_reconcile(on_orphans_healed=on_orphans_healed)
+        try:
+            _periodic_zombie_reconcile(on_orphans_healed=on_orphans_healed)
+        finally:
+            # Stamped when the pass ENDS: a pass slower than its cadence never re-arms
+            # on the next tick, so >=300 s of ordinary ticks separate two passes (issue #1230).
+            last_review_reconcile[0] = time.time()
 
 
 def _run_periodic_custody_sweep(stop_event: Any = None, latch: Any = None) -> None:

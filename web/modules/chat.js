@@ -615,17 +615,16 @@ export function createChatInstance({
 
     async function refreshHeaderControlState(force = false) {
         if (!force && state.activePage !== 'chat') return;
-        const request = stateSnapshots.begin();
+        const request = await stateSnapshots.gate(force);
+        if (!request) return;
         try {
             const resp = await apiFetch('/api/state', { cache: 'no-store' });
             if (!resp.ok) throw new Error(`State read failed: HTTP ${resp.status}`);
             const data = await resp.json();
             stateSnapshots.apply(request, data);
         } catch {
-            if (stateSnapshots.isCurrent(request)) {
-                syncHeaderControlState({ accounting: { available: false } });
-                stateSnapshots.fail?.(request);
-            }
+            if (stateSnapshots.isCurrent(request)) syncHeaderControlState({ accounting: { available: false } });
+            stateSnapshots.fail?.(request);
         }
     }
 
