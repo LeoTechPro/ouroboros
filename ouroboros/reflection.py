@@ -352,20 +352,22 @@ def _extract_trailing_json(text: str, marker: str) -> tuple[str, Optional[list]]
 
 
 def record_memory_action_skip(events: pathlib.Path, action: Dict[str, Any], reason: str, *,
-                              project_id: str = "", reflection_ref: Any = None) -> None:
+                              project_id: str = "", input_ref: Any = None) -> None:
     """A lesson the host declines is a fact, not silence (I4).
 
     One writer for every rejection seam — the validator on the model's raw output
     and ``apply_memory_actions`` on a bound action — so the event names the reason
-    and the reflection source to reread wherever the lesson was dropped. It can
-    warn, never raise: an audit-write failure must not discard the independent
-    later lessons of the same batch."""
+    and, as ``input_ref``, what the seam that dropped the lesson had retained: the
+    validator's exact task-input prompt (the rejected reflection text itself is not
+    retained), a bound action's exact task-source copy of its reflection entry, or
+    the canonical log pointer. It can warn, never raise: an audit-write failure
+    must not discard the independent later lessons of the same batch."""
     try:
         recorded = append_jsonl(events, {"ts": utc_now_iso(), "type": "reflection_memory_action_skipped",
                                          "task_id": str(action.get("task_id") or ""), "project_id": project_id,
                                          "action_type": str(action.get("type") or "")[:80], "reason": reason,
                                          "content_chars": len(str(action.get("content") or "")),
-                                         "reflection_ref": reflection_ref})
+                                         "input_ref": input_ref})
         if not recorded:
             log.warning("Reflection memory skip event was not recorded: task=%s reason=%s",
                         action.get("task_id"), reason)
@@ -639,7 +641,7 @@ def generate_reflection(
         # (apply_memory_actions never sees it); the retained task input is its source.
         memory_actions = _validate_memory_actions(raw_memory_actions, task_id_str, on_skip=functools.partial(
             record_memory_action_skip, pathlib.Path(knowledge_context.drive_root) / "logs" / "events.jsonl",
-            project_id=str(getattr(knowledge_context, "project_id", "") or ""), reflection_ref=source_ref))
+            project_id=str(getattr(knowledge_context, "project_id", "") or ""), input_ref=source_ref))
         memory_actions = [bound for action in memory_actions for bound in (
             knowledge.bind_entries([action]) if action["type"] == "knowledge_write" else [action])]
 
@@ -721,12 +723,12 @@ def apply_memory_actions(env: Any, actions: List[Dict[str, Any]], *, project_id:
                     {"read": {"tool": "read_file", "arguments": {
                         "root": "runtime_data", "path": f"logs/{REFLECTIONS_FILENAME}"}}})
 
-    def input_ref(action: Dict[str, Any]) -> Dict[str, Any]:
+    def retained_input(action: Dict[str, Any]) -> Dict[str, Any]:
         ref = action.get("_reflection_source_ref")
         return ref if isinstance(ref, dict) and ref.get("kind") == "task_source" else fallback_ref
 
     def skipped(action: Dict[str, Any], reason: str) -> None:
-        record_memory_action_skip(events, action, reason, project_id=pid, reflection_ref=input_ref(action))
+        record_memory_action_skip(events, action, reason, project_id=pid, input_ref=retained_input(action))
 
     for action in (actions or [])[:3]:
         atype = str(action.get("type") or "")
@@ -763,7 +765,7 @@ def apply_memory_actions(env: Any, actions: List[Dict[str, Any]], *, project_id:
                 outcomes = _write_knowledge_entries(
                     root / "memory" / "knowledge", [action], context=ctx,
                     stamp={"writer": "reflection", "route": action.get("_reflection_route") or "unknown",
-                           "writer_input_ref": {**input_ref(action), "task_id": ctx.task_id}})
+                           "writer_input_ref": {**retained_input(action), "task_id": ctx.task_id}})
                 applied += sum(row["ok"] for row in outcomes)
                 if any(not row["ok"] for row in outcomes):
                     log.warning("Reflection knowledge update was not published: %s", outcomes)

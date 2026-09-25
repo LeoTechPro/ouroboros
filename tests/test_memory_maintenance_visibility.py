@@ -182,7 +182,7 @@ def test_the_chronicle_pass_consults_and_records_the_same_era_retry(tmp_path, fi
     assert [e["attempted"] for e in _events(tmp_path, "era_not_shorter")] == [True, False]
     assert json.loads(blocks_path.read_text(encoding="utf-8")) == blocks
 
-    # A pass without a meta path attempts and records nothing, as before.
+    # A pass without a meta path still pays the attempt; it reads and records no era_retry.
     assert c._compact_chronicle(blocks_path, _LLM(), "", None)["cost"] == 0.01
     assert len(seen) == 2 and json.loads(meta_path.read_text(encoding="utf-8")) == meta
 
@@ -260,6 +260,62 @@ def test_era_retry_is_keyed_on_the_effective_binding_dispatch_uses(tmp_path, fit
     assert c._call_consolidation_llm(llm, "prompt", "probe")[0] == "summary-1"
     sent = llm.calls[0]
     assert {key: sent[key] for key in override} == override
+
+
+def test_era_retry_is_keyed_to_the_binding_the_era_call_executed_on(tmp_path, fit, monkeypatch):
+    # Round 3 (critical F2): an owner ``switch`` during a model wait INSIDE the era call
+    # rebinds the role's override before the paid send, so a key captured before the
+    # call named the binding that never answered: the one that did paid again on the
+    # next pass, and a fresh attempt on the captured one was suppressed by its outcome.
+    from contextlib import nullcontext
+
+    from ouroboros import model_wait
+
+    blocks_path = tmp_path / "memory" / "dialogue_blocks.json"
+    meta_path = tmp_path / "memory" / "dialogue_meta.json"
+    blocks_path.parent.mkdir(parents=True)
+    blocks = _summary_blocks(3)
+    blocks_path.write_text(json.dumps(blocks), encoding="utf-8")
+    c.atomic_write_json(meta_path, {})
+    route_a = {"model": "test/model", "use_local": False}
+    route_b = {"model": "switched/model", "use_local": False, "model_account_override": "acct-B"}
+    waiter = SimpleNamespace(overrides={}, register_reprepare=lambda role, callback: nullcontext())
+    monkeypatch.setattr(model_wait, "current_model_wait", lambda: waiter)
+    not_shorter = "e" * (sum(len(b["content"]) for b in blocks) + 10)
+
+    def switch_inside_the_call(llm, prompt):
+        # The real era path: the first send dispatched on A; the owner switches the
+        # role while it is in flight, and the rest of the unit dispatches on B.
+        if len(llm.calls) == 1:
+            assert c._light_route() == route_a
+            waiter.overrides["light"] = dict(route_b)
+        return {"content": not_shorter}, dict(llm.usage)
+
+    def record():
+        (row,) = c._era_retry_runs(json.loads(meta_path.read_text(encoding="utf-8"))).values()
+        return row["route"]
+
+    llm = _LLM(effect=switch_inside_the_call)
+    c._compact_chronicle(blocks_path, llm, "", None, meta_path=meta_path)
+    assert llm.calls[0]["model"] == "test/model" and llm.calls[-1]["model"] == "switched/model"
+    assert record() == route_b  # keyed to the executed binding, not the one captured before the call
+    (event,) = _events(tmp_path, "era_not_shorter")
+    assert event["attempted"] is True and event["route"] == route_b
+    assert json.loads(blocks_path.read_text(encoding="utf-8")) == blocks
+
+    # The override still binds B: B's own refusal suppresses the paid retry on B.
+    still_b = _LLM(effect=lambda llm, prompt: ({"content": not_shorter}, dict(llm.usage)))
+    c._compact_chronicle(blocks_path, still_b, "", None, meta_path=meta_path)
+    assert still_b.calls == [] and record() == route_b
+
+    # Back on A, which never answered for this run: A is paid for once, then keyed honestly.
+    waiter.overrides.clear()
+    on_a = _LLM(effect=lambda llm, prompt: ({"content": not_shorter}, dict(llm.usage)))
+    c._compact_chronicle(blocks_path, on_a, "", None, meta_path=meta_path)
+    assert on_a.calls and all(call["model"] == "test/model" for call in on_a.calls)
+    assert record() == route_a
+    assert [(e["attempted"], e["route"]) for e in _events(tmp_path, "era_not_shorter")] == [
+        (True, route_b), (False, route_b), (True, route_a)]
 
 
 def test_a_legacy_single_era_retry_record_is_read_as_one_run(tmp_path):
@@ -409,7 +465,7 @@ def test_project_scoped_reflection_skips_are_typed_events(tmp_path):
         ("scratchpad_append", "project_scoped_task"), ("identity_update_candidate", "project_scoped_task"),
         ("knowledge_write", "missing_topic")]
     assert all(e["project_id"] == "proj_x" and e["task_id"] == "t1" and e["content_chars"] > 0 for e in events)
-    assert events[0]["reflection_ref"] == {"status": "source_unavailable", "project_id": "proj_x"}
+    assert events[0]["input_ref"] == {"status": "source_unavailable", "project_id": "proj_x"}
     assert not (tmp_path / "memory" / "scratchpad_blocks.json").exists()
 
 
@@ -439,9 +495,10 @@ def test_rejected_raw_reflection_actions_are_typed_events_on_the_real_path(tmp_p
         ("knowledge_write", "empty_content", 3), ("knowledge_write", "missing_topic", len("topic-less")),
         ("delete_everything", "unsupported_type", len("nope"))]
     assert all((e["task_id"], e["project_id"]) == ("t-skip", "proj_x") for e in events)
-    # The retained exact task input the model answered is the source to reread.
+    # The retained exact task input the model answered is what the validator seam
+    # kept; the rejected reflection text itself is not retained.
     assert entry["source_ref"]["kind"] == "task_source"
-    assert all(e["reflection_ref"] == entry["source_ref"] for e in events)
+    assert all(e["input_ref"] == entry["source_ref"] for e in events)
 
 
 def test_a_failed_validator_skip_event_cannot_abort_the_reflection(tmp_path, fit, monkeypatch, caplog):

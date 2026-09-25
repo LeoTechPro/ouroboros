@@ -1016,11 +1016,11 @@ def _era_for_run(run: List[Dict[str, Any]], meta: Dict[str, Any], logs_dir: path
     Per-room sections and the length-adaptive correction can make an era longer than
     its blocks; keeping the blocks loses nothing. The refusal is ``era_retry`` in meta
     (keyed by source hash, PER RUN — a chronicle holds several runs between gaps and
-    eras, and one run's refusal or success must not erase another's; each record keeps
-    the dispatch-route key and the route that ANSWERED): the same source is not paid
-    for again while the route a call would dispatch on now is the one that refused,
-    and every refusal, attempted or not, is an ``era_not_shorter`` event. Returns
-    ``(era or None, usage or None without a call)``."""
+    eras, and one run's refusal or success must not erase another's; each record keeps the
+    dispatch key, read AFTER the call because an owner switch during a wait inside it rebinds
+    the role before the paid send, and the route that ANSWERED): the same source is not paid for
+    again while the binding a call would dispatch on now is the one that refused, and every
+    refusal, attempted or not, is an ``era_not_shorter`` event. Returns ``(era or None, usage or None without a call)``."""
     fact = {"source_sha256": hashlib.sha256(json.dumps(run, ensure_ascii=False, sort_keys=True).encode()).hexdigest(),
             "route": _light_route(), "blocks": len(run), "source_chars": sum(len(b.get("content", "")) for b in run)}
     runs = _era_retry_runs(meta)
@@ -1031,8 +1031,9 @@ def _era_for_run(run: List[Dict[str, Any]], meta: Dict[str, Any], logs_dir: path
     era, usage = _compress_blocks_to_era(run, llm_client, identity_text,
                                          **({"knowledge_context": context} if context is not None else {}))
     if era is not None and len(era.get("content", "")) >= fact["source_chars"]:
-        # ``route`` is the dispatch key the next attempt compares against; the
-        # observed route is what actually produced the not-shorter era.
+        # The dispatch key the next attempt compares against, read AFTER the call: a switch inside it
+        # rebound the role, so a pre-call key would suppress what never answered and repay what did.
+        fact["route"] = _light_route()
         runs.pop(fact["source_sha256"], None)
         runs[fact["source_sha256"]] = {"route": fact["route"], "observed_route": _route_stamp(usage)}
         while len(runs) > ERA_RETRY_MAX_RUNS:
@@ -1055,8 +1056,8 @@ def _compact_chronicle(blocks_path: pathlib.Path, llm_client: Any,
 
     The pressure pass consults and records the SAME ``era_retry`` as the ordinary
     run (``meta_path``): a run that was not shorter on this route is not paid for
-    again by the next pressure pass on unchanged input. Without a meta path (a
-    caller that has none) the pass attempts and records nothing."""
+    again by the next pressure pass on unchanged input. Without a meta path (a caller
+    that has none) it reads and writes no durable retry metadata: every run is still paid for."""
     blocks = _load_blocks(blocks_path)
     meta: Dict[str, Any] = {}
     if meta_path is not None:
