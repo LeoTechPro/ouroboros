@@ -766,30 +766,63 @@ export function isTerminalTaskPhase(phase = '', terminal = false) {
  * can no longer mutate any projection. requestedAt stays tied to request start
  * and is the barrier for the CARD scan (`lastLiveObservedAt`) only — activity
  * hydration is a plain projection of the census and has no barrier.
+ *
+ * `gate(force)` is the page-wide single-flight admission for the readers: it
+ * resolves to a request when the caller may read now. A periodic tick that
+ * lands while a read is in flight is never queued: it resolves to null once
+ * that read settles, so a caller that only needs some fresh read to have
+ * landed (the boot prefetch before the socket opens) may await it. A forced
+ * caller that lands mid-flight is coalesced with every other forced caller
+ * into ONE follow-up read that starts when the in-flight read settles — the
+ * first forced caller receives that request, the others resolve to null once
+ * the follow-up has applied or failed. `begin()` stays the ungated clock for
+ * synthetic generation bumps. A gated request settles through `apply`/`fail`.
  */
 export function createStateSnapshotSequencer(onApply, now = () => Date.now(), onUnavailable = () => {}) {
     let requestedGeneration = 0;
     let appliedGeneration = 0;
+    let inflight = null;
+    let settled = null;
+    let followUp = null;
+    const deferred = () => { let resolve; const promise = new Promise((r) => { resolve = r; }); return { promise, resolve }; };
+    const begin = () => ({ generation: ++requestedGeneration, requestedAt: now() });
+    const open = () => { settled = deferred(); inflight = begin(); return inflight; };
+    const settle = (request) => {
+        if (!inflight || request !== inflight) return;
+        const done = settled;
+        const next = followUp;
+        inflight = settled = followUp = null;
+        if (next) next.resolve({ request: open(), done: settled.promise });
+        done.resolve();
+    };
     return {
-        begin() {
-            return { generation: ++requestedGeneration, requestedAt: now() };
+        begin,
+        gate(force = false) {
+            if (!inflight) return Promise.resolve(open());
+            if (!force) return settled.promise.then(() => null);
+            if (!followUp) { followUp = deferred(); return followUp.promise.then((f) => f.request); }
+            return followUp.promise.then((f) => f.done).then(() => null);
         },
         apply(request, data) {
-            const generation = Number(request?.generation) || 0;
-            if (!generation || generation <= appliedGeneration) return false;
-            appliedGeneration = generation;
-            onApply(data, request.requestedAt, generation);
-            return true;
+            try {
+                const generation = Number(request?.generation) || 0;
+                if (!generation || generation <= appliedGeneration) return false;
+                appliedGeneration = generation;
+                onApply(data, request.requestedAt, generation);
+                return true;
+            } finally { settle(request); }
         },
         isCurrent(request) {
             return (Number(request?.generation) || 0) > appliedGeneration;
         },
         fail(request) {
-            const generation = Number(request?.generation) || 0;
-            if (!generation || generation <= appliedGeneration) return false;
-            appliedGeneration = generation;
-            onUnavailable();
-            return true;
+            try {
+                const generation = Number(request?.generation) || 0;
+                if (!generation || generation <= appliedGeneration) return false;
+                appliedGeneration = generation;
+                onUnavailable();
+                return true;
+            } finally { settle(request); }
         },
     };
 }
