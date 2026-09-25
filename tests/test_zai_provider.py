@@ -116,6 +116,42 @@ class TestPlanSwitch:
         assert target["api_key"] == "sk-x"
         assert target["usage_model"] == "zai/glm-5.3"
 
+    def test_route_readers_follow_the_plan(self, monkeypatch):
+        # The Capability Evidence route identity (main route + reviewer route)
+        # must name the plan's endpoint, exactly as MiniMax's follows its region.
+        from ouroboros.gateway.settings import _active_main_route
+        from ouroboros.reviewer_window import reviewer_route
+
+        monkeypatch.setattr("ouroboros.config.runtime_settings", lambda: {"ZAI_PLAN": "coding"})
+        assert reviewer_route("zai::glm-5.3") == ("zai", ZAI_PLAN_ENDPOINTS["coding"])
+        route = _active_main_route({"OUROBOROS_MODEL": "zai::glm-5.3", "ZAI_PLAN": "coding"})
+        assert (route["provider"], route["base_url"]) == ("zai", ZAI_PLAN_ENDPOINTS["coding"])
+        assert _active_main_route({"OUROBOROS_MODEL": "zai::glm-5.3"})["base_url"] == ZAI_PLAN_ENDPOINTS["payg"]
+
+    def test_provider_test_rejects_an_unknown_plan(self, monkeypatch):
+        from ouroboros.gateway import models as provider_api
+
+        monkeypatch.setattr(provider_api, "load_settings", lambda: {})
+        monkeypatch.setattr(
+            provider_api, "_run_provider_test_with_settings",
+            lambda *_args: (_ for _ in ()).throw(AssertionError("must not probe")),
+        )
+        body = provider_api._run_provider_test("zai", {"ZAI_API_KEY": "x", "ZAI_PLAN": "codign"})
+        assert body == {"error": "unknown Z.ai plan", "_http_status": 400}
+
+    def test_plan_alone_is_not_a_provider(self):
+        # A plan is a transport choice, not a credential: a draft carrying only
+        # ZAI_PLAN must be refused exactly like a MiniMax region without a key,
+        # while the same draft with the key is accepted.
+        from ouroboros.settings_setup_contract import validate_setup_payload
+
+        plan_only = {"ZAI_PLAN": "coding", "OUROBOROS_MODEL": "zai::glm-5.3",
+                     "OUROBOROS_MODEL_LIGHT": "zai::glm-5.3-flash", "OUROBOROS_MODEL_FALLBACKS": "zai::glm-5.3-flash"}
+        _prepared, error = validate_setup_payload(plan_only, {})
+        assert error
+        _prepared, error = validate_setup_payload({**plan_only, "ZAI_API_KEY": "sk-zai-key-1234567890"}, {})
+        assert not error
+
 
 class TestEffortCarriage:
     """The canonical scale is always projected onto Z.ai's low/high/max enum:
@@ -259,6 +295,20 @@ class TestProbeBilling:
         result = controlled_probe_error(Exhausted("Insufficient balance"))
         assert result["error"] == "No credits"
         assert result["status_code"] == 429
+
+    def test_task_loop_does_not_retry_an_exhausted_plan(self):
+        from ouroboros.loop_llm_call import classify_llm_exception
+
+        class Exhausted(Exception):
+            status_code = 429
+            code = "1113"
+            body = {"error": {"code": "1113", "message": "Insufficient balance"}}
+
+        exhausted = classify_llm_exception(Exhausted("Insufficient balance"))
+        assert exhausted.kind == "quota_exhausted"
+        assert exhausted.retry_same_request is False
+        # An ordinary 429 keeps its transient, retryable classification.
+        assert classify_llm_exception(RuntimeError("Error code: 429 - too many requests")).retry_same_request is True
 
     def test_plain_429_stays_rate_limited(self):
         from ouroboros.llm_probe import controlled_probe_error

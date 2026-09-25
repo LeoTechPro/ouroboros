@@ -21,6 +21,7 @@ from ouroboros.provider_models import (
     resolve_zai_base_url,
     DIRECT_PROVIDER_DEFAULTS,
     MINIMAX_REGION_ENDPOINTS,
+    ZAI_PLAN_ENDPOINTS,
     OPENROUTER_DEFAULTS,
     provider_for_model,
     resolve_minimax_base_url,
@@ -42,7 +43,7 @@ def _provider_label_from_model_id(model_id: str) -> str:
         "qwen": "Qwen",
         "mistralai": "Mistral",
         "deepseek": "DeepSeek",
-        "zai": "Z.ai (GLM)",
+        "z-ai": "Z.ai (GLM)",
         "perplexity": "Perplexity",
     }.get(prefix, prefix.title() if prefix else "Other")
 
@@ -756,6 +757,9 @@ def _run_provider_test(provider_id: str, overrides: dict[str, str]) -> dict:
     minimax_region = str(settings.get("MINIMAX_REGION", "") or "").strip().lower()
     if provider_id == "minimax" and minimax_region and minimax_region not in MINIMAX_REGION_ENDPOINTS:
         return {"error": "unknown MiniMax region", "_http_status": 400}
+    zai_plan = str(settings.get("ZAI_PLAN", "") or "").strip().lower()
+    if provider_id == "zai" and zai_plan and zai_plan not in ZAI_PLAN_ENDPOINTS:
+        return {"error": "unknown Z.ai plan", "_http_status": 400}
     return _run_provider_test_with_settings(provider_id, settings)
 
 

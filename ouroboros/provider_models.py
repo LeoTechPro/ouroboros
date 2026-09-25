@@ -500,6 +500,8 @@ ZAI_DIRECT_DEFAULTS = {
     "light": "zai::glm-5.3-flash",
     "vision": "",
     "fallback": "zai::glm-5.3-flash",
+    # No deep_review default: the route publishes no window metadata and no live
+    # measurement exists, so the slot follows the MiniMax clear-instead-of-fill path.
 }
 
 DEEPSEEK_DIRECT_DEFAULTS = {

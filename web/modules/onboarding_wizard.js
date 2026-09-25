@@ -133,7 +133,7 @@ import { accountRowFacts } from './harness_accounts.js';
     }
 
     function hasApiAccess() {
-        return PROVIDER_FIELDS.some((field) => !['MINIMAX_REGION', 'OPENAI_COMPATIBLE_API_KEY'].includes(field.settingKey)
+        return PROVIDER_FIELDS.some((field) => !['MINIMAX_REGION', 'ZAI_PLAN', 'OPENAI_COMPATIBLE_API_KEY'].includes(field.settingKey)
             && trim(state[field.stateKey]));
     }
 
@@ -411,7 +411,7 @@ import { accountRowFacts } from './harness_accounts.js';
             // one value the wizard can never replace.
             const shortKey = keyValues.find(([field, value]) => value && (field.inputType || 'password') === 'password' && value.length < 10 && value !== trim(INITIAL_STATE[field.stateKey]));
             if (shortKey) return `${shortKey[0].label.replace(' API Key', '')} API key looks too short.`;
-            const hasRemote = keyValues.some(([field, value]) => value && !['OPENAI_COMPATIBLE_API_KEY', 'MINIMAX_REGION'].includes(field.settingKey));
+            const hasRemote = keyValues.some(([field, value]) => value && !['OPENAI_COMPATIBLE_API_KEY', 'MINIMAX_REGION', 'ZAI_PLAN'].includes(field.settingKey));
             if (!hasRemote && !localSource && !hasModelSubscription()) {
                 return state.agentsConnected.length
                     ? 'A Main model source has not been confirmed. Retry discovery, add an API key, or choose a local model.'

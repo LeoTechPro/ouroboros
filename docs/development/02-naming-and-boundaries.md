@@ -436,7 +436,7 @@ slug, not an official OpenAI model id, so a direct OpenAI Chat slot uses the pla
 Sol id (the slug in Chat Completions is a guaranteed 404) — a compatibility
 constraint, not a mutable capability table; direct OpenAI tool conversations stay
 on Chat Completions and a model-name prefix is never admission authority;
-DeepSeek and Z.ai are the direct effort-carrying routes, each `reasoning_effort`
+DeepSeek and Z.ai carry `reasoning_effort` through provider-specific projections
 keyed on the provider id rather than a name prefix or capability field, so a
 hand-built target cannot silently drop it; direct Anthropic is the deliberate exception to a purely
 reconstructed provider transcript, and no effort-to-`budget_tokens` policy is

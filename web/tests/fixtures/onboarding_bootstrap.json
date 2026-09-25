@@ -533,6 +533,8 @@
     "deepseek/deepseek-v4-pro",
     "deepseek::deepseek-v4-pro",
     "deepseek::deepseek-v4-flash",
+    "zai::glm-5.3",
+    "zai::glm-5.3-flash",
     "openai-compatible::meta-llama/compatible",
     "cloudru::zai-org/GLM-4.7",
     "minimax::MiniMax-M3",

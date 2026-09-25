@@ -338,7 +338,7 @@ def test_prepare_onboarding_settings_rejects_openai_compatible_key_without_base_
 def test_onboarding_frontend_uses_base_url_first_compatible_validation():
     source = (REPO / "web/modules/onboarding_wizard.js").read_text(encoding="utf-8")
 
-    assert "!['OPENAI_COMPATIBLE_API_KEY', 'MINIMAX_REGION'].includes(field.settingKey)" in source
+    assert "!['OPENAI_COMPATIBLE_API_KEY', 'MINIMAX_REGION', 'ZAI_PLAN'].includes(field.settingKey)" in source
     assert "const hasRemote = keyValues.some(([, value]) => value);" not in source
 
 
