@@ -49,14 +49,15 @@ def _read():
 
 
 def _run(root, monkeypatch, forced, *, task=None, presence=True, handoff=None, first=None, ceiling=None,
-         metadata=None, traces=None):
+         metadata=None, traces=None, rounds=1):
     """Round limit after one tool round, then the ONE forced call; real pipeline after it."""
     monkeypatch.setenv("OUROBOROS_TASK_REVIEW_MODE", "off")
-    monkeypatch.setenv("OUROBOROS_MAX_ROUNDS", "1")
+    monkeypatch.setenv("OUROBOROS_MAX_ROUNDS", str(rounds))
     registry = ToolRegistry(repo_dir=root, drive_root=root)
     ctx = registry._ctx
     ctx.is_direct_chat = True
-    ctx.task_metadata = {"inline_max_rounds": 1, **({"presence": _presence()} if presence else {}), **(metadata or {})}
+    ctx.task_metadata = {"inline_max_rounds": rounds, **({"presence": _presence()} if presence else {}),
+                         **(metadata or {})}
     if presence if ceiling is None else ceiling:
         ctx.task_contract = {"capability_ceiling": presence_ceiling_payload(_admission().capability_ceiling)}
     if handoff:
@@ -276,6 +277,87 @@ def test_a_tool_delivered_note_is_never_speech_even_when_owed_work_defers_the_tu
     replay = _cached_result(tmp_path, "presence-loop")
     assert (replay.outcome, replay.text, replay.work_ref) == ("deferred", "", "later-work")
     assert note not in json.dumps(stored["metadata"])
+
+
+@pytest.mark.parametrize("prepared_fits,reply,outcome,spoken,declaration", [
+    # The priced candidate still fits twice: ordinary work continues and its reply is speech.
+    ((True, True), "Here are the Q1 figures.", "message", "Here are the Q1 figures.", None),
+    # The priced candidate confirms the last-fit stop: the committed forced call stays armed.
+    ((True, False), RECORD, "silent", "", "missing"),
+], ids=["repriced_fall_through", "confirmed_stop"])
+def test_a_budget_repricing_arms_presence_only_for_the_forced_call_it_commits(
+        tmp_path, monkeypatch, prepared_fits, reply, outcome, spoken, declaration):
+    from ouroboros import task_pacing
+    from ouroboros.contracts.task_contract import normalize_budget_profile
+
+    ceiling = task_pacing.resolve_cost_ceiling(None, normalize_budget_profile(None), root_cap_usd=50.0)
+    monkeypatch.setattr(loop, "_resolve_task_cost_ceiling", lambda *_a: ceiling)
+    monkeypatch.setattr(loop, "_loop_tree_accounting", lambda **_k: {"accounted_usd": 20.0})
+    # proxy last-fit -> exact probe last-fit -> the prepared candidate decides
+    answers = iter((True, False, True, False, *prepared_fits))
+    monkeypatch.setattr(task_pacing, "wrapup_reservation_fits", lambda **_k: next(answers, True))
+    monkeypatch.setattr(task_pacing, "prospective_wrapup_attempt_request", lambda **_k: object())
+    monkeypatch.setattr(task_pacing, "prepared_wrapup_candidate",
+                        lambda _ctx, messages, **_k: (object(), messages))
+    prepared, prepare = [], loop._prepare_forced_prompt
+    monkeypatch.setattr(loop, "_prepare_forced_prompt", lambda *args: prepared.append(1) or prepare(*args))
+    post_tool = loop._prepare_post_tool_budget_context
+
+    def measured(tools, limit_ctx, *args):  # the fake route records no context-fit measurement
+        limit_ctx.accumulated_usage["_context_prompt_estimate"] = 4_000
+        return post_tool(tools, limit_ctx, *args)
+
+    monkeypatch.setattr(loop, "_prepare_post_tool_budget_context", measured)
+
+    result, stored, calls, text = _run(tmp_path, monkeypatch, reply, rounds=3)
+
+    assert prepared == [1] and len(calls) == 2  # the real preparer priced the forced prompt once
+    assert (result["outcome"], result["text"]) == (outcome, spoken)
+    assert (stored["metadata"].get("presence_declaration") or {}).get("status") == declaration
+    assert _cached_result(tmp_path, "presence-loop").text == spoken
+    if declaration is None:
+        assert "[PRESENCE_DELIVERY]" not in json.dumps(calls[-1])  # priced on a copy, never sent
+        assert text == reply and stored["terminal_origin"] == "model_final"
+    else:
+        assert "[PRESENCE_DELIVERY]" in str(calls[-1][-1]["content"])
+        assert stored["reason_code"] == "budget_exhausted" and text == RECORD
+
+
+def _receipt(task_id, text, delivery_id, *, state="delivered", key=KEY):
+    return {"task_id": task_id, "type": "presence_delivery", "text": text, "transport": {
+        "conversation_key": key, "delivery": {"state": state, "delivery_id": delivery_id, "part_id": "0"}}}
+
+
+def test_a_promoted_roots_observed_sends_reach_its_forced_final_without_an_inbound_row(tmp_path, monkeypatch):
+    # A promoted root logs no inbound row of its own: only its tool sends carry its id.
+    for row in (_receipt("promoted-9", "First table sent.", "d1"),
+                _receipt("promoted-9", "Second part", "d2", state="uncertain"),
+                _receipt("promoted-9", "Sent to another room", "d3", key="telegram:bot-1:room-2:0"),
+                _receipt("presence-turn", "The turn's own early reply", "d4")):
+        append_jsonl(tmp_path / "logs" / "chat.jsonl", row)
+    task = {"id": "promoted-9", "type": "task", "chat_id": 7, "text": "Compile", "delegation_role": "root",
+            "root_task_id": "promoted-9", "metadata": {"presence": _presence()}}
+
+    result, _stored, calls, _text = _run(tmp_path, monkeypatch, _forced("tool_delivered", ""), task=task)
+
+    prompt = str(calls[-1][-1]["content"])
+    assert 'Sends confirmed for this task so far: "First table sent." (live chat log only;' in prompt
+    assert "so there may be more); 1 more part(s) have an uncertain outcome" in prompt
+    assert "another room" not in prompt and "early reply" not in prompt
+    assert (result["outcome"], result["text"]) == ("tool_delivered", "")
+
+
+def test_send_facts_mark_only_an_uncovered_task_as_partial(tmp_path):
+    from ouroboros.presence_context import presence_send_facts
+
+    append_jsonl(tmp_path / "logs" / "chat.jsonl", {"task_id": "turn", "direction": "in", "text": "x"})
+    for task_id in ("turn", "promoted"):
+        append_jsonl(tmp_path / "logs" / "chat.jsonl", _receipt(task_id, f"sent by {task_id}", task_id))
+
+    assert presence_send_facts(tmp_path, "turn", _presence()) == '"sent by turn"'  # its inbound row covers it
+    assert presence_send_facts(tmp_path, "promoted", _presence()).startswith('"sent by promoted" (live chat log only;')
+    assert presence_send_facts(tmp_path, "silent-root", _presence()).startswith("none (live chat log only;")
+    assert presence_send_facts(tmp_path, "promoted", _presence(version=0)).startswith("unknown (this transport")
 
 
 def test_forced_prompt_and_facts_read_the_canonical_root_on_a_forked_drive(tmp_path, monkeypatch):

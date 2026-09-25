@@ -145,10 +145,16 @@ def presence_send_facts(drive_root: Path, task_id: str, value: Any) -> str:
     key = str((value.get("event") or {}).get("conversation_key") or "")
     if not key or value.get("delivery_reporting_version") != 1:
         return "unknown (this transport reports no delivery receipts)"
-    sent, uncertain = _turn_sends(_live_task_rows(Path(drive_root), str(task_id or ""), key))
-    if sent is None:
-        return "unknown (no readable receipt coverage for this task)"
+    rows = _live_task_rows(Path(drive_root), str(task_id or ""), key)
+    sent, uncertain = _turn_sends(rows)
+    partial = sent is None
+    if partial:
+        # No inbound row of this task in the live log (a promoted root never logs one): its receipts
+        # there are still observed, but earlier ones may sit in rotated history this read does not cover.
+        sent, uncertain = _turn_sends(rows, same_generation=True)
     said = " / ".join(json.dumps(text, ensure_ascii=False) for text in sent if text) or "none"
+    if partial:
+        said += " (live chat log only; receipts rotated into archived history are not covered, so there may be more)"
     return said + (f"; {uncertain} more part(s) have an uncertain outcome and may have landed" if uncertain else "")
 
 

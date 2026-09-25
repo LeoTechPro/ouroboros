@@ -121,21 +121,39 @@ def _task_record(
     return record, None
 
 
+def _owner_record(row: Dict[str, Any] | None, queued: Dict[str, Any]) -> Dict[str, Any]:
+    """Whose work one task is: a readable result row's binding fact decides, else the queue's own task."""
+    if row and row.get("presence_binding_id"):
+        return {"metadata": {"presence": {"binding_id": row["presence_binding_id"]}},
+                "delegation_role": row.get("delegation_role"), "parent_task_id": row.get("parent_task_id")}
+    return queued
+
+
 def _running_tasks(drive_root: pathlib.Path, binding: str | None = None) -> List[Dict[str, Any]]:
     snapshot, _error = _read_json(drive_root / "state" / "queue_snapshot.json")
     snapshot = snapshot or {}
     running = snapshot.get("running")
     if not isinstance(running, list):
         return []
+    facts: Dict[str, Dict[str, Any]] = {}
+    if binding is not None:
+        from ouroboros.gateway.task_list_scan import raw_result_facts
+
+        try:
+            facts, _malformed = raw_result_facts(drive_root / "task_results")
+        except OSError:
+            pass  # no result row is readable: the queue rows decide, as on the scoped task list
     rows: List[Dict[str, Any]] = []
     for item in running:
         if not isinstance(item, dict):
             continue
         task = item.get("task") if isinstance(item.get("task"), dict) else {}
-        if binding is not None and not presence_related_work(binding, task):
-            continue  # a scoped page lists no foreign running work
+        task_id = str(item.get("id") or item.get("task_id") or "")
+        if binding is not None and not presence_related_work(
+                binding, _owner_record(facts.get(f"{task_id}.json"), task)):
+            continue  # a scoped page lists no foreign running work, whatever a stale queue row claims
         rows.append({
-            "task_id": str(item.get("id") or item.get("task_id") or ""),
+            "task_id": task_id,
             "status": "running",
             "description": str(item.get("text") or item.get("description")
                                or task.get("description") or task.get("text") or ""),
@@ -174,9 +192,7 @@ def _presence_scope_inventory(
     selected: set[str] = set()
     for name, row in facts.items():
         task_id = row.get("task_id") or row.get("id") or name[:-5]
-        record = ({"metadata": {"presence": {"binding_id": row["presence_binding_id"]}},
-                   "delegation_role": row.get("delegation_role"), "parent_task_id": row.get("parent_task_id")}
-                  if row.get("presence_binding_id") else queued.get(task_id, ("", {}))[1])
+        record = _owner_record(row, queued.get(task_id, ("", {}))[1])
         if task_id != exclude and presence_related_work(binding, record):
             selected.add(name)
     unreadable = set(malformed)

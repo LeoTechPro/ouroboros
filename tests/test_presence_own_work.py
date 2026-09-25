@@ -136,6 +136,39 @@ def test_same_binding_work_from_other_threads_is_paged_and_nothing_else(tmp_path
     assert moved["error"]["code"] == "RECENT_TASKS_SNAPSHOT_CHANGED" and moved["tasks"] == []
 
 
+def test_running_work_is_listed_by_its_canonical_binding_not_its_queue_claim(tmp_path):
+    _work(tmp_path, "running-conflict", "running", binding=OTHER)  # the canonical row: another binding
+    _work(tmp_path, "running-mine", "running", key=ROOM)
+    _work(tmp_path, "running-requeued", "running", key=THREAD)  # mine, whatever its queue row says
+    # Rows that do not decide leave the queue's own task metadata deciding: a row that
+    # predates provenance, and a row that cannot be read right now.
+    write_task_result(tmp_path, "running-legacy", "running", delegation_role="root")
+    (tmp_path / "task_results" / "running-torn.json").write_text("{", encoding="utf-8")
+    mine = {"delegation_role": "root", "metadata": {"presence": _presence()}}
+    _queue(tmp_path, running=[
+        {"id": "running-conflict", "description": "their private goal", **mine},
+        {"id": "running-mine", "description": "my goal", **mine},
+        {"id": "running-requeued", "description": "requeued goal", "delegation_role": "root",
+         "metadata": {"presence": _presence(OTHER)}},
+        {"id": "running-legacy", "description": "legacy goal", **mine},
+        {"id": "running-torn", "description": "torn goal", **mine},
+        {"id": "queue-foreign", "description": "queue says theirs", "delegation_role": "root",
+         "metadata": {"presence": _presence(OTHER)}},
+    ])
+    registry, _ctx = _registry(tmp_path)
+
+    page = json.loads(registry.execute("recent_tasks", {"limit": 20}))
+
+    assert {row["task_id"]: row["description"] for row in page["running"]} == {
+        "running-mine": "my goal", "running-requeued": "requeued goal", "running-legacy": "legacy goal",
+        "running-torn": "torn goal"}
+    assert "running-conflict" not in json.dumps(page) and "their private goal" not in json.dumps(page)
+    owner = ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path)
+    owner.set_context(ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id="owner-turn"))
+    unscoped = json.loads(owner.execute("recent_tasks", {"limit": 20}))
+    assert "running-conflict" in {row["task_id"] for row in unscoped["running"]}  # owner reads stay whole
+
+
 def test_an_empty_or_foreign_binding_attributes_nothing_and_owner_reads_stay_whole(tmp_path):
     _work(tmp_path, "mine", "completed")
     _work(tmp_path, "theirs", "completed", binding=OTHER)
@@ -534,7 +567,7 @@ def test_a_forked_promoted_root_reads_its_bindings_work_and_sends_from_the_canon
     _work(child, "child-drive-decoy", "completed", key=ROOM, result="decoy")  # worker-local rows only
     presence = {**_presence(), "instructions": "Be useful.", "delivery_reporting_version": 1}
     for root, text in ((canonical, "Canonical sent reply"), (child, "Child drive decoy send")):
-        append_jsonl(root / "logs" / "chat.jsonl", {"task_id": "promoted-self", "direction": "in", "text": "x"})
+        # A promoted root logs no inbound row of its own; its sends are observed all the same.
         append_jsonl(root / "logs" / "chat.jsonl", {
             "task_id": "promoted-self", "type": "presence_delivery", "text": text,
             "transport": {"conversation_key": HERE, "delivery": {"state": "delivered", "delivery_id": "d", "part_id": "0"}},
@@ -551,4 +584,4 @@ def test_a_forked_promoted_root_reads_its_bindings_work_and_sends_from_the_canon
     ctx = types.SimpleNamespace(drive_root=child, budget_drive_root=str(canonical), task_id="promoted-self",
                                 task_metadata={"presence": presence, "budget_drive_root": str(canonical)})
     note = presence_finish_not_accepted_note(ctx, {"outcome": "tool_delivered"})
-    assert '"Canonical sent reply"' in note and "decoy" not in note
+    assert '"Canonical sent reply" (live chat log only;' in note and "decoy" not in note
