@@ -16,11 +16,10 @@ from ouroboros.owner_quiz import quiz_states, record_asked
 from ouroboros.task_results import STATUS_RUNNING, write_task_result
 from tests.test_quiz_answer import _escalate, _tool_ctx
 
-_NOW = datetime.datetime.now(datetime.timezone.utc)
-
-
 def _stamp(minutes_ago: float) -> str:
-    return (_NOW - datetime.timedelta(minutes=minutes_ago)).isoformat()
+    # Built at CALL time, never at import: the helper measures against the real clock when the
+    # card is asked, and collection under xdist can run tens of seconds before this test body.
+    return (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(minutes=minutes_ago)).isoformat()
 
 
 def _shown(iso: str) -> str:
@@ -68,10 +67,12 @@ def test_owner_started_root_names_its_message_and_the_last_owner_message_in_this
         {"ts": _stamp(5), "direction": "in", "chat_id": 7, "text": "other room"},
     )
     event, block = _ask(ctx)
-    expected = (f"Asked by task root-1, started by your message of {_shown(started)}; "
-                f"your last message in this chat: {_shown(last)} (47 minutes before this question).")
-    assert block["host_facts"] == expected
-    assert event["host_facts"] == expected
+    prefix = (f"Asked by task root-1, started by your message of {_shown(started)}; "
+              f"your last message in this chat: {_shown(last)} (")
+    assert block["host_facts"].startswith(prefix)
+    # 47 minutes and 18 seconds before the ask; a slow machine may cross into the 48th.
+    assert block["host_facts"][len(prefix):] in ("47 minutes before this question).", "48 minutes before this question).")
+    assert event["host_facts"] == block["host_facts"]
 
 
 def test_scheduled_follow_up_names_the_task_it_follows(tmp_path):
@@ -89,7 +90,7 @@ def test_consciousness_origin_is_named(tmp_path):
     _chat_rows(tmp_path, {"ts": _stamp(3.2), "direction": "in", "chat_id": 1, "text": "hi"})
     _event, block = _ask(ctx)
     assert block["host_facts"].startswith("Asked by task root-1, started by background consciousness; ")
-    assert block["host_facts"].endswith("(3 minutes before this question).")
+    assert block["host_facts"].endswith(("(3 minutes before this question).", "(4 minutes before this question)."))
 
 
 def test_unknown_origin_and_no_owner_message_are_said_as_unknown(tmp_path):
