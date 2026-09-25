@@ -666,24 +666,34 @@ def apply_memory_actions(env: Any, actions: List[Dict[str, Any]], *, project_id:
     pid = str(project_id or "").strip()
     applied = 0
     events = pathlib.Path(env.drive_root) / "logs" / "events.jsonl"
-    # The reflection row that nominated an action is what its writer saw.
-    from ouroboros.project_facts import sanitize_project_id
+    # Project reflections live in a protected project store. Generic read_file
+    # cannot open it, while the canonical log contains only a bounded pointer.
+    # append_reflection_routed attaches an exact task-source copy to each action.
+    fallback_ref = ({"status": "source_unavailable", "project_id": pid} if pid else
+                    {"read": {"tool": "read_file", "arguments": {
+                        "root": "runtime_data", "path": f"logs/{REFLECTIONS_FILENAME}"}}})
 
-    # Project reflections live in their own durable project log; the canonical
-    # log has only a bounded pointer and cannot witness the nominated action.
-    reflection_path = (f"projects/{sanitize_project_id(pid)}/logs/{REFLECTIONS_FILENAME}"
-                       if pid else f"logs/{REFLECTIONS_FILENAME}")
-    reflection_ref = {"read": {"tool": "read_file", "arguments": {
-        "root": "runtime_data", "path": reflection_path}}}
+    def input_ref(action: Dict[str, Any]) -> Dict[str, Any]:
+        ref = action.get("_reflection_source_ref")
+        return ref if isinstance(ref, dict) and ref.get("kind") == "task_source" else fallback_ref
 
     def skipped(action: Dict[str, Any], reason: str) -> None:
         # A lesson the host declines is a fact, not silence (I4): name it where
         # Health and the owner can count it, with the reflection row to reread.
-        append_jsonl(events, {"ts": utc_now_iso(), "type": "reflection_memory_action_skipped",
-                              "task_id": str(action.get("task_id") or ""), "project_id": pid,
-                              "action_type": str(action.get("type") or ""), "reason": reason,
-                              "content_chars": len(str(action.get("content") or "")),
-                              "reflection_ref": reflection_ref})
+        try:
+            recorded = append_jsonl(events, {"ts": utc_now_iso(), "type": "reflection_memory_action_skipped",
+                                             "task_id": str(action.get("task_id") or ""), "project_id": pid,
+                                             "action_type": str(action.get("type") or ""), "reason": reason,
+                                             "content_chars": len(str(action.get("content") or "")),
+                                             "reflection_ref": input_ref(action)})
+            if not recorded:
+                log.warning("Reflection memory skip event was not recorded: task=%s reason=%s",
+                            action.get("task_id"), reason)
+        except OSError:
+            # An audit-write failure is visible, but cannot discard independent
+            # later lessons in this batch by escaping the action loop.
+            log.warning("Reflection memory skip event could not be written: task=%s reason=%s",
+                        action.get("task_id"), reason, exc_info=True)
 
     for action in (actions or [])[:3]:
         atype = str(action.get("type") or "")
@@ -719,7 +729,7 @@ def apply_memory_actions(env: Any, actions: List[Dict[str, Any]], *, project_id:
                                   project_id=pid, task_id=str(action.get("task_id") or ""))
                 outcomes = _write_knowledge_entries(
                     root / "memory" / "knowledge", [action], context=ctx,
-                    stamp={"writer": "reflection", "writer_input_ref": {**reflection_ref, "task_id": ctx.task_id}})
+                    stamp={"writer": "reflection", "writer_input_ref": {**input_ref(action), "task_id": ctx.task_id}})
                 applied += sum(row["ok"] for row in outcomes)
                 if any(not row["ok"] for row in outcomes):
                     log.warning("Reflection knowledge update was not published: %s", outcomes)
@@ -803,6 +813,7 @@ def append_reflection_routed(env: Any, task: Dict[str, Any], entry: Dict[str, An
         pid = ""
     if not pid:
         append_reflection(canonical, entry)
+        _bind_reflection_action_source(canonical, entry)
         return
     from ouroboros.project_facts import project_reflections_path
 
@@ -836,6 +847,28 @@ def append_reflection_routed(env: Any, task: Dict[str, Any], entry: Dict[str, An
         })
     except Exception:
         log.warning("Failed to write canonical reflection pointer", exc_info=True)
+    _bind_reflection_action_source(canonical, entry)
+
+
+def _bind_reflection_action_source(canonical: pathlib.Path, entry: Dict[str, Any]) -> None:
+    """Give the later action writer an exact actor-readable source, not a protected project path."""
+    actions = entry.get("memory_actions") or []
+    if not actions:
+        return
+    try:
+        from types import SimpleNamespace
+
+        from ouroboros.consolidator import retain_memory_source
+
+        ref = retain_memory_source(
+            SimpleNamespace(drive_root=canonical, task_id=str(entry.get("task_id") or "reflection")),
+            "reflection_memory_actions", json.dumps(entry, ensure_ascii=False).encode("utf-8"), "json")
+        for action in actions:
+            if isinstance(action, dict):
+                action["_reflection_source_ref"] = ref
+    except Exception:
+        log.warning("Reflection action source retention failed for task %s", entry.get("task_id"), exc_info=True)
+
 
 _PATTERNS_PROMPT = """\
 You maintain a Pattern Register for Ouroboros, a self-modifying AI agent.

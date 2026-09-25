@@ -276,9 +276,26 @@ def test_project_scoped_reflection_skips_are_typed_events(tmp_path):
         ("scratchpad_append", "project_scoped_task"), ("identity_update_candidate", "project_scoped_task"),
         ("knowledge_write", "missing_topic")]
     assert all(e["project_id"] == "proj_x" and e["task_id"] == "t1" and e["content_chars"] > 0 for e in events)
-    assert events[0]["reflection_ref"]["read"]["arguments"]["path"] == (
-        "projects/proj_x/logs/task_reflections.jsonl")
+    assert events[0]["reflection_ref"] == {"status": "source_unavailable", "project_id": "proj_x"}
     assert not (tmp_path / "memory" / "scratchpad_blocks.json").exists()
+
+
+def test_failed_skip_event_cannot_discard_later_reflection_lessons(tmp_path, monkeypatch, caplog):
+    env = SimpleNamespace(drive_root=tmp_path, repo_dir=tmp_path)
+    original = reflection.append_jsonl
+
+    def broken_event(path, row, **kwargs):
+        if row.get("type") == "reflection_memory_action_skipped":
+            raise OSError("event store unavailable")
+        return original(path, row, **kwargs)
+
+    monkeypatch.setattr(reflection, "append_jsonl", broken_event)
+    assert reflection.apply_memory_actions(env, [
+        {"type": "knowledge_write", "content": "topic-less", "task_id": "t1"},
+        {"type": "scratchpad_append", "content": "a real lesson", "task_id": "t1"},
+    ], project_id="") == 1
+    assert "Reflection memory skip event could not be written" in caplog.text
+    assert "a real lesson" in Memory(tmp_path).load_scratchpad()
 
 
 def test_applied_reflection_actions_emit_no_skip(tmp_path):
@@ -354,6 +371,24 @@ def test_scratchpad_consolidation_stamps_its_journal_source(tmp_path):
     assert capture["writer"] == "scratchpad_consolidation"
     assert capture["writer_input_ref"] == memory.load_scratchpad_blocks()[0]["metadata"]["source_ref"]
     assert _events(tmp_path, "scratchpad_consolidation")[0]["knowledge_writes"] == {"ok": 1, "failed": 0}
+
+
+def test_project_reflection_action_uses_actor_readable_exact_source(tmp_path):
+    from ouroboros.artifacts import read_actor_source_bytes
+    env = SimpleNamespace(drive_root=tmp_path, budget_drive_root=tmp_path, repo_dir=tmp_path)
+    entry = {"task_id": "t3", "ts": "2026-01-01T00:00:00Z", "memory_actions": [
+        {"type": "knowledge_write", "topic": "lessons/project", "content": "Grounded.", "task_id": "t3"}]}
+    reflection.append_reflection_routed(env, {"id": "t3", "project_id": "proj_x",
+                                              "budget_drive_root": str(tmp_path)}, entry)
+    action = entry["memory_actions"][0]
+    source = action["_reflection_source_ref"]
+    assert source["kind"] == "task_source"
+    assert json.loads(read_actor_source_bytes(tmp_path, "t3", source))["memory_actions"][0]["content"] == "Grounded."
+    assert reflection.apply_memory_actions(env, entry["memory_actions"], project_id="proj_x") == 1
+    history = tmp_path / "projects" / "proj_x" / "knowledge_history.jsonl"
+    row = json.loads(history.read_text(encoding="utf-8").splitlines()[-1])
+    assert row["writer_input_ref"]["sha256"] == source["sha256"]
+    assert row["writer_input_ref"]["task_id"] == "t3"
 
 
 def test_reflection_stamps_the_reflection_row_it_came_from(tmp_path):
