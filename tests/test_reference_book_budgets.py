@@ -157,7 +157,10 @@ CHAPTER_BYTE_BUDGETS: dict[str, int] = {
     # 20800 -> 21100 (PR #1150; measured 21027): the platform-gate sentence is rewritten to
     # map its new credential-free toolchain lane and script (real managed Node/npm with no
     # ambient Node, no harness install claimed), a CI contract the chapter had no text for.
-    "docs/architecture/08-git-branching-ci-and-build.md": 21100,
+    # 21100 -> 21400 (PR #1150; measured 21317): the same sentence maps the Windows consumer
+    # lane (real pinned Codex install through the production seam, resolution and doctor; no
+    # login or task; red until the pin carries Windows native install).
+    "docs/architecture/08-git-branching-ci-and-build.md": 21400,
     # 12405 -> 14400 (issue #1142): the ordinary-close paragraph gains the mechanism the chapter had
     # no text for — graceful stop signals the server PID only, the server half (stop event at the
     # signal, bounded uvicorn drain) is self-sufficient against an old group-SIGTERM launcher.
