@@ -270,7 +270,8 @@ def _run_cross_model_fallback_chain(
                 attempt_cap=attempt_cap,
                 model_role=fallback_role,
                 emit_progress=emit_progress,
-                defer_resource_wait=owner_question or _route_follows(candidates[index + 1:], fallback_use_local),
+                defer_resource_wait=(task_type == "presence" or owner_question
+                                     or _route_follows(candidates[index + 1:], fallback_use_local)),
             )
         tried.append(fallback_model)
         msg, _cost, candidate_mode = _loop()._call_round_model(candidate_call)
@@ -311,6 +312,8 @@ def _run_cross_model_fallback_chain(
             break
         _cooled(fallback_model, fallback_use_local)
         previous_model, previous_tag = fallback_model, ftag
+    if task_type == "presence" and deferred is None:
+        deferred = getattr(tools._ctx, "_deferred_resource_refusal", None)
     accumulated_usage.pop(RESOURCE_REFUSAL_KEY, None)
     if msg is None and owner_question and str(accumulated_usage.get("_last_llm_error_kind") or "") not in _CHAIN_STOP_KINDS:
         # The owner wait of the primary's retained refusal: catalog checks only, so no
@@ -640,6 +643,8 @@ def _dispatch_round_model(
     if primary:
         ctx.tools._ctx._deferred_resource_refusal = None
         ctx.accumulated_usage.pop(RESOURCE_REFUSAL_KEY, None)
+    elif ctx.task_type == "presence":
+        ctx.tools._ctx._deferred_resource_refusal = None
     previous_call = ctx.accumulated_usage.get("_last_llm_call_meta")
     from ouroboros.acceptance_settlement import expose_acceptance_feedback
 
@@ -676,6 +681,8 @@ def _dispatch_round_model(
         ctx.tools._ctx._deferred_resource_refusal = deferral
         if not waiter.waits_allowed:  # typed at once: the terminal may come before any chain
             ctx.accumulated_usage[RESOURCE_REFUSAL_KEY] = deferral.terminal(fallbacks_tried=[], owner_wait="not_allowed")
+    elif ctx.task_type == "presence" and deferral is not None and deferral.fact and result[0] is None:
+        ctx.tools._ctx._deferred_resource_refusal = deferral
     pending_wait_handover = getattr(ctx.tools._ctx, "_pending_model_wait_handover", None)
     if pending_wait_handover is not None:
         if result[0] is not None:

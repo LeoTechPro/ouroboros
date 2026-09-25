@@ -378,7 +378,17 @@ def test_host_retries_only_attested_no_effect_after_reset_with_new_physical_iden
     assert load_task_result(tmp_path, first_id)["presence_retry_next"] == second_id
     assert load_task_result(tmp_path, first_id)["status"] == "failed"
     assert load_task_result(tmp_path, second_id)["status"] == "completed"
+    from ouroboros.presence_bindings import conversation_key
+    from ouroboros.presence_runner import _previous_turn_path
+
+    key = conversation_key("telegram", "bot-1", "room-1", "topic-1")
+    # A crash after the successor terminal but before its pointer write must
+    # repair the pointer to the PHYSICAL successor, not the old failed ID.
+    pointer = _previous_turn_path(tmp_path, key)
+    assert pointer.exists()
+    pointer.unlink()
     assert asyncio.run(_turn(app, binding, "event")).body == recovered.body
+    assert json.loads(pointer.read_text(encoding="utf-8"))["task_id"] == second_id
     assert invoked == [first_id, second_id] and ctx.presence_turns.live() == []
     rows = [json.loads(line) for line in (tmp_path / "logs" / "chat.jsonl").read_text(encoding="utf-8").splitlines()]
     assert len([row for row in rows if row.get("direction") == "in" and

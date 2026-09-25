@@ -365,7 +365,7 @@ def presence_retry_proof(task: Mapping[str, Any], usage: Mapping[str, Any],
     """
     refusal = usage.get("resource_refusal")
     metadata = task.get("metadata") if isinstance(task.get("metadata"), Mapping) else {}
-    if not (usage.get("_presence_pre_dispatch_only") is True
+    if not (ctx is not None and usage.get("_presence_pre_dispatch_only") is True
             and isinstance(refusal, Mapping) and refusal.get("temporary") is True
             and not usage.get("rounds") and not trace.get("tool_calls")
             and not getattr(ctx, "_swarm_handoff_attempt", None)
@@ -895,11 +895,12 @@ def run_presence_turn(
         if second_cached is not None:
             # A turn lost between its terminal write and its pointer write replays from the durable
             # row; its pointer is rebuilt here, under the conversation lock, so no newer turn is undone.
-            if _pointer_behind(Path(drive_root), event.conversation_key, task_id):
-                stored = load_task_result(Path(drive_root), task_id) or {}
-                sends = (_turn_sends(_live_task_rows(Path(drive_root), task_id, event.conversation_key))[0]
+            physical_id = second_cached.task_id
+            if _pointer_behind(Path(drive_root), event.conversation_key, physical_id):
+                stored = load_task_result(Path(drive_root), physical_id) or {}
+                sends = (_turn_sends(_live_task_rows(Path(drive_root), physical_id, event.conversation_key))[0]
                          if second_cached.delivery_reporting_version else [])
-                _write_previous_turn(Path(drive_root), event.conversation_key, task_id, outcome=second_cached.outcome,
+                _write_previous_turn(Path(drive_root), event.conversation_key, physical_id, outcome=second_cached.outcome,
                                      message=second_cached.text, sends=sends or [], work_ref=second_cached.work_ref,
                                      finished_at=str(stored.get("ts") or ""),
                                      delivery=_delivery_state(second_cached.delivery_reporting_version, sends,
