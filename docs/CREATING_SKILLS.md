@@ -749,7 +749,9 @@ conversation/thread, actor ID and text. Keep those facts stable on retry;
 returns HTTP 409 `presence_event_identity_conflict` with `disposition: rejected`,
 not another room's answer. HTTP 409 `presence_attempt_outcome_unknown` and
 `presence_resources_unavailable` carry `disposition: retry` and no external
-text: retain the original event in the transport. A failed durable start is
+text: retain the original event in the transport. A refusal may carry a
+previously admitted child's `work_ref`; poll it through `/presence/work`,
+not as a completed reply to the original event. A failed durable start is
 also retryable; no agent effect began unless its start was recorded. A quota
 refusal after a terminal task does not itself prove safe regeneration on the
 same ID; if prior effects remain unproven the conversation may need explicit

@@ -210,7 +210,8 @@ def _provider_unavailable_result(
     unknown_outcome = record or str(
         ctx.accumulated_usage.get("_last_llm_error_kind") or "") == "provider_outcome_unknown"
     is_transport_wait = wait_cause == "transport_unavailable"
-    is_context_overflow = kind == "context_overflow" and not (record or is_transport_wait)
+    is_context_overflow = (kind == "context_overflow" and not (record or is_transport_wait)
+                           and not ctx.accumulated_usage.get("resource_refusal"))
     is_deadline_exhausted = kind == "deadline_exhausted" or str(ctx.accumulated_usage.get("_last_llm_error_kind") or "") == "deadline_exhausted"
     llm_trace = getattr(ctx, "llm_trace", None)
     llm_trace = llm_trace if isinstance(llm_trace, dict) else {}

@@ -275,6 +275,11 @@ def _run_cross_model_fallback_chain(
             )
         tried.append(fallback_model)
         msg, _cost, candidate_mode = _loop()._call_round_model(candidate_call)
+        if task_type == "presence" and deferred is None and msg is None:
+            # Each fallback clears the transient context slot before its own send. Keep the
+            # first actual resource refusal for this chain: a later bad request cannot
+            # erase evidence that an allowed route refused before generation.
+            deferred = getattr(tools._ctx, "_deferred_resource_refusal", None)
         if msg is not None:
             (
                 active_model,

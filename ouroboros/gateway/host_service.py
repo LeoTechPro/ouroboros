@@ -738,6 +738,8 @@ def _presence_exception(exc: Exception, status: int) -> JSONResponse:
     facts = {"field": getattr(exc, "field", "presence")}
     if getattr(exc, "turn_ref", ""):
         facts["turn_ref"] = exc.turn_ref
+    if getattr(exc, "work_ref", ""):
+        facts["work_ref"] = exc.work_ref
     manifest = getattr(exc, "attachment_manifest", None)
     if isinstance(manifest, list):
         facts["attachment_manifest"] = [dict(row) for row in manifest if isinstance(row, dict)]

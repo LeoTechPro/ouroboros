@@ -44,10 +44,12 @@ class PresenceTurnError(ValueError):
         *,
         attachment_manifest: Sequence[Mapping[str, Any]] = (),
         turn_ref: str = "",
+        work_ref: str = "",
     ) -> None:
         self.code = str(code or "presence_turn_failed")
         self.field = str(field or "presence_turn")
         self.turn_ref = str(turn_ref or "")
+        self.work_ref = str(work_ref or "")
         self.attachment_manifest = [
             dict(row) for row in attachment_manifest if isinstance(row, Mapping)
         ]
@@ -541,7 +543,8 @@ def _cached_result(drive_root: Path, task_id: str, identity: str = "") -> Presen
         # A failed quota/fallback attempt is not a completed/silent transport answer;
         # retain the event with its adapter and never replay a draft as external speech.
         _notify_unresolved_turn(drive_root, task_id)
-        raise PresenceTurnError("presence_resources_unavailable", "source_event_id", turn_ref=task_id)
+        raise PresenceTurnError("presence_resources_unavailable", "source_event_id", turn_ref=task_id,
+                                work_ref=str(metadata.get("presence_work_ref") or ""))
     if str(stored.get("status") or "") not in {"completed", "failed"} or is_reconciled_presence_placeholder(stored):
         return None  # a host-lost turn is not a result; the later admission guard refuses regeneration
     return presence_result_from_stored(stored, task_id)
@@ -1050,7 +1053,9 @@ def run_presence_turn(
         terminal = _stored_turn(Path(drive_root), task_id, identity)
         if str(terminal.get("reason_code") or "") == "resource_refusal_no_resend":
             _notify_unresolved_turn(Path(drive_root), task_id)
-            raise PresenceTurnError("presence_resources_unavailable", "source_event_id", turn_ref=task_id)
+            metadata = terminal.get("metadata") if isinstance(terminal.get("metadata"), dict) else {}
+            raise PresenceTurnError("presence_resources_unavailable", "source_event_id", turn_ref=task_id,
+                                    work_ref=str(metadata.get("presence_work_ref") or ""))
         row = next((item for item in events if item.get("type") == "presence_result"), None)
         if not isinstance(row, dict):
             raise PresenceTurnError("presence_result_missing", "presence_result")

@@ -261,6 +261,47 @@ def test_resource_refusal_never_returns_a_prepared_reply_as_completed(tmp_path):
     assert len(invoked) == 1  # retry cannot regenerate work behind an already terminal row
 
 
+def test_resource_refusal_preserves_scheduled_child_work_ref_on_first_call_and_replay(tmp_path):
+    child_id = "scheduled-presence-child"
+    invoked = []
+
+    class Agent:
+        def handle_task(self, task):
+            invoked.append(task["id"])
+            metadata = {**task["metadata"], "presence_work_ref": child_id}
+            write_task_result(tmp_path, task["id"], "failed", metadata=metadata,
+                              reason_code="resource_refusal_no_resend", result="private diagnostic")
+            return [{"type": "presence_result", "outcome": "deferred", "text": "", "work_ref": child_id}]
+
+    app, binding, _ctx = _presence_app(tmp_path, lambda **kwargs: run_presence_turn(
+        repo_dir=tmp_path, drive_root=tmp_path, agent_factory=lambda **_kw: Agent(),
+        gate=PresenceTurnGate(1), **kwargs))
+    for _ in range(2):
+        response = asyncio.run(_turn(app, binding, "event"))
+        body = json.loads(response.body)
+        assert response.status_code == 409 and body["code"] == "presence_resources_unavailable"
+        assert body["turn_ref"] == presence_turn_task_id(binding, "event")
+        assert body["work_ref"] == child_id and not body.get("text")
+    assert invoked == [presence_turn_task_id(binding, "event")]
+
+
+def test_retained_resource_refusal_outranks_later_context_overflow(tmp_path):
+    from ouroboros import loop
+
+    usage = {"_last_llm_error_kind": "context_overflow", "execution_status": "infra_failed",
+             "resource_refusal": {"reason": "quota", "temporary": True,
+                                  "reset_at": "2099-01-01T00:00:00Z"}}
+    ctx = loop._RoundLimitContext(
+        messages=[{"role": "user", "content": "go"}], llm=SimpleNamespace(), active_model="test-model",
+        active_effort="low", max_retries=1, drive_logs=tmp_path, task_id="presence-quota",
+        round_idx=1, event_queue=None, accumulated_usage=usage, task_type="presence",
+        active_use_local=False, max_rounds=200, drive_root=tmp_path)
+    _text, terminal, trace = loop._handle_provider_unavailable(ctx, error_kind="context_overflow")
+    assert terminal["reason_code"] == "resource_refusal_no_resend"
+    assert terminal["execution_status"] == "infra_failed"
+    assert trace["forced_finalization"]["source"] == "resource_refusal_no_resend"
+
+
 def test_only_positive_first_round_not_started_proves_retry_eligibility():
     task = {"id": "presence-a", "metadata": {"presence_event_identity": "event-identity"}}
     usage = {"_presence_pre_dispatch_only": True, "resource_refusal": {
