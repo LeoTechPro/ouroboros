@@ -134,6 +134,7 @@ def project_question_pointer(row: Dict[str, Any], block: Any, project: Any,
     question = str(quiz.get("question") or row.get("text") or block.get("question") or "")
     assumption = str(quiz.get("assumption") or block.get("assumption") or "")
     stake = str(quiz.get("stake") or block.get("stake") or "")
+    host_facts = str(quiz.get("host_facts") or block.get("host_facts") or "")
     recommended = block.get("recommended_index")
     if not isinstance(recommended, int) or isinstance(recommended, bool):
         recommended = next((i for i, option in enumerate(options)
@@ -151,6 +152,7 @@ def project_question_pointer(row: Dict[str, Any], block: Any, project: Any,
         **({"option_details": details} if details else {}),
         **({"stake": stake} if stake else {}),
         **({"assumption": assumption} if assumption else {}),
+        **({"host_facts": host_facts} if host_facts else {}),
         **({"recommended_index": recommended} if recommended is not None else {}),
         **facts,
         **({"source_status": "unavailable"} if not known else {}),

@@ -571,7 +571,10 @@ def scan_data_paths(root: pathlib.Path = REPO) -> frozenset[str]:
 # one rebuildable projection per conversation written by presence_runner at the end of an executed
 # turn; it has its own row in section 2.
 # 293 -> 295: the disposable test-environment caches (``cache/pip``, ``cache/uv``; test root only).
-EXPECTED_SCAN_PATHS = 295
+# 295 -> 294: TZ-3 removed the destructive memory journal rewrite and its
+# ``.compact.tmp`` sibling path; PERSISTENCE.md keeps the journals, now
+# read-only observed and never age-digested.
+EXPECTED_SCAN_PATHS = 294
 
 # Scanned paths that must always be present — guards the scanner itself
 # against a silent regression that would shrink coverage while keeping counts

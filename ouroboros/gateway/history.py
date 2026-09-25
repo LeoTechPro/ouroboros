@@ -881,6 +881,8 @@ def _collect_chat_rows(
                         for key in ("answered_index", "comment", "wait_ended_at"):  # the answer, the closed bound
                             if key in _live:
                                 quiz[key] = _live[key]
+                        if _live.get("host_facts") and not quiz.get("host_facts"):
+                            quiz["host_facts"] = str(_live["host_facts"])  # the ask-time sentence the block holds
                         if "wait_for_answer" not in _live:
                             quiz.pop("wait_for_answer", None)  # the bound closed: the card no longer waits
                     if quiz.get("wait_for_answer") or quiz.get("wait_ended_at"):

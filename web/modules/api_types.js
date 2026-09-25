@@ -297,6 +297,7 @@
  * @property {number=} recommended_index
  * @property {number=} answered_index
  * @property {string=} comment
+ * @property {string=} host_facts
  * @property {"chat"} type
  * @property {"user"|"assistant"|"system"} role
  * @property {string} content
@@ -569,6 +570,7 @@
  * @property {string} ts
  * @property {number=} answered_index
  * @property {string=} comment
+ * @property {string=} host_facts
  * @property {number=} chat_id
  * @property {string=} task_id
  * @property {boolean=} project_thread

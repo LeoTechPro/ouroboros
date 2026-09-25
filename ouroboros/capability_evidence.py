@@ -1340,7 +1340,7 @@ def probe(
 # excluding it would starve the route of density witnesses entirely.
 _CACHE_INCLUSIVE_PROMPT_TOKEN_PROVIDERS = frozenset({
     "openrouter", "openai", "openai-compatible", "cloudru", "local", "anthropic",
-    "deepseek",
+    "deepseek", "zai",
 })
 
 
