@@ -294,7 +294,8 @@ def validate_link_actions(actions: Any) -> List[Dict[str, str]]:
 
 
 _MAX_QUIZ_OPTIONS = 6
-_MAX_QUIZ_QUESTION_CHARS = 2000
+# A label is button text; it is refused beyond this bound, never sliced.
+_MAX_QUIZ_LABEL_CHARS = 120
 
 
 class QuizValidationError(ValueError):
@@ -318,13 +319,16 @@ def validate_quiz_payload(
     ``max_wait_minutes`` bounds a required wait only, and never past the task's
     absolute wall-clock ceiling: beyond it the ceiling would end the task
     first, so a larger bound would be a promise the runtime cannot keep.
+
+    The authored text (question, option details, stake, assumption) is kept
+    whole: the card may be the only explanation its reader gets, so there is no
+    quiz-specific length cap and nothing is silently cut (BIBLE P1). Only a
+    label, which is button text, has a bound, and an over-long label refuses
+    the card instead of being sliced.
     """
     q_text = str(question or "").strip()
-    if not q_text or len(q_text) > _MAX_QUIZ_QUESTION_CHARS:
-        raise QuizValidationError(
-            "QUIZ_QUESTION_INVALID",
-            f"question must be 1..{_MAX_QUIZ_QUESTION_CHARS} characters.",
-        )
+    if not q_text:
+        raise QuizValidationError("QUIZ_QUESTION_INVALID", "question must be non-empty.")
     if not isinstance(options, list) or not 2 <= len(options) <= _MAX_QUIZ_OPTIONS:
         raise QuizValidationError(
             "QUIZ_OPTIONS_INVALID",
@@ -344,9 +348,14 @@ def validate_quiz_payload(
             raise QuizValidationError(
                 "QUIZ_OPTIONS_INVALID", "each option needs a non-empty label."
             )
-        option: Dict[str, Any] = {"label": label[:120]}
+        if len(label) > _MAX_QUIZ_LABEL_CHARS:
+            raise QuizValidationError(
+                "QUIZ_OPTIONS_INVALID",
+                f"option labels must be at most {_MAX_QUIZ_LABEL_CHARS} characters.",
+            )
+        option: Dict[str, Any] = {"label": label}
         if detail:
-            option["detail"] = detail[:500]
+            option["detail"] = detail
         if item.get("recommended") is True:  # the asker's recommendation rides with its option
             option["recommended"] = True
         cleaned.append(option)
@@ -367,10 +376,71 @@ def validate_quiz_payload(
     return {
         "question": q_text,
         "options": cleaned,
-        "stake": str(stake or "").strip()[:500],
-        "assumption": assumption_text[:500],
+        "stake": str(stake or "").strip(),
+        "assumption": assumption_text,
         **({"max_wait_minutes": bound} if bound is not None else {}),
     }
+
+
+# The escalate catalog entry lives beside its validator and handler: the
+# description and field texts define the same wire shape validate_quiz_payload
+# enforces (core.get_tools registers it).
+ESCALATE_TOOL_SCHEMA: Dict[str, Any] = {
+    "name": "escalate",
+    "description": (
+        "Escalate one decision up the responsibility chain instead of guessing. "
+        "A root task asks its human through a quiz card; a subagent asks its parent "
+        "through a typed mailbox frame, which the parent answers with forward_to_worker "
+        "or escalates higher verbatim.\n\n"
+        "The card may be the only thing your human sees. It may be read later, outside "
+        "this room, by someone who remembers the purpose of the work without remembering "
+        "its mechanisms or your earlier discussion. Issue, specification and question "
+        "numbers, function names and reviewer names belong to your working context; they "
+        "are not shared context by themselves. The card carries the explanation needed to "
+        "understand this decision and its consequences.\n\n"
+        "The source of the fork belongs in that explanation, in ordinary prose: the human's "
+        "words, a document they supplied, your idea, or a reviewer's proposal. Human words "
+        "the fork rests on are quoted exactly when available; missing wording is disclosed, "
+        "and your paraphrase is identified as your interpretation. Your own proposal is a "
+        "distinct option, not an assumed premise of every option.\n\n"
+        "Offer 2-6 real alternatives for this decision and mark your recommendation with "
+        "recommended=true. By default, state the assumption you continue under and keep "
+        "working; the card stays answerable and a late answer still arrives. Set "
+        "wait_for_answer=true on a live root, including an ordinary conversation, when the "
+        "next step is irreversible or costly to redo, or the choice belongs to the human; "
+        "your judgment decides. Waiting begins after the current tool batch, without model "
+        "calls. Waiting questions in one batch share one wait, ending on the first incoming "
+        "message. How many decisions to raise and when remains your judgment."
+    ),
+    "parameters": {"type": "object", "properties": {
+        "question": {"type": "string", "description": (
+            "The self-contained explanation of one decision, in the reader's language. "
+            "Markdown renders in chat. No quiz-specific character limit.")},
+        "options": {"type": "array", "items": {"type": "object", "properties": {
+            "label": {"type": "string", "description": (
+                "Short name of the choice, understandable to the reader on a button "
+                "(max 120 characters).")},
+            "detail": {"type": "string", "description": (
+                "What choosing this option changes for the human: what they gain and what "
+                "they give up, including any relevant cost, delay or lost capability (optional).")},
+            "recommended": {"type": "boolean", "description": (
+                "True on the one option you recommend; omitted or false otherwise.")},
+        }, "required": ["label"]}, "description": "2-6 mutually exclusive alternatives for this decision."},
+        "stake": {"type": "string", "description": (
+            "What depends on this decision for the human or the work (optional).")},
+        "assumption": {"type": "string", "description": (
+            "What you will do while the question remains unanswered. Required when continuing "
+            "without a wait; may be empty when wait_for_answer=true. It is your assumption, "
+            "not the human's answer.")},
+        "wait_for_answer": {"type": "boolean", "default": False, "description": (
+            "Live roots: wait for addressed owner input before another model round. Default "
+            "false; an unanswered card remains answerable either way.")},
+        "max_wait_minutes": {"type": "integer", "description": (
+            "Optional positive whole-minute bound for wait_for_answer, within the task's "
+            "existing lifetime limit. On expiry, resume with a system notice; the card stays "
+            "answerable. Silence is not an answer.")},
+    }, "required": ["question", "options"]},
+}
 
 
 def _validate_wait_bound(max_wait_minutes: Any, *, wait_for_answer: bool) -> Optional[int]:
