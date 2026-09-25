@@ -162,7 +162,7 @@ class TestWireProjection:
             ("low", "low"),
             ("medium", "high"),
             ("high", "high"),
-            ("xhigh", "max"),
+            ("xhigh", "high"),
             ("max", "max"),
             ("ultra", "max"),
         ],
@@ -170,13 +170,9 @@ class TestWireProjection:
     def test_effort_projection_matches_deepseek_chat_contract(
         self, monkeypatch, requested, wire,
     ):
-        # Official contract (api-docs.deepseek.com, Thinking Mode) + the shared
-        # low/high/max-dialect projection table (Egor's z.ai measurement
-        # 2026-09-21, PR #1194 close comment): the enum is low/high/max,
-        # minimal→low, medium→high, xhigh/ultra→max (the canonical step ABOVE
-        # high belongs with the TOP wire tier, not aliased down), and ``none``
-        # is the separate ``thinking.type=disabled`` toggle, never a
-        # reasoning_effort value.
+        # Official contract (api-docs.deepseek.com, Thinking Mode): the enum is
+        # low/high/max, medium/xhigh alias high, and ``none`` is the separate
+        # ``thinking.type=disabled`` toggle, never a reasoning_effort value.
         client = LLMClient()
         target = self._target(monkeypatch)
         kwargs = client._build_remote_kwargs(

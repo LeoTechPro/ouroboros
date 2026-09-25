@@ -59,16 +59,9 @@ def _build_model_catalog_entry(
     display_name: str,
     source: str | None = None,
 ) -> dict[str, str]:
-    from ouroboros.provider_models import canonical_tiers_for_route, effort_descriptor_for_route
-
     raw_id = str(model_id or "").strip()
     name = str(display_name or "").strip() or raw_id
     source_label = source or provider_label
-    # The reasoning-effort descriptor rides every catalog entry so all UI
-    # surfaces (Behavior effort cards, reviewer slots, subagent roster, model
-    # pickers) offer exactly the tiers the route's wire accepts — 3 for a GLM
-    # route, "no carrier" for unmeasured ones — from ONE SSOT table.
-    descriptor = effort_descriptor_for_route(provider_id, raw_id)
     return {
         "provider_id": provider_id,
         "provider": provider_label,
@@ -77,12 +70,6 @@ def _build_model_catalog_entry(
         "name": name,
         "value": _tagged_model_value(provider_id, raw_id),
         "label": f"{source_label} · {name}",
-        "effort_descriptor": {
-            "carrier": descriptor.get("carrier"),
-            "tiers": list(descriptor.get("tiers") or []),
-            "canonical_tiers": canonical_tiers_for_route(descriptor),
-            "absent_meaning": descriptor.get("absent_meaning"),
-        },
     }
 
 

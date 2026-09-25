@@ -1,7 +1,6 @@
 import { accountRows, claudexorStatus, READ_OK } from './claudexor_status_store.js';
 import { apiFetch } from './api_client.js';
 import { setInlineStatus } from './ui_helpers.js';
-import { annotateEffortCardsWithRouteDescriptor } from './settings_ui.js';
 export const MODEL_CATALOG_TIMEOUT_MS = 25000;
 let catalogRefreshSeq = 0;
 const buttonRefreshes = new WeakMap();
@@ -49,22 +48,6 @@ export function watchAccountModelCatalog() {
         },
         dispose,
     };
-}
-
-/**
- * The Behavior effort cards' route annotation follows each successful catalog
- * read: the MAIN model setting names the route whose descriptor is shown.
- * Best-effort and DOM-optional (non-Settings pages never render the cards).
- */
-function annotateEffortCardsFromCatalog(data = {}) {
-    try {
-        const mainInput = document.getElementById('s-model-main');
-        const mainModel = String(mainInput?.value || '').trim()
-            || String(data?.settings?.OUROBOROS_MODEL || '').trim();
-        annotateEffortCardsWithRouteDescriptor({ catalogItems: data.items || [], mainModel });
-    } catch {
-        // Presentation-only; never fail the catalog read on it.
-    }
 }
 
 /**
@@ -235,7 +218,6 @@ export async function refreshModelCatalog({ button } = {}) {
         }
         const read_state = catalogReadState(data);
         fillCatalogDatalist({ ...data, read_state });
-        annotateEffortCardsFromCatalog(data);
 
         if (read_state !== 'ok') {
             setCatalogStatus(statusEl, catalogReadNote({ ...data, read_state }), 'warn');

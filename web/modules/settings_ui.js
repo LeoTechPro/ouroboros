@@ -4,7 +4,6 @@ import { renderAgentAccountsSection, renderAgentsServiceBanner } from './harness
 import { renderReviewerSlotsSection } from './reviewer_slots.js';
 import { renderSubagentsSection } from './subagents_settings.js';
 import { modelRolesHost } from './model_roles.js';
-import { effortDescriptorForModel } from './route_editor_primitives.js';
 
 // Reads as a sequence: keys → secrets → which API models → who among the agents
 // does what → behavior → technical. "Agents", not "Coding agents" (D-10): the
@@ -217,41 +216,8 @@ function effortField({ id, label, defaultValue }) {
             <label for="${id}">${label}</label>
             <input id="${id}" type="hidden" value="${defaultValue}">
             ${renderSegmentedField({ target: id, options })}
-            <div class="settings-inline-note ui-field-help effort-route-note" data-effort-note-for="${id}" hidden></div>
         </div>
     `;
-}
-
-/**
- * Annotate the Behavior effort cards with the MAIN route's descriptor facts
- * (spec: the value is always visible and the projection is named). The cards
- * stay canonical — a surface effort applies across the fallback chain, so it
- * is never restricted to one route's enum — but the route's real tiers and
- * what an absent tier means are stated instead of left to guess.
- */
-export function annotateEffortCardsWithRouteDescriptor({ catalogItems = [], mainModel = '' } = {}) {
-    const descriptor = effortDescriptorForModel(catalogItems, mainModel);
-    document.querySelectorAll('.effort-route-note').forEach((note) => {
-        if (!descriptor || !descriptor.canonical_tiers?.length) {
-            note.hidden = true;
-            note.textContent = '';
-            return;
-        }
-        const carrier = String(descriptor.carrier || '');
-        if (carrier === 'none') {
-            note.textContent = mainModel
-                ? `Main route (${mainModel}) does not accept a reasoning-effort tier; the tier applies to other routes only.`
-                : 'Main route does not accept a reasoning-effort tier.';
-            note.hidden = false;
-            return;
-        }
-        const tiers = (descriptor.canonical_tiers || []).join(' / ');
-        const absent = descriptor.absent_meaning === 'max'
-            ? ' An unsent tier bills at the provider maximum.'
-            : '';
-        note.textContent = `Main route accepts ${tiers}${absent}`;
-        note.hidden = false;
-    });
 }
 
 export const SECRET_KEYS = [

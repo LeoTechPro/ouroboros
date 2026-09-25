@@ -572,8 +572,7 @@ export function selectHtml(attrs, groups, selected) {
     return `<select class="ui-control" ${attrs}>${options}</select>`;
 }
 
-export function effortSelectHtml(attrs, selected, surfaceDefault = 'route default', descriptor = null) {
-    if (descriptor) return effortFieldForRoute(attrs, selected, descriptor, { surfaceDefault });
+export function effortSelectHtml(attrs, selected, surfaceDefault = 'route default') {
     const options = [
         { value: '', label: 'Default effort' },
         ...EFFORT_CHOICES.map((effort) => ({ value: effort, label: effort })),
@@ -581,66 +580,6 @@ export function effortSelectHtml(attrs, selected, surfaceDefault = 'route defaul
     return selectHtml(
         `${attrs} title="Reasoning effort — default: ${escapeHtml(surfaceDefault)}"`,
         [{ label: '', options }],
-        selected || '',
-    );
-}
-
-/**
- * Find a route's effort descriptor in the model catalog by its saved model
- * identity. Returns null when the catalog has no matching entry (unknown or
- * out-of-catalog model): the caller then falls back to the generic select.
- */
-export function effortDescriptorForModel(catalogItems, model) {
-    const wanted = String(model || '').trim();
-    if (!wanted || !Array.isArray(catalogItems)) return null;
-    for (const item of catalogItems) {
-        if (!item || typeof item !== 'object') continue;
-        if (String(item.value || '') === wanted || String(item.id || '') === wanted) {
-            return item.effort_descriptor || null;
-        }
-    }
-    return null;
-}
-
-/**
- * Descriptor-aware effort select: the ONE component every surface (Behavior
- * effort cards, reviewer slots, subagent roster) uses when a route's effort
- * descriptor is known. Items come from the route's declared canonical tiers —
- * 3 for a GLM route, not 8 — each explicit choice annotated with its wire
- * projection when it differs ("xhigh → max on this route"), and the empty
- * default always shows WHERE it inherits from, never a bare "Default effort".
- *
- * @param {string} attrs HTML attributes for the select
- * @param {string} selected saved canonical tier ('' = inherit)
- * @param {{carrier?: string, tiers?: string[], canonical_tiers?: string[], absent_meaning?: string}} descriptor
- * @param {{surfaceDefault?: string, routeLabel?: string}} context
- */
-export function effortFieldForRoute(attrs, selected, descriptor, { surfaceDefault = 'route default', routeLabel = 'this route' } = {}) {
-    const d = descriptor || {};
-    if (!d.canonical_tiers || !d.canonical_tiers.length || d.carrier === 'none') {
-        // No measured effort carrier: the route does not accept a tier. Keep
-        // the value (it still applies to fallback routes) but say so plainly
-        // instead of offering choices that would be dropped on the wire.
-        return `<div class="settings-inline-note effort-no-carrier" ${attrs}>`
-            + `Route does not accept a reasoning-effort tier${routeLabel ? ` (${escapeHtml(routeLabel)})` : ''}`
-            + (selected ? ` — saved tier <code>${escapeHtml(selected)}</code> is not carried on this route` : '')
-            + (d.absent_meaning === 'max' ? '; an absent tier bills at the provider maximum' : '')
-            + '</div>';
-    }
-    const tiers = d.tiers || [];
-    const canonical = d.canonical_tiers || [];
-    const options = canonical.map((tier) => {
-        const wireIndex = canonical.indexOf(tier);
-        const wire = tiers[wireIndex];
-        const label = tier === wire ? tier : `${tier} → ${wire} on this route`;
-        return { value: tier, label };
-    });
-    const inheritLabel = surfaceDefault && surfaceDefault !== 'route default'
-        ? `inherit · ${surfaceDefault}`
-        : 'inherit from surface default';
-    return selectHtml(
-        `${attrs} title="Reasoning effort — default: ${escapeHtml(surfaceDefault)}"`,
-        [{ label: '', options: [{ value: '', label: inheritLabel }, ...options] }],
         selected || '',
     );
 }

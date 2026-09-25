@@ -208,6 +208,10 @@ def controlled_probe_error(exc: BaseException) -> dict[str, Any]:
     """Map typed transport facts to one bounded, provider-neutral reason."""
     status, code, error_type = _error_facts(exc)
     credit_codes = {
+        # Z.ai answers plan exhaustion as HTTP 429 code 1113 "Insufficient
+        # balance" (billing, not rate limiting; a Coding Plan key on the
+        # pay-as-you-go endpoint lands here too).
+        "1113",
         "billing_hard_limit_reached",
         "credit_balance_too_low",
         "credits_exhausted",
@@ -216,11 +220,7 @@ def controlled_probe_error(exc: BaseException) -> dict[str, Any]:
     }
     model_codes = {"model_not_found", "unknown_model"}
 
-    # Z.ai serves plan exhaustion as 429 code 1113 "Insufficient balance":
-    # billing, not rate limiting. Mapping it to the bare "Rate limited" reason
-    # hides the actionable fact (top up / switch plan) behind a retry hint.
-    insufficient_balance = code == "1113" or "insufficient balance" in error_type
-    if insufficient_balance or status == 402 or code in credit_codes or error_type in credit_codes:
+    if status == 402 or code in credit_codes or error_type in credit_codes:
         reason = "No credits"
     elif status == 401:
         reason = "Invalid key"

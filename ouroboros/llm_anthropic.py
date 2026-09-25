@@ -453,18 +453,12 @@ class _AnthropicLaneMixin:
             "model": str(target.get("resolved_model") or ""),
             "messages": messages, "max_tokens": max_tokens,
         }
-        # Descriptor-driven carriage (provider_models SSOT): the anthropic row
-        # declares carrier "anthropic.adaptive" (output_config.effort + thinking)
-        # with minimal→low projection; "none" switches thinking off.
-        from ouroboros.provider_models import effort_descriptor_for_route, project_effort_for_route
-        descriptor = effort_descriptor_for_route(
-            str(target.get("provider") or ""), str(target.get("resolved_model") or ""))
         effort = normalize_reasoning_effort(reasoning_effort)
         if effort == "none":
             payload["thinking"] = {"type": "disabled"}
-        elif effort and descriptor.get("carrier") == "anthropic.adaptive":
+        elif effort:
             payload["thinking"] = {"type": "adaptive"}
-            payload["output_config"] = {"effort": project_effort_for_route(descriptor, effort)}
+            payload["output_config"] = {"effort": "low" if effort == "minimal" else effort}
         if system:
             payload["system"] = system
         if temperature is not None:

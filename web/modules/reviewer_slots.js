@@ -956,13 +956,6 @@ function rowHtml(row, group) {
     const modelsGap = session ? modelsGapNote(harness, catalogKnown) : '';
     if (modelsGap) metaParts.push(modelsGap);
     const surfaceDefault = CATEGORIES[group]?.surfaceDefault || 'review effort';
-    // The route's model identity, in either branch (session split or parsed
-    // API target), matched against the catalog to find the effort descriptor.
-    const effortDescriptor = routeEditor.effortDescriptorForModel(
-        state.catalogModels, split.model || '',
-    ) || routeEditor.effortDescriptorForModel(
-        state.catalogModels, row.route?.target_id || '',
-    );
     return `
         <div class="reviewer-slot-row" data-slot-group="${group}" data-slot-id="${escapeHtml(row.slot_id)}">
             ${reviewerRouteIdentityMarkup(row.route, harnessesById(), identityContext())}
@@ -971,7 +964,7 @@ function rowHtml(row, group) {
                 ${session ? modelChooserHtml(`data-slot-model aria-label="${label} agent model"`, split.model, `reviewer-${row.slot_id}-models`, modelOptions, { placeholder: 'Engine default model' })
                     : routeEditor.routeModelInputHtml(`data-slot-custom-api aria-label="${label} model"`, row.route, state.catalogModels, `reviewer-${row.slot_id}-models`)}
                 ${routeEditor.routeSupportsAccount(row.route) ? selectHtml(`data-slot-profile aria-label="${label} account"`, [{ label: '', options: profileOptions }], row.route.profile_id || '') : ''}
-                ${effortSelectHtml(`data-slot-effort aria-label="${label} reasoning effort"`, row.effort, surfaceDefault, effortDescriptor)}
+                ${effortSelectHtml(`data-slot-effort aria-label="${label} reasoning effort"`, row.effort, surfaceDefault)}
                 <button type="button" class="btn btn-default" data-slot-remove title="Remove this slot">Remove</button>
             </div>
             ${routeEditor.processingDetailsHtml(`data-slot-processing aria-label="${label} processing"`, row.processing_preference, state.processingPreference)}
@@ -1042,7 +1035,6 @@ function singletonHtml(spec) {
                     `data-${a}-effort aria-label="${spec.ariaName} effort"`,
                     session ? row.effort : (row.effort === spec.apiEffortDefault ? '' : row.effort),
                     session ? 'route default' : spec.apiEffortLabel,
-                    routeEditor.effortDescriptorForModel(state.catalogModels, split.model || row.route?.target_id || ''),
                 )}
             </div>
             ${routeEditor.processingDetailsHtml(`data-${a}-processing aria-label="${spec.ariaName} processing"`, row.processing_preference, processingInheritance(row))}
