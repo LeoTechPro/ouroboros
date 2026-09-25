@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from functools import partial
 import hashlib
 import json
 import pathlib
@@ -13,6 +14,7 @@ from devtools.benchmarks.cowork_bench import run_cowork_bench as launcher
 from devtools.benchmarks.cowork_bench.audit_cowork_bench import audit_run
 from devtools.benchmarks.cowork_bench.official_receipt import read_official_receipt
 
+legacy_ledger_row = partial(launcher.ledger_row, protocol="legacy")
 GATE = "Task status: {}, only SUCCESS counts as pass; pass is null"
 SECRET = "PRIVATE_EVALUATOR_OUTPUT_ЖЁЛТЫЙ"
 
@@ -65,7 +67,7 @@ def test_every_branch_keeps_the_exact_receipt_and_its_status(tmp_path, branch, p
         raw = write_raw(tmp_path / "eval_res.json", dump_json(payload))
     before = {path.name: path.read_bytes() for path in tmp_path.iterdir() if path.is_file()}
 
-    row = launcher.ledger_row("task", tmp_path, runner)
+    row = legacy_ledger_row("task", tmp_path, runner)
 
     assert (row["status"], row["reason_code"]) == (status, reason)
     assert row["official_eval_status"] == expected_official != "not_run"
@@ -97,7 +99,7 @@ def test_successful_agent_phase_scores_only_a_literal_boolean(tmp_path, payload,
     write_raw(tmp_path / "ouroboros_summary.json", dump_json({"bench_status": "success"}))
     if payload is not None:
         write_raw(tmp_path / "eval_res.json", dump_json(payload))
-    row = launcher.ledger_row("task", tmp_path, {"status": "success"})
+    row = legacy_ledger_row("task", tmp_path, {"status": "success"})
     assert (row["status"], row["reason_code"], row["official_eval_status"]) == (status, reason, official)
     # The scored branch keeps its previous payload detail; every other branch carries only the receipt.
     assert ("eval" in row["details"]) is (status in {"passed", "failed"})
@@ -212,6 +214,8 @@ def test_valid_fixture_score_and_settlement_parity(tmp_path):
             write_raw(dump / "eval_res.json", dump_json(payload))
     write_raw(bench / "benchmark_logs" / "fully_parallel_1" / "summary.csv",
               ("\n".join(runner_rows) + "\n").encode("utf-8"))
+    # A pre-protocol manifest positively identifies these old unclaimed receipts.
+    write_raw(tmp_path / "run_manifest.json", dump_json({"harness": {"applied_config": {"model": "m"}}}))
     run = tmp_path / "run"
     counts = launcher.write_ledger(run / "result_index.jsonl", bench, "m", list(fixtures))
     assert counts == {"passed": 1, "failed": 1, "agent_failed": 1, "infra_failed": 1, "not_attempted": 1}
@@ -224,11 +228,42 @@ def test_valid_fixture_score_and_settlement_parity(tmp_path):
     }
 
 
+@pytest.mark.parametrize("provenance", ["current_on", "current_off", "missing", "unreadable", "legacy"])
+def test_refusal_before_claim_never_scores_old_pass_in_current_run(tmp_path, provenance):
+    """Exercise write_ledger, not the entrypoint: admission may refuse before it starts."""
+    bench = tmp_path / "bench"
+    dump = bench / "dumps" / launcher.dump_dir_name("m") / "SingleUserTurn-task"
+    old = write_raw(dump / "eval_res.json", dump_json({"pass": True}))
+    write_raw(dump / "ouroboros_summary.json", dump_json({"bench_status": "success"}))
+    write_raw(bench / "benchmark_logs" / "fully_parallel_1" / "summary.csv",
+              b"task,status,eval_pass,duration_s\ntask,success,null,1\n")
+    if provenance == "unreadable":
+        write_raw(tmp_path / "run_manifest.json", b"{broken")
+    elif provenance != "missing":
+        config = {"model": "m"}
+        if provenance != "legacy":
+            config["diagnostic_eval_on_truncation"] = provenance == "current_on"
+        write_raw(tmp_path / "run_manifest.json", dump_json({"harness": {"applied_config": config}}))
+    ledger = tmp_path / "result_index.jsonl"
+    counts = launcher.write_ledger(ledger, bench, "m", ["task"], cause="runner_exited")
+    row = json.loads(ledger.read_text(encoding="utf-8"))
+    if provenance == "legacy":
+        assert counts == {"passed": 1}
+        assert (row["status"], row["official_eval_status"]) == ("passed", "completed")
+    else:
+        assert counts == {"infra_failed": 1}
+        assert (row["reason_code"], row["official_eval_status"]) == ("missing_eval_result", "unknown")
+        assert launcher.settled_tasks([tmp_path]) == set()
+    assert row["details"]["official_receipt"]["pass"] is True  # evidence, not modern score
+    assert (dump / "eval_res.json").read_bytes() == old
+    assert not (dump / "ouroboros_eval_claim.json").exists()
+
+
 def test_audit_shows_the_literal_verdict_without_promoting_an_unscored_row(tmp_path):
     dump = tmp_path / "dump"
     write_raw(dump / "ouroboros_summary.json", dump_json({"bench_status": "failed", "reason_code": "wall_clock_timeout"}))
     raw = write_raw(dump / "eval_res.json", dump_json({"pass": True, "details": SECRET}))
-    row = launcher.ledger_row("late", dump, {"status": "failed"})
+    row = legacy_ledger_row("late", dump, {"status": "failed"})
     historical = {"instance_id": "old", "status": "agent_failed", "official_eval_status": "not_run",
                   "output_paths": {"task_dump": str(tmp_path / "old")}}
     legacy = {"instance_id": "bare", "status": "infra_failed", "output_paths": {"task_dump": str(tmp_path / "bare")}}
@@ -271,7 +306,7 @@ def test_runtime_disclosure_reads_only_exact_linked_task(tmp_path, branch):
     write_raw(tmp_path / "ouroboros" / "unrelated.json", dump_json({
         "task_id": "unrelated", "status": "failed", "reason_code": "provider_unavailable"}))
     if not summary:
-        row = launcher.ledger_row("task", tmp_path, runner)
+        row = legacy_ledger_row("task", tmp_path, runner)
         assert row["runtime_outcome"] == {"available": False}
         assert row["details"]["runtime_result_source"]["cause"] == "task_id_unavailable"
         return
@@ -279,12 +314,12 @@ def test_runtime_disclosure_reads_only_exact_linked_task(tmp_path, branch):
     write_raw(tmp_path / "ouroboros_summary.json", dump_json(summary))
     target = tmp_path / "ouroboros" / "exact-task.json"
     write_raw(target, dump_json({"task_id": "different", "reason_code": "provider_unavailable"}))
-    row = launcher.ledger_row("task", tmp_path, runner)
+    row = legacy_ledger_row("task", tmp_path, runner)
     assert row["runtime_outcome"] == {"available": False}
     assert row["details"]["runtime_result_source"]["cause"] == "task_id_mismatch"
     raw = write_raw(target, dump_json({"task_id": "exact-task", "status": "completed",
                                       "reason_code": "deadline_local"}))
-    row = launcher.ledger_row("task", tmp_path, runner)
+    row = legacy_ledger_row("task", tmp_path, runner)
     assert row["runtime_outcome"]["reason_code"] == "deadline_local"
     assert row["runtime_outcome"]["truncated"] is True
     assert row["details"]["runtime_result_source"]["sha256"] == hashlib.sha256(raw).hexdigest()
@@ -298,11 +333,11 @@ def test_linked_runtime_failure_stays_gap_and_success_branch_has_disclosure(tmp_
     for raw in (None, b"\xff", b"{}", b'{"task_id":"foreign"}'):
         if raw is not None:
             write_raw(target, raw)
-        row = launcher.ledger_row("task", tmp_path, {})
+        row = legacy_ledger_row("task", tmp_path, {})
         assert row["status"] == "failed"
         assert row["runtime_outcome"] == {"available": False}
     write_raw(target, b'{"task_id":"exact","status":"completed","reason_code":"final_message"}')
-    row = launcher.ledger_row("task", tmp_path, {})
+    row = legacy_ledger_row("task", tmp_path, {})
     assert row["runtime_outcome"]["reason_code"] == "final_message"
     assert row["status"] == "failed"
 
@@ -313,11 +348,11 @@ def test_dotted_runtime_id_links_exact_result_and_cannot_traverse(tmp_path):
     write_raw(tmp_path / "eval_res.json", b'{"pass":false}')
     write_raw(tmp_path / "ouroboros" / "exact.task.json", dump_json({
         "task_id": "exact.task", "status": "completed", "reason_code": "deadline_local"}))
-    row = launcher.ledger_row("task", tmp_path, {})
+    row = legacy_ledger_row("task", tmp_path, {})
     assert row["runtime_outcome"]["reason_code"] == "deadline_local"
     assert row["details"]["runtime_result_source"]["state"] == "linked"
     write_raw(tmp_path / "ouroboros_summary.json", dump_json({
         "bench_status": "success", "ouroboros_task_id": "../foreign"}))
-    row = launcher.ledger_row("task", tmp_path, {})
+    row = legacy_ledger_row("task", tmp_path, {})
     assert row["runtime_outcome"] == {"available": False}
     assert row["details"]["runtime_result_source"]["cause"] == "task_id_unavailable"

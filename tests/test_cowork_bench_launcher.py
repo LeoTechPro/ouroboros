@@ -18,6 +18,7 @@ import pytest
 from devtools.benchmarks.common.launcher_audit import audit_launcher, launcher_paths
 from devtools.benchmarks.common.model_slots import runtime_actor_snapshot
 from devtools.benchmarks.cowork_bench import campaign as budgets
+from devtools.benchmarks.cowork_bench import eval_attempt as attempts
 from devtools.benchmarks.cowork_bench import run_cowork_bench as launcher
 
 IMAGE_ID = "sha256:" + "1" * 64
@@ -151,7 +152,7 @@ def test_ledger_separates_real_failures_from_recoverable_infrastructure(tmp_path
         write_json(tmp_path / "ouroboros_summary.json", summary)
     if evaluation:
         write_json(tmp_path / "eval_res.json", evaluation)
-    row = launcher.ledger_row("task", tmp_path, runner, cause="runner_exited")
+    row = launcher.ledger_row("task", tmp_path, runner, protocol="legacy", cause="runner_exited")
     assert row["status"] == expected
     assert row["instance_id"] == "task"
 
@@ -635,6 +636,7 @@ def test_paid_runner_uses_immutable_image_and_scrubs_ambient_alternate_keys(dry_
     monkeypatch.setattr(launcher, "prepare_resource_env", lambda env, **_kwargs: dict(env))
     def supervise(args, command, bench, env, api_key, campaign, *, confirmed_at):
         assert isinstance(confirmed_at, float)
+        assert attempts.claim_protocol(bench.parent) == "current"  # read during the real admission path
         assert command[-1] == "one"
         assert env["IMAGE"] == IMAGE_ID
         assert not {"LLM_API_KEY", "MODEL_API_KEY", "OPENROUTER_API_KEY"} & env.keys()
@@ -644,6 +646,16 @@ def test_paid_runner_uses_immutable_image_and_scrubs_ambient_alternate_keys(dry_
         dump = bench / "dumps" / launcher.dump_dir_name(args.model) / "SingleUserTurn-one"
         write_json(dump / "ouroboros_summary.json", {"bench_status": "success"})
         write_json(dump / "eval_res.json", {"pass": True})
+        # The paid-run fixture must supply the exact terminal evidence a real
+        # current eval entrypoint publishes, not just a bare unclaimed file.
+        attempt_id = "a" * 32
+        attempts.publish_exclusive(dump / attempts.CLAIM_NAME,
+                                   {"kind": "official", "attempt_id": attempt_id})
+        attempts.publish_exclusive(dump / f"{attempts.RECEIPT_PREFIX}{attempt_id}.json", {
+            "kind": "official", "attempt_id": attempt_id, "official_run": True,
+            "returned": {"pass": True}, "raised": None,
+            "result_file": attempts.file_facts(dump / "eval_res.json"),
+        })
         counts = launcher.write_ledger(bench.parent / "result_index.jsonl", bench, args.model,
                                        args.selected_tasks, cause="runner_exited")
         return {"stop_reason": "", "meter_error": "", "runner_exit_code": 0,

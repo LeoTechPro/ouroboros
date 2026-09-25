@@ -52,6 +52,8 @@ from devtools.benchmarks.cowork_bench.campaign import (
     key_usage,
     validate_usage,
 )
+from devtools.benchmarks.cowork_bench.eval_attempt import FLAG as DIAGNOSTIC_FLAG
+from devtools.benchmarks.cowork_bench.eval_attempt import attempt_facts, claim_protocol
 from devtools.benchmarks.cowork_bench.official_receipt import read_linked_runtime_result, read_official_receipt
 from devtools.benchmarks.cowork_bench.resource_limits import LABEL_KEY, prepare_resource_env
 from ouroboros.platform_layer import kill_process_group_id, terminate_process_group_id
@@ -62,6 +64,8 @@ ENGINE = "ouroboros"
 PINNED_BENCH_COMMIT = "d943e75bc0fc8e3b27141979300cd8cbcd1e890d"
 DEFAULT_MODEL = "moonshotai/kimi-k3"
 CONTAINER_DIR = pathlib.Path(__file__).with_name("container")
+# Stdlib helpers the image copies beside the entrypoint (the eval phase imports them there).
+CONTAINER_HELPERS = tuple(pathlib.Path(__file__).with_name(name) for name in ("eval_attempt.py", "official_receipt.py"))
 SETTINGS_TEMPLATE = pathlib.Path(__file__).with_name("settings_base.json")
 CONFIG_NAME = "ouroboros_bench.json"
 SECRET_NAME = "ouroboros_bench.secret.json"
@@ -138,7 +142,13 @@ def bench_config(args: argparse.Namespace, settings: dict[str, Any]) -> dict[str
         "proxy_port": 8096,
         "server_port": 8765,
         "truncation_reason_codes": sorted(RUNTIME_TRUNCATION_REASON_CODES),
+        DIAGNOSTIC_FLAG: bool(args.diagnostic_eval_on_truncation),
     }
+
+
+def with_diagnostic_default(config: Any) -> Any:
+    """Runs recorded before the opt-in flag existed ran without it; nothing else is normalized."""
+    return {**config, DIAGNOSTIC_FLAG: False} if isinstance(config, dict) and DIAGNOSTIC_FLAG not in config else config
 
 
 def _git(path: pathlib.Path, *argv: str) -> str:
@@ -200,6 +210,8 @@ def build_image(args: argparse.Namespace, seed_head: str, bench_head: str, log_p
         )
         _git(context / "seed", "checkout", "--quiet", "--detach", seed_head)
         shutil.copy2(CONTAINER_DIR / "main_ouroboros.py", context / "main_ouroboros.py")
+        for helper in CONTAINER_HELPERS:
+            shutil.copy2(helper, context / helper.name)
         shutil.copy2(CONTAINER_DIR / "Dockerfile", context / "Dockerfile")
         command = [
             "docker", "build", "-t", args.image,
@@ -276,7 +288,7 @@ def _load(path: pathlib.Path) -> dict[str, Any]:
 
 
 def ledger_row(task: str, task_dump: pathlib.Path, runner_row: dict[str, str],
-               *, cause: str = "in_progress") -> dict[str, Any]:
+               *, protocol: str, cause: str = "in_progress") -> dict[str, Any]:
     """One denominator-preserving row. The runner's exit code and CSV are NOT the status: the
     adapter summary says how the agent phase ended and ``eval_res.json`` is the verdict.
 
@@ -293,8 +305,21 @@ def ledger_row(task: str, task_dump: pathlib.Path, runner_row: dict[str, str],
     receipt, eval_res = read_official_receipt(task_dump)
     runtime_result, runtime_source = read_linked_runtime_result(task_dump, summary)
     official = receipt["official_eval_status"]
+    attempt = attempt_facts(task_dump)
+    if attempt.get("official_run") is False:
+        # This run's claimed attempt proved it never called the evaluator (for example a
+        # preserved unclaimed eval_res.json), so no file present there is its verdict.
+        official, eval_res = "not_run", None
+    elif (attempt["state"] != "absent" and not attempt.get("file_matches_returned")) or (
+            attempt["state"] == "absent" and protocol != "legacy"):
+        # A missing claim in a CURRENT run may mean admission was refused before
+        # entrypoint start. Only a positively identified legacy manifest permits
+        # the pre-protocol file reader to supply a verdict.
+        official = "unknown" if official in {"completed", "declined"} else official
+        eval_res = None
     paths = {"task_dump": str(task_dump)}
     details: dict[str, Any] = {"runner": runner_row, "adapter": summary, "official_receipt": receipt,
+                               "official_attempt": {**attempt, "protocol": protocol},
                                "runtime_result_source": runtime_source}
     runtime = {"runtime_result": runtime_result}
     if runner_row.get("status") == "pg_fail":
@@ -328,8 +353,8 @@ def ledger_row(task: str, task_dump: pathlib.Path, runner_row: dict[str, str],
     if eval_res is None:
         # No literal boolean verdict: never coerce a string/number `pass` into a score.
         return task_result_row(benchmark=BENCHMARK, instance_id=task, status="infra_failed",
-                               reason_code="missing_eval_result", output_paths=paths, details=details,
-                               official_eval_status=official, **runtime)
+                               reason_code="official_eval_not_run" if official == "not_run" else "missing_eval_result",
+                               output_paths=paths, details=details, official_eval_status=official, **runtime)
     passed = receipt["pass"]
     return task_result_row(
         benchmark=BENCHMARK, instance_id=task, status="passed" if passed else "failed",
@@ -344,7 +369,9 @@ def write_ledger(ledger_path: pathlib.Path, bench_dir: pathlib.Path, model: str,
     reason, ``runner_exited``, or ``in_progress`` in a snapshot taken while the run is live."""
     runner_rows = read_summary_csv(bench_dir / "benchmark_logs")
     dumps = bench_dir / "dumps" / dump_dir_name(model)
-    rows = [ledger_row(task, dumps / f"SingleUserTurn-{task}", runner_rows.get(task, {}), cause=cause)
+    protocol = claim_protocol(bench_dir.parent)
+    rows = [ledger_row(task, dumps / f"SingleUserTurn-{task}", runner_rows.get(task, {}),
+                       cause=cause, protocol=protocol)
             for task in tasks]
     write_result_index(ledger_path, rows)
     counts: dict[str, int] = {}
@@ -369,7 +396,7 @@ def select_tasks(bench_dir: pathlib.Path, args: argparse.Namespace, config: dict
         visiting.add(root)
         previous = _load(root / "run_manifest.json")
         harness = previous.get("harness", {})
-        if (harness.get("applied_config") != config
+        if (with_diagnostic_default(harness.get("applied_config")) != with_diagnostic_default(config)
                 or previous.get("source", {}).get("head") != seed_head
                 or harness.get("bench", {}).get("head") != args.bench_commit
                 or not getattr(args, "image_id", "") or harness.get("image_id") != args.image_id):
@@ -716,6 +743,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--subagents", action="store_true", help="allow schedule_subagent (default: single agent)")
     parser.add_argument("--subagent-depth", type=int, default=3, help="only with --subagents")
     parser.add_argument("--per-task-cost-usd", type=float, default=25.0, help="in-container runaway guard")
+    parser.add_argument("--diagnostic-eval-on-truncation", action="store_true",
+                        help="audit-only residual-state checker rerun after a proven time/round/budget "
+                             "status-gate decline; never changes official verdicts (METHODOLOGY.md)")
     parser.add_argument("--budget-usd", type=float, default=150.0, help="additional spend limit for this invocation")
     parser.add_argument("--campaign-file", default="", help="required shared budget record for every paid invocation")
     parser.add_argument("--campaign-budget-usd", type=float, default=1000.0)
@@ -825,6 +855,9 @@ def main(argv: list[str] | None = None) -> int:
             **manifest["harness"], "fixed_model_actor": actor, "image": args.image,
             "applied_config": config, "bench": bench_provenance(bench_root, args.bench_commit),
         }
+        # The ledger reads this run's protocol from disk while supervise_run is live;
+        # waiting until finalization would label every live row unknown.
+        final.checkpoint("configured")
 
         if args.build_image and not image_exists(args.docker_host, args.image):
             build_image(args, seed_head, args.bench_commit, out_root / "image_build.log")

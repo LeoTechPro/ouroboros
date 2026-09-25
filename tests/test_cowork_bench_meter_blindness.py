@@ -7,6 +7,7 @@ fakes, so no provider, Docker daemon or paid benchmark is reached.
 
 from __future__ import annotations
 
+from functools import partial
 import json
 import pathlib
 import subprocess
@@ -16,8 +17,10 @@ import pytest
 
 from devtools.benchmarks.common import manifests
 from devtools.benchmarks.cowork_bench import campaign as budgets
+from devtools.benchmarks.cowork_bench import eval_attempt as attempts
 from devtools.benchmarks.cowork_bench import run_cowork_bench as launcher
 
+legacy_ledger_row = partial(launcher.ledger_row, protocol="legacy")
 
 @pytest.fixture(autouse=True)
 def forbid_live_services(monkeypatch):
@@ -355,6 +358,15 @@ def test_meter_stop_marks_started_tasks_interrupted_with_honest_paid_activity(si
     write_task(sim.dumps, "precreated", {})
     write_task(sim.dumps, "finished", {"ouroboros_summary.json": {"bench_status": "success"},
                                        "eval_res.json": {"pass": True}})
+    finished = sim.dumps / "SingleUserTurn-finished"
+    attempt_id = "b" * 32
+    attempts.publish_exclusive(finished / attempts.CLAIM_NAME,
+                               {"kind": "official", "attempt_id": attempt_id})
+    attempts.publish_exclusive(finished / f"{attempts.RECEIPT_PREFIX}{attempt_id}.json", {
+        "kind": "official", "attempt_id": attempt_id, "official_run": True,
+        "returned": {"pass": True}, "raised": None,
+        "result_file": attempts.file_facts(finished / "eval_res.json"),
+    })
     sim.args.selected_tasks = ["paid", "admitted", "precreated", "never", "finished"]
     sim.script = [101.0]
     sim.default = offline
@@ -394,7 +406,7 @@ def test_task_without_summary_after_the_runner_exited_names_that_cause(sim):
 ])
 def test_only_token_bearing_usage_is_observed_paid_activity(tmp_path, events, expected):
     write_task(tmp_path, "task", {"ouroboros/events.jsonl": events})
-    row = launcher.ledger_row("task", tmp_path / "SingleUserTurn-task", {}, cause="in_progress")
+    row = legacy_ledger_row("task", tmp_path / "SingleUserTurn-task", {}, cause="in_progress")
     assert (row["status"], row["reason_code"]) == ("infra_failed", "missing_adapter_summary")
     assert row["details"]["provisional"] is True
     assert row["details"]["paid_activity"] == expected
@@ -402,7 +414,7 @@ def test_only_token_bearing_usage_is_observed_paid_activity(tmp_path, events, ex
 
 def test_runner_row_without_summary_names_interruption_and_discloses_activity(tmp_path):
     write_task(tmp_path, "task", {"ouroboros/events.jsonl": [USAGE]})
-    row = launcher.ledger_row("task", tmp_path / "SingleUserTurn-task", {"status": "unknown"}, cause="signal_15")
+    row = legacy_ledger_row("task", tmp_path / "SingleUserTurn-task", {"status": "unknown"}, cause="signal_15")
     assert (row["status"], row["reason_code"], row["details"]["paid_activity"]) == (
         "infra_failed", "interrupted:signal_15", "observed")
     assert row["details"]["provisional"] is False
@@ -411,7 +423,7 @@ def test_runner_row_without_summary_names_interruption_and_discloses_activity(tm
 def test_interrupted_agent_keeps_independent_official_evaluator_receipt(tmp_path):
     write_task(tmp_path, "task", {"applied_settings.json": {}, "ouroboros/events.jsonl": [USAGE],
                                    "eval_res.json": {"pass": False, "failure": "private evaluator detail"}})
-    row = launcher.ledger_row("task", tmp_path / "SingleUserTurn-task", {}, cause="budget_meter_unavailable")
+    row = legacy_ledger_row("task", tmp_path / "SingleUserTurn-task", {}, cause="budget_meter_unavailable")
     assert (row["status"], row["reason_code"], row["official_eval_status"]) == (
         "infra_failed", "interrupted:budget_meter_unavailable", "completed")
     assert row["details"]["paid_activity"] == "observed"
@@ -422,7 +434,7 @@ def test_interrupted_agent_keeps_independent_official_evaluator_receipt(tmp_path
 def test_evaluator_log_alone_does_not_claim_agent_started(tmp_path):
     write_task(tmp_path, "task", {"traj_log.json": {"status": "failed"},
                                    "eval_res.json": {"pass": None}})
-    row = launcher.ledger_row("task", tmp_path / "SingleUserTurn-task", {}, cause="budget_meter_unavailable")
+    row = legacy_ledger_row("task", tmp_path / "SingleUserTurn-task", {}, cause="budget_meter_unavailable")
     assert (row["status"], row["reason_code"], row["official_eval_status"]) == (
         "not_attempted", "missing_result", "unknown")
 

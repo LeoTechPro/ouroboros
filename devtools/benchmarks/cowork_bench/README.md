@@ -94,6 +94,14 @@ separate: 32 tasks with a $25 task limit do not automatically reserve $800.
 Choose the reserve for the expected outstanding charges; delayed billing means
 it is not a provider-enforced spending cap.
 
+`--diagnostic-eval-on-truncation` (default off) adds the audit-only
+residual-state diagnostic described in the methodology: after a proven
+time/round/budget status-gate decline it reruns the unchanged checker once, up to
+900 seconds per eligible task, and never changes official results. Use the same
+setting for the whole campaign; recovery refuses a change. Each task dump keeps
+`ouroboros_eval_claim.json`, its `ouroboros_eval_receipt-<attempt>.json` and, when
+the diagnostic ran, `ouroboros_diagnostic_*` claim, receipt, report and log files.
+
 ## Monitor, recover and audit
 
 The budget meter is read every 15 seconds. `--meter-blindness-sec` (default 30,
