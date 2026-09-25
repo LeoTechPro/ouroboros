@@ -402,7 +402,9 @@ def test_the_doctor_rides_the_owned_daemon_and_stops_it(tmp_path, monkeypatch):
 
     assert facts["daemon_stop"] == "stopped" and daemon.stops == 1 and gateway.closed
     assert facts["daemon_harnesses"]["status"] == facts["cli_doctor"]["status"] == "unavailable"
-    assert verbs == [("doctor", "--harness", "codex", "--json")]
+    # The full CLI doctor is independently exercised by Claudexor's Windows
+    # release smoke; the witness itself still selects and verifies codex below.
+    assert verbs == [("doctor", "--json")]
 
 
 def test_a_failed_doctor_still_stops_the_owned_daemon(tmp_path, monkeypatch):

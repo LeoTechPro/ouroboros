@@ -346,8 +346,10 @@ def doctor_witness(harness: str, command: List[str], env: Dict[str, str], binary
             rows = gateway.harnesses()
         finally:
             gateway.close()
-        report = _cli_json([*command, "doctor", "--harness", harness, "--json"],
-                           "harness_doctor_failed", env)
+        # Use the full doctor verb proven by Claudexor's Windows release smoke.
+        # Our targeted --harness call aborted in libuv on two Windows CI runs;
+        # the precise cause is unknown. The exact harness row is checked below.
+        report = _cli_json([*command, "doctor", "--json"], "harness_doctor_failed", env)
     except ClaudexorUnavailable as exc:
         _stop_owned_daemon(daemon)
         raise WitnessFailure(exc.code, f"owned daemon: {exc}") from exc
