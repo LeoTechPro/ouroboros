@@ -378,7 +378,11 @@ def _safe_archive_relative_path(value: str) -> bool:
     if not text or "\\" in text or "\x00" in text:
         return False
     path = pathlib.PurePosixPath(text)
-    return bool(path.parts) and not path.is_absolute() and ".." not in path.parts and ":" not in path.parts[0]
+    # A nested Windows drive-relative path (or alternate data stream) is unsafe
+    # too: npm_root.joinpath("D:entry.js") need not stay beneath npm_root.
+    return bool(path.parts) and not path.is_absolute() and ".." not in path.parts and all(
+        ":" not in part for part in path.parts
+    )
 
 
 def _safe_zip_member_type(info: zipfile.ZipInfo) -> bool:

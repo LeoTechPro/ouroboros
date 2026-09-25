@@ -632,6 +632,74 @@ def test_windows_node_archive_extracts_reviewed_npm(tmp_path):
     assert (npm_root / "bin" / "npm-cli.js").read_bytes() == b"npm"
 
 
+@pytest.mark.parametrize("nested_name", ("D:escaped.js", "lib/stream:entry.js"))
+def test_windows_node_archive_rejects_drive_relative_or_stream_in_nested_npm_path(tmp_path, nested_name):
+    distribution = f"node-v{NODE_VERSION}-win-x64"
+    node_member = f"{distribution}/node.exe"
+    npm_cli = f"{distribution}/node_modules/npm/bin/npm-cli.js"
+    archive = tmp_path / "node.zip"
+    with zipfile.ZipFile(archive, "w") as bundle:
+        bundle.writestr(node_member, b"node")
+        bundle.writestr(npm_cli, b"npm")
+        bundle.writestr(f"{distribution}/node_modules/npm/{nested_name}", b"unsafe")
+    artifact = runtime.NodeRuntimeArtifact(
+        archive_url="https://node.example.test/node.zip",
+        sha256=hashlib.sha256(archive.read_bytes()).hexdigest(),
+        size_bytes=archive.stat().st_size,
+        executable=node_member,
+    )
+    destination = tmp_path / "out/node-standalone/node.exe"
+    destination.parent.mkdir(parents=True)
+    npm_root = runtime.ClaudexorRuntimeManager._managed_npm_cli(destination).parent.parent
+
+    with pytest.raises(runtime.ClaudexorRuntimeError) as excinfo:
+        runtime.ClaudexorRuntimeManager._extract_node_archive(
+            archive, artifact, destination, archive_npm_cli=npm_cli, npm_root=npm_root
+        )
+    assert excinfo.value.code == "runtime_node_archive_invalid"
+
+
+def test_official_windows_zip_shape_extracts_only_node_and_the_npm_tree(tmp_path):
+    # The shape measured in the pinned node-v24.16.0-win-x64.zip: MS-DOS entries
+    # (create_system 0, no Unix type bits), explicit directory entries, and shell
+    # launchers beside node.exe that the managed toolchain must not materialize.
+    distribution = f"node-v{NODE_VERSION}-win-x64"
+    npm_cli = f"{distribution}/node_modules/npm/bin/npm-cli.js"
+    archive = tmp_path / "node.zip"
+    with zipfile.ZipFile(archive, "w") as bundle:
+        for name in (f"{distribution}/", f"{distribution}/node_modules/",
+                     f"{distribution}/node_modules/npm/", f"{distribution}/node_modules/npm/bin/",
+                     f"{distribution}/node_modules/corepack/"):
+            entry = zipfile.ZipInfo(name)
+            entry.create_system, entry.external_attr = 0, 0x10
+            bundle.writestr(entry, b"")
+        for name, payload in ((f"{distribution}/node.exe", b"node"), (npm_cli, b"npm"),
+                              (f"{distribution}/node_modules/npm/package.json", b"{}"),
+                              (f"{distribution}/node_modules/corepack/package.json", b"{}"),
+                              (f"{distribution}/npm.cmd", b"@echo off"),
+                              (f"{distribution}/npm.ps1", b"#ps"), (f"{distribution}/npx.cmd", b"@echo off")):
+            entry = zipfile.ZipInfo(name)
+            entry.create_system, entry.external_attr = 0, 0x20
+            bundle.writestr(entry, payload)
+    artifact = runtime.NodeRuntimeArtifact(
+        archive_url="https://node.example.test/node.zip",
+        sha256=hashlib.sha256(archive.read_bytes()).hexdigest(),
+        size_bytes=archive.stat().st_size,
+        executable=f"{distribution}/node.exe",
+    )
+    destination = tmp_path / "out/node-standalone/node.exe"
+    destination.parent.mkdir(parents=True)
+    npm_root = runtime.ClaudexorRuntimeManager._managed_npm_cli(destination).parent.parent
+
+    runtime.ClaudexorRuntimeManager._extract_node_archive(
+        archive, artifact, destination, archive_npm_cli=npm_cli, npm_root=npm_root
+    )
+
+    extracted = sorted(path.relative_to(destination.parent).as_posix()
+                       for path in destination.parent.rglob("*") if path.is_file())
+    assert extracted == ["node.exe", "node_modules/npm/bin/npm-cli.js", "node_modules/npm/package.json"]
+
+
 @pytest.mark.parametrize(
     ("special_member", "file_type"),
     (("node", stat.S_IFCHR), ("npm", stat.S_IFIFO), ("npm", stat.S_IFLNK)),

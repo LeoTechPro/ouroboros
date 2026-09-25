@@ -154,7 +154,10 @@ CHAPTER_BYTE_BUDGETS: dict[str, int] = {
     # 20560 -> 20800 (PR #1255; measured 20768): the Docker subsection maps the new root
     # .dockerignore (what it keeps out of image layers and why .git/tests/ must stay in),
     # a config BIBLE P6 requires on the map.
-    "docs/architecture/08-git-branching-ci-and-build.md": 20800,
+    # 20800 -> 21100 (PR #1150; measured 21027): the platform-gate sentence is rewritten to
+    # map its new credential-free toolchain lane and script (real managed Node/npm with no
+    # ambient Node, no harness install claimed), a CI contract the chapter had no text for.
+    "docs/architecture/08-git-branching-ci-and-build.md": 21100,
     # 12405 -> 14400 (issue #1142): the ordinary-close paragraph gains the mechanism the chapter had
     # no text for — graceful stop signals the server PID only, the server half (stop event at the
     # signal, bounded uvicorn drain) is self-sufficient against an old group-SIGTERM launcher.

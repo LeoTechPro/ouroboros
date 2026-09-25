@@ -47,6 +47,17 @@
 #             `integration-test` in ci.yml. So it runs where the other paid lanes run:
 #             ouroboros-stable, manual dispatch, and tags.
 #
+# A THIRD, NARROWER JOB: toolchain. The fixture lane installs the runtime for the daemon
+# but never runs npm, and the live lane pre-installs its harness with setup-node's npm.
+# Neither proves the managed Node/npm toolchain that `install_missing_harness_cli` hands
+# to the engine. The toolchain job does, credential-free and on pushes/PRs: with no
+# node/npm on PATH, no ambient npm config, no CLAUDEXOR_*_BIN override and a disposable
+# home, the production `ensure_cli_command()` installs Node + npm from the pinned
+# official archive, and the managed Node runs the CLI and `npm-cli.js` directly (never
+# an npm .cmd shim) for an offline local-tarball install, a reselect and a repair
+# (scripts/claudexor_toolchain_smoke.py). It never runs `harness install`: the pinned
+# engine refuses `--target local` on Windows, so a harness install is not claimed here.
+#
 # WHAT MAKES IT RED, ON PURPOSE. There is no "harness unavailable, skipping" branch
 # anywhere below. An absent seam, an engine below the delegated-marker floor, an
 # unreachable daemon, a run that never terminates, a primary artifact that cannot
@@ -83,6 +94,7 @@ on:
       - 'ouroboros/subagents.py'
       - 'ouroboros/config.py'
       - 'scripts/claudexor_platform_smoke.py'
+      - 'scripts/claudexor_toolchain_smoke.py'
       - 'scripts/fetch_claudexor_runtime.py'
       - 'Ouroboros.spec'
       - 'build.sh'
@@ -112,6 +124,7 @@ on:
       - 'ouroboros/subagents.py'
       - 'ouroboros/config.py'
       - 'scripts/claudexor_platform_smoke.py'
+      - 'scripts/claudexor_toolchain_smoke.py'
       - 'scripts/fetch_claudexor_runtime.py'
       - 'Ouroboros.spec'
       - 'build.sh'
@@ -184,6 +197,27 @@ jobs:
           path = pathlib.Path(os.environ["OUROBOROS_DATA_DIR"]) / "claudexor" / "daemon.log"
           if path.is_file(): print(path.read_text(encoding="utf-8", errors="replace")[-20000:])
           PY
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # Toolchain lane — free, credential-free. Real managed Node/npm for the CLI.
+  # ────────────────────────────────────────────────────────────────────────────
+  toolchain:
+    name: toolchain · ${{ matrix.os }} · real managed Node/npm, no ambient Node, no harness install
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-python-env
+      - name: Install the pinned CLI toolchain from official archives and exercise it without ambient Node/npm
+        # Isolate Python *at startup* before the script scrubs PATH, npm/Node
+        # config, harness overrides and Ouroboros roots; no setup-node here.
+        run: python -I scripts/claudexor_toolchain_smoke.py --root "$RUNNER_TEMP/cx-toolchain"
 
   # ────────────────────────────────────────────────────────────────────────────
   # Live lane — real harness, explicit API key, one README edit. Costs money.
