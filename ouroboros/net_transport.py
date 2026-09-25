@@ -84,7 +84,11 @@ def extra_ca_bundle() -> Optional[str]:
     try:
         if not (target.is_file() and target.read_bytes() == merged):
             target.parent.mkdir(parents=True, exist_ok=True)
-            tmp = target.with_name(f"{target.name}.{os.getpid()}.tmp")
+            import threading
+
+            # Per-process AND per-thread temp name: two threads first building clients at once
+            # must not share one temp file (Windows refuses to replace a file another thread holds open).
+            tmp = target.with_name(f"{target.name}.{os.getpid()}-{threading.get_ident()}.tmp")
             tmp.write_bytes(merged)
             os.replace(tmp, target)
     except OSError as exc:
