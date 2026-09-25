@@ -15,6 +15,7 @@ import uuid
 from pathlib import Path
 from typing import Any, Dict
 
+from ouroboros.dialogue_provenance import presence_root_carrier
 from ouroboros.tools.control_events import (
     _PROMOTE_CONFIRM_TIMEOUT_SEC,
     _emit_and_wait_for_routing,
@@ -438,18 +439,17 @@ def _promote_chat_to_task(
         "ts": utc_now_iso(),
     }
     metadata = getattr(ctx, "task_metadata", {})
-    presence = metadata.get("presence") if isinstance(metadata, dict) else None
-    if isinstance(presence, dict) and presence:
-        # A public conversation may promote long work, but it cannot choose a
-        # new Project/workspace/source authority. The immutable positive ceiling
-        # and exact return destination follow the promoted root by value.
+    presence_carrier = presence_root_carrier(metadata, task_contract=getattr(ctx, "task_contract", None))
+    if presence_carrier:
+        # A public conversation cannot choose a new Project/workspace/source authority; the immutable
+        # ceiling and return destination (a descendant's root: its binding only) follow it by value.
         evt.update({
             "project_id": "",
             "project_name": "",
             "workspace_root": "",
             "workspace": "",
             "source": "",
-            "presence": dict(presence),
+            **presence_carrier,
             "task_contract": dict(getattr(ctx, "task_contract", {}) or {}),
         })
         repo_root_note = ""  # Presence runs in its admitted folder, never over the repo

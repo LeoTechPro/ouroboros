@@ -158,8 +158,10 @@ def build_presence_result_event(task: dict[str, Any], text: str, ctx: Any, *, te
         "task_id": str(task.get("id") or ""),
         "outcome": outcome,
         "text": result_text,
-        # The accepted presence_finish message; a tool_delivered note is context, never speech.
-        "message": result_text or note,
+        # Speech and the internal finish note stay separate even when owed work
+        # changes tool_delivered into deferred for the polling contract.
+        "message": result_text,
+        **({"finish_note": note} if note else {}),
         "work_ref": work_ref,
         "ts": utc_now_iso(),
     }
@@ -344,12 +346,35 @@ def _read_previous_turn(drive_root: Path, conversation_key: str) -> dict[str, An
     return row if row.get("conversation_key") == conversation_key else None
 
 
+def _previous_turn_source_view(drive_root: Path, pointer: dict[str, Any]) -> dict[str, Any]:
+    """Read a legacy deferred pointer's speech from its canonical result, without rewriting history.
+
+    Old tool-delivered notes used the same `message` slot as replies. Owed work
+    changed their outcome to deferred, hiding that provenance. A missing source
+    proves neither speech nor a note; the context must say it is unverified.
+    """
+    if (pointer.get("outcome") != "deferred" or not pointer.get("message")
+            or "finish_note" in pointer):
+        return pointer
+    row = load_task_result(drive_root, str(pointer.get("task_id") or "")) or {}
+    metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+    observed = metadata.get("presence_result_text")
+    if metadata.get("presence_outcome") == "deferred" and isinstance(observed, str):
+        if observed == pointer["message"]:
+            return pointer  # source proves an authored partial reply, not a note
+        if not observed:
+            return {**pointer, "message": "", "finish_note": pointer["message"]}
+    return {**pointer, "message": "", "previous_text_unverified": True}
+
+
 def _write_previous_turn(drive_root: Path, conversation_key: str, task_id: str, *, outcome: str, message: str,
-                         sends: Sequence[str], work_ref: str, finished_at: str, delivery: str) -> None:
+                         sends: Sequence[str], work_ref: str, finished_at: str, delivery: str,
+                         finish_note: str = "") -> None:
     """Best effort: the pointer is a projection, and a turn that already answered is not failed over it."""
     try:
         atomic_write_json(_previous_turn_path(drive_root, conversation_key), {
             "conversation_key": conversation_key, "task_id": task_id, "outcome": outcome, "message": message,
+            **({"finish_note": finish_note} if finish_note else {}),
             "transport_sends": [text for text in sends if text], "work_ref": work_ref,
             "finished_at": finished_at, "delivery": delivery,
         })
@@ -481,7 +506,8 @@ def _build_task(
     }
     previous_turn = _read_previous_turn(drive_root, event.conversation_key)
     if previous_turn:
-        if previous_turn.get("work_ref"):  # the deferred child's fate is read from its canonical row, never stored
+        previous_turn = _previous_turn_source_view(drive_root, previous_turn)
+        if previous_turn.get("work_ref"):   # the deferred child's fate is read from its canonical row, never stored
             work_ref = str(previous_turn["work_ref"])
             child = load_task_result(drive_root, work_ref) or {}
             status = str(child.get("status") or "")
@@ -699,7 +725,8 @@ def run_presence_turn(
         _write_previous_turn(Path(drive_root), event.conversation_key, task_id, outcome=result.outcome,
                              message=str(row.get("message") or result.text), sends=sends or [],
                              work_ref=result.work_ref, finished_at=utc_now_iso(),
-                             delivery=_delivery_state(event.delivery_reporting_version, sends, result.text))
+                             delivery=_delivery_state(event.delivery_reporting_version, sends, result.text),
+                             finish_note=str(row.get("finish_note") or ""))
         return result
 
     return (gate or _configured_gate(Path(drive_root))).run(event.conversation_key, execute)

@@ -58,12 +58,18 @@ def _presence_target_refused(ctx: Any, evt: Dict[str, Any], task: Dict[str, Any]
 
     The sender is Presence by the host's stamp on the event or, failing that, by
     its own live queue row (a delegated descendant's inherited binding authority),
-    so the fence never rests on one producer remembering to stamp the event.
+    so the fence never rests on one producer remembering to stamp the event; a
+    malformed stamp or carrier narrows to nothing. Whose work the target is follows
+    the read/cancel precedence: its canonical record decides, and the live row
+    stands in only for a record without Presence provenance.
     """
-    from ouroboros.dialogue_provenance import presence_metadata_binding, presence_related_work
+    from ouroboros.dialogue_provenance import (
+        presence_metadata_binding, presence_related_work, presence_target_record,
+    )
 
     if "presence_binding_id" in evt:
-        binding = str(evt.get("presence_binding_id") or "")
+        stamp = evt.get("presence_binding_id")
+        binding = stamp.strip() if isinstance(stamp, str) else ""
     else:
         running = getattr(ctx, "RUNNING", None)
         meta = running.get(str(_issuer(evt).get("task_id") or "")) if isinstance(running, dict) else None
@@ -71,7 +77,10 @@ def _presence_target_refused(ctx: Any, evt: Dict[str, Any], task: Dict[str, Any]
         binding = presence_metadata_binding(row.get("metadata")) if isinstance(row, dict) else None
         if binding is None and isinstance(row, dict) and isinstance(row.get("task_contract"), dict):
             binding = "" if "capability_ceiling" in row["task_contract"] else None
-    return binding is not None and not presence_related_work(binding, task)
+    if binding is None:
+        return False
+    target = str(evt.get("target_task_id") or task.get("id") or "").strip()
+    return not presence_related_work(binding, presence_target_record(ctx.DRIVE_ROOT, target, queue_row=task))
 
 
 def _refuse_steering_while_cancelling(

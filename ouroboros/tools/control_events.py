@@ -193,11 +193,12 @@ def _record_promotion_admission_stub(ctx: ToolContext, evt: Dict[str, Any], mode
     carries the event's host provenance as the would-be root, exactly as the
     admission writes it, so its own binding can read the pending reconciliation.
     """
+    from ouroboros.dialogue_provenance import presence_root_carrier
     from ouroboros.routing_wait import PROMOTION_ADMISSION_EMITTED
     from ouroboros.task_results import STATUS_REQUESTED, write_task_result
 
     task_id = str(evt.get("task_id") or "")
-    presence = evt.get("presence") if isinstance(evt.get("presence"), dict) else None
+    carrier = presence_root_carrier(evt, task_contract=evt.get("task_contract"))
     try:
         write_task_result(
             _routing_status_root(ctx), task_id, STATUS_REQUESTED,
@@ -210,8 +211,8 @@ def _record_promotion_admission_stub(ctx: ToolContext, evt: Dict[str, Any], mode
                 "emitted_at": utc_now_iso(),
                 "transport_mode": mode,
             },
-            **({"metadata": {"presence": dict(presence)}, "source": "presence_promote",
-                "delegation_role": "root", "root_task_id": task_id} if presence else {}),
+            **({"metadata": carrier, "source": "presence_promote",
+                "delegation_role": "root", "root_task_id": task_id} if carrier else {}),
         )
     except Exception as exc:
         # The promote itself proceeds; what is lost is the reconciliation read, so

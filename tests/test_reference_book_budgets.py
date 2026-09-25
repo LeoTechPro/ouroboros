@@ -207,7 +207,12 @@ CHAPTER_BYTE_BUDGETS: dict[str, int] = {
     # between the internal record and the declared reply; the base sat 10 bytes under.
     # 13400 -> 13700 (TZ2 descendant authority): one sentence the chapter lacked — a
     # delegated descendant's inherited binding authority, apart from the speaker metadata.
-    "docs/architecture/12-host-service-companions-and-chat-ids.md": 13700,
+    # 13700 -> 13950 (TZ2 repair, measured 13918): that sentence now names what the
+    # descendant's promote/follow-up roots carry and the canonical-first steer precedence
+    # (replacing the live-row clause), and "host diagnostics" states its ordinary-final limit.
+    # 13950 -> 14100 (TZ2 review): a deferred tool-delivery finish note is
+    # carried separately from prior speech in the same previous-turn pointer.
+    "docs/architecture/12-host-service-companions-and-chat-ids.md": 14100,
     # 7764 -> 8600 (#1195): the fresh selected-subject + immutable peer projection
     # execution check (`skill_peer_inventory.py`, `skill_conflicts.py`) replaces
     # whole-inventory hashing; the chapter had no description of that seam to swap out.
@@ -237,7 +242,9 @@ CHAPTER_BYTE_BUDGETS: dict[str, int] = {
     # cancel clause with the own-binding rule and name the forced declaration.
     # 95000 -> 95150 (TZ2 descendant authority): the own-binding bullet names how a delegated
     # descendant is a Presence caller (inherited binding authority, never speaker metadata).
-    "docs/development/06-rules-by-change-class.md": 95150,
+    # 95150 -> 95200 (TZ2 repair, measured 95191): the promotion/follow-up clause names the
+    # one carrier it copies instead of "the Presence metadata".
+    "docs/development/06-rules-by-change-class.md": 95200,
     "docs/development/07-managed-update-rule.md": 4166,
     "docs/development/08-mutation-attribution-rule.md": 2899,
     "docs/development/09-process-custody-rule.md": 10028,

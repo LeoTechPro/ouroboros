@@ -11,6 +11,7 @@ from typing import Any, Mapping
 from ouroboros.dialogue_provenance import (  # the provenance predicate; authority re-exports it
     PRESENCE_OWN_WORK_SCOPE,
     presence_caller_binding,
+    presence_metadata_binding as presence_metadata_binding,
     presence_effective_hops,
     presence_effective_related,
     presence_queue_task,

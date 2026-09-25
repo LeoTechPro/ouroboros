@@ -847,7 +847,7 @@ def _schedule_task(ctx: ToolContext, internal: Dict[str, Any] | None = None, /, 
         **intent_fields,
         "subagent_envelope": envelope,
         "origin_metadata": consciousness_origin_metadata(metadata),  # a consciousness child: label, category, level
-        **presence_binding_authority_metadata(metadata, task_contract=ctx.task_contract),  # binding, never speaker
+        **presence_binding_authority_metadata(metadata, task_contract=getattr(ctx, "task_contract", None)),  # never speaker
     }
     _populate_subagent_event_extras(
         evt, current_chat_id=current_chat_id, child_drive=child_drive,

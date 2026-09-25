@@ -121,10 +121,34 @@ def _task_record(
     return record, None
 
 
+def _queue_snapshot(drive_root: pathlib.Path) -> tuple[Dict[str, Any], bool]:
+    """The persisted queue snapshot, and whether one exists that could not be read.
+
+    Never written means nothing was ever queued; a written snapshot that cannot be
+    read, or lists its rows in a shape this reader cannot walk, proves no absence.
+    """
+    path = drive_root / "state" / "queue_snapshot.json"
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return {}, False
+    except (OSError, UnicodeDecodeError):
+        return {}, True
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        return {}, True
+    if not isinstance(data, dict) or any(not isinstance(data.get(key, []), list) for key in ("running", "pending")):
+        return {}, True
+    return data, False
+
+
 def _owner_record(row: Dict[str, Any] | None, queued: Dict[str, Any]) -> Dict[str, Any]:
     """Whose work one task is: a readable result row's binding fact decides, else the queue's own task."""
-    if row and row.get("presence_binding_id"):
-        return {"metadata": {"presence": {"binding_id": row["presence_binding_id"]}},
+    if row and (row.get("presence_binding_id") or row.get("presence_authority_recorded")):
+        # A readable malformed/empty carrier (or a ceiling whose carrier was lost)
+        # outranks a stale queue claim: the empty binding grants no scoped read.
+        return {"metadata": {"presence_binding_authority": {"binding_id": row.get("presence_binding_id") or ""}},
                 "delegation_role": row.get("delegation_role"), "parent_task_id": row.get("parent_task_id")}
     return queued
 
@@ -172,6 +196,7 @@ def _presence_scope_inventory(
     metadata (a legacy pending promotion), and a row naming another binding stays out.
     Only a READABLE result row replaces a queue row: an unreadable one leaves the
     queued work listed, and unreadable rows nothing attributes are counted, never dropped.
+    An unreadable queue snapshot is a gap too: its queued work cannot be listed, not absent.
     """
     from ouroboros.gateway.task_list_scan import raw_result_facts
 
@@ -181,10 +206,12 @@ def _presence_scope_inventory(
     except OSError:
         facts, malformed = {}, []
         gap["result_root"] = "unreadable"  # queued rows remain; no result row could be read
-    snapshot, _error = _read_json(drive_root / "state" / "queue_snapshot.json")
+    snapshot, snapshot_unreadable = _queue_snapshot(drive_root)
+    if snapshot_unreadable:
+        gap["queue_snapshot"] = "unreadable"  # its queued work cannot be listed; that is not absence
     queued: Dict[str, tuple[str, Dict[str, Any]]] = {}
     for status in ("running", "pending"):
-        for item in (snapshot or {}).get(status) or []:
+        for item in snapshot.get(status) or []:
             task = item.get("task") if isinstance(item, dict) and isinstance(item.get("task"), dict) else {}
             task_id = str(item.get("id") or task.get("id") or "") if isinstance(item, dict) else ""
             if task_id and task_id not in queued:
@@ -410,12 +437,12 @@ def recent_tasks_page(
 
 
 def _restricted_actor(ctx: ToolContext) -> bool:
-    """Children and Presence turns hold no live cross-focus catalogue."""
+    """Children and Presence turns, or work acting for a binding, hold no live cross-focus catalogue."""
     metadata = getattr(ctx, "task_metadata", {})
     metadata = metadata if isinstance(metadata, dict) else {}
     return bool(str(metadata.get("parent_task_id") or "").strip()
             or str(metadata.get("delegation_role") or "") == "subagent"
-            or is_presence_task({"metadata": metadata}))
+            or is_presence_task({"metadata": metadata}) or presence_caller_binding(ctx) is not None)
 
 
 def _handle_live_roots(ctx: ToolContext, limit: int = 20, offset: int = 0, snapshot: str = "", **_kwargs: Any) -> str:

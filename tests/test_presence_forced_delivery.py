@@ -114,7 +114,7 @@ def test_forced_final_speaks_only_what_it_declares(tmp_path, monkeypatch, forced
     assert _cached_result(tmp_path, "presence-loop").text == spoken
     assert text == RECORD and stored["result"].startswith(RECORD)  # the record survives beside it
     if outcome == "tool_delivered":
-        assert result["message"] == "sent the table via the transport tool"  # a note, never speech
+        assert result["message"] == "" and result["finish_note"] == "sent the table via the transport tool"
 
 
 def test_a_malformed_control_body_speaks_nothing_and_keeps_the_host_fallback(tmp_path, monkeypatch):
@@ -285,7 +285,7 @@ def test_a_tool_delivered_note_is_never_speech_even_when_owed_work_defers_the_tu
     result, stored, _calls, _text = _run(tmp_path, monkeypatch, _forced("tool_delivered", note), handoff=handoff)
 
     assert (result["outcome"], result["text"], result["work_ref"]) == ("deferred", "", "later-work")
-    assert result["message"] == note  # context for the next turn, never a reply body
+    assert result["message"] == "" and result["finish_note"] == note  # context, never speech
     assert stored["metadata"]["presence_result_text"] == ""
     replay = _cached_result(tmp_path, "presence-loop")
     assert (replay.outcome, replay.text, replay.work_ref) == ("deferred", "", "later-work")

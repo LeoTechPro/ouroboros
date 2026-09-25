@@ -58,11 +58,16 @@ def _previous_turn_line(previous: Mapping[str, Any]) -> str:
     sends = [str(text) for text in sends if str(text or "").strip()]
     message = str(previous.get("message") or "").strip()
     said = [json.dumps(text, ensure_ascii=False) for text in sends]
-    if previous.get("outcome") == "tool_delivered":  # its message is the model's note, never speech
+    note = str(previous.get("finish_note") or "").strip()
+    if previous.get("outcome") == "tool_delivered":  # legacy pointers kept the note in message
         said = said or ["delivered via transport tool (content unrecorded)"]
-        said += [f"finish note {json.dumps(message, ensure_ascii=False)}"] if message else []
+        note = note or message
     elif message and message not in sends:
         said.append(json.dumps(message, ensure_ascii=False))
+    if note:
+        said.append(f"finish note {json.dumps(note, ensure_ascii=False)}")
+    if previous.get("previous_text_unverified"):
+        said.append("legacy previous text unverified as speech (source unavailable)")
     body = " / ".join(said) or "nothing sent"
     work = ""
     if previous.get("work_ref"):
@@ -101,7 +106,7 @@ def _own_work_section(drive_root: Path, value: Mapping[str, Any], task_id: str) 
         origin = row.get("presence_origin") if isinstance(row.get("presence_origin"), Mapping) else {}
         key = str(origin.get("conversation_key") or "")
         where = ("this conversation" if key and key == here
-                 else f"conversation {key}" if key else "a conversation the queue row names")
+                 else f"conversation {key}" if key else "a conversation this row does not name")
         preview = " ".join(str(row.get("result_preview") or "").split())[:200]
         lines.append(
             f"- {row.get('task_id')} [{row.get('status') or 'unknown'}"
@@ -113,10 +118,12 @@ def _own_work_section(drive_root: Path, value: Mapping[str, Any], task_id: str) 
             + (f"; {row['effective_result']}" if row.get("effective_result") else "")
         )
     gap = page.get("read_gap") if isinstance(page.get("read_gap"), Mapping) else {}
-    if gap:
-        lines.append("(some results are unreadable now: "
-                     + ("the result root" if gap.get("result_root") else
-                        f"{gap.get('unattributed_unreadable_rows')} row(s) no record attributes")
+    unread = [text for key, text in (
+        ("result_root", "the result root"), ("queue_snapshot", "the queue snapshot (queued work)"),
+        ("unattributed_unreadable_rows", f"{gap.get('unattributed_unreadable_rows')} row(s) no record attributes"),
+    ) if gap.get(key)]
+    if unread:
+        lines.append("(some results are unreadable now: " + "; ".join(unread)
                      + "; this binding's work may be among them)")
     if page.get("error"):
         lines.append(f"(listing unavailable now: {page['error'].get('code')}; page again with recent_tasks)")

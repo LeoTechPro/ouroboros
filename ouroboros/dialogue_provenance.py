@@ -35,12 +35,14 @@ PRESENCE_BINDING_AUTHORITY_KEY = "presence_binding_authority"
 
 
 def presence_record_binding(record: Any) -> str:
-    """The nonempty host binding id one task/queue record carries, else ``""``."""
+    """The nonempty host binding id one task/queue record carries, else ``""``.
+
+    The one reader of both carriers: a speaker's ``metadata.presence`` and the
+    ``metadata.presence_binding_authority`` of work a delegated descendant started.
+    """
 
     metadata = record.get("metadata") if isinstance(record, Mapping) else None
-    presence = metadata.get("presence") if isinstance(metadata, Mapping) else None
-    value = presence.get("binding_id") if isinstance(presence, Mapping) else None
-    return value.strip() if isinstance(value, str) else ""
+    return presence_metadata_binding(metadata) or ""
 
 
 def presence_related_work(binding_id: str, record: Any) -> bool:
@@ -99,6 +101,23 @@ def presence_binding_authority_metadata(parent_metadata: Any, *, task_contract: 
     return {} if binding is None else {PRESENCE_BINDING_AUTHORITY_KEY: {"binding_id": binding}}
 
 
+def presence_root_carrier(source: Any, *, task_contract: Any = None) -> dict[str, Any]:
+    """The Presence carrier an independent root started from ``source`` keeps, or ``{}``.
+
+    ``source`` is the starting task's metadata or its promote event. A Presence
+    turn or root hands on its speaker metadata: the new root answers the same
+    conversation. A delegated descendant hands on only the binding it acts for:
+    its root is that binding's related work, never a speaker. A malformed or lost
+    carrier under a ceiling narrows to an empty binding. Producer and admission
+    both read this; ``presence_record_binding`` reads what it writes.
+    """
+
+    presence = source.get("presence") if isinstance(source, Mapping) else None
+    if isinstance(presence, Mapping) and presence:
+        return {"presence": dict(presence)}
+    return presence_binding_authority_metadata(source, task_contract=task_contract)
+
+
 def presence_sender_origin(ctx: Any) -> dict[str, str]:
     """Where a Presence caller's run started (its ``run_origin`` room/event facts).
 
@@ -123,11 +142,14 @@ def presence_queue_task(drive_root: Any, task_id: str) -> dict[str, Any] | None:
     return None
 
 
-def presence_target_record(drive_root: Any, task_id: str) -> Mapping[str, Any] | None:
+def presence_target_record(drive_root: Any, task_id: str, *,
+                           queue_row: Mapping[str, Any] | None = None) -> Mapping[str, Any] | None:
     """The record that decides whose work ``task_id`` is.
 
-    The canonical task record decides; a legacy row without Presence provenance
-    may be established only by the queue's own task metadata.
+    The canonical task record decides, a malformed Presence carrier included (it
+    narrows to nothing); a legacy row without Presence provenance may be established
+    only by the queue's own task metadata — ``queue_row`` when the caller holds the
+    live row (the supervisor), else the persisted snapshot.
     """
 
     from ouroboros.task_results import load_task_result
@@ -138,8 +160,12 @@ def presence_target_record(drive_root: Any, task_id: str) -> Mapping[str, Any] |
     except (OSError, ValueError):
         stored = None  # an unreadable or invalid id is no evidence of relation
     record = stored if isinstance(stored, Mapping) and stored else None
-    if record is None or not presence_record_binding(record):
-        record = presence_queue_task(drive_root, target) or record
+    contract = record.get("task_contract") if isinstance(record, Mapping) else None
+    has_ceiling = isinstance(contract, Mapping) and "capability_ceiling" in contract
+    if record is None or (presence_metadata_binding(record.get("metadata")) is None and not has_ceiling):
+        queued = {**dict(queue_row), "id": target} if isinstance(queue_row, Mapping) else (
+            presence_queue_task(drive_root, target))
+        record = queued or record
     return record
 
 
