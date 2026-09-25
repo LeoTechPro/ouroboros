@@ -137,7 +137,9 @@ def test_actual_presence_and_cached_read_keep_authored_speech_and_owner_notice_s
         assert body["error"] == "presence_attempt_outcome_unknown: source_event_id"
         assert (body["turn_ref"], body["work_ref"]) == (task_id, "next-task")
         assert all(RAW not in str(value) and notice not in str(value) for value in body.values())
-    assert notices == [task_id] * 2  # the owner alone hears the notice, once per refusal
+    # each refusal consults the owner-notice writer (mocked here; production dedups on
+    # presence_recovery_owner_notified, so the owner hears it once)
+    assert notices == [task_id] * 2
     view = presence_result_from_stored(stored, task_id)
     assert (view.outcome, view.text, view.work_ref) == ("silent", "", "next-task")
 

@@ -668,11 +668,16 @@ def test_inline_turn_repeats_a_dispatched_transport_death_as_a_no_effect_attempt
     An inline Presence turn is a direct-chat task, so its PRIMARY round keeps the paid repeat
     rail (``loop_llm_call._TRANSPORT_DEATH_RETRIES``): a DISPATCHED request whose socket died
     with a typed transport death is sent once more in the same round as a NEW physical attempt
-    with its own ledger row. That repeat has no prior effect BY CONSTRUCTION: the host executes
-    tools and the transport speaks only after a model response has landed, and none landed. So
-    the owner rule (the same event is retried only with positive proof of no prior effect and a
-    new physical identity) is met, and the unknown-outcome refusal (empty 409 plus owner notice)
-    applies only once the round's repeats are exhausted. Real Host endpoint, runner, loop, round
+    with its own ledger row. That repeat is no-effect BY CONSTRUCTION in this narrow sense: no
+    Host-executed tool and no correspondent action can stem from the failed attempt, because the
+    host executes tools and the transport speaks only after a model response has landed, and
+    none landed. Provider-owned retrieval (e.g. the server-side web search a provider runs
+    before the response lands) may execute again on the repeat: read-only, non-mutating, priced.
+    So the owner rule (the same event is retried only with positive proof of no prior effect and
+    a new physical identity) is met, and the unknown-outcome refusal (empty 409 plus owner
+    notice) applies when the round ends unresolved without a further permitted repeat: the
+    deadline or a typed finalize control can refuse even the first repeat, and a repeat failing
+    with any other class ends the round at once. Real Host endpoint, runner, loop, round
     dispatcher, terminal pipeline and attempt ledger: the socket is scripted, the backoff sleep is
     recorded instead of slept, and the fallback chain is a tripwire.
     """
