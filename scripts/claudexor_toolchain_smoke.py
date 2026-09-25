@@ -346,9 +346,11 @@ def doctor_witness(harness: str, command: List[str], env: Dict[str, str], binary
             rows = gateway.harnesses()
         finally:
             gateway.close()
-        # Use the full doctor verb proven by Claudexor's Windows release smoke.
-        # Our targeted --harness call aborted in libuv on two Windows CI runs;
-        # the precise cause is unknown. The exact harness row is checked below.
+        # Use the full doctor verb. On Windows, Claudexor <= 3.15.0 printed valid
+        # doctor JSON and then aborted in libuv (Node 24 close race on forced
+        # process.exit after fetch; fixed upstream in Claudexor 3.15.1, PR #356), so
+        # the exit status here is part of the witness. The exact harness row is
+        # checked below.
         report = _cli_json([*command, "doctor", "--json"], "harness_doctor_failed", env)
     except ClaudexorUnavailable as exc:
         _stop_owned_daemon(daemon)
