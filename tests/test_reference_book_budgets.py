@@ -202,7 +202,9 @@ CHAPTER_BYTE_BUDGETS: dict[str, int] = {
     # no text for — what a binding's own work is and which readers/controls reach it
     # (replacing the conversation-exact cancel sentence), and the forced-final split
     # between the internal record and the declared reply; the base sat 10 bytes under.
-    "docs/architecture/12-host-service-companions-and-chat-ids.md": 13400,
+    # 13400 -> 13700 (TZ2 descendant authority): one sentence the chapter lacked — a
+    # delegated descendant's inherited binding authority, apart from the speaker metadata.
+    "docs/architecture/12-host-service-companions-and-chat-ids.md": 13700,
     # 7764 -> 8600 (#1195): the fresh selected-subject + immutable peer projection
     # execution check (`skill_peer_inventory.py`, `skill_conflicts.py`) replaces
     # whole-inventory hashing; the chapter had no description of that seam to swap out.
@@ -230,7 +232,9 @@ CHAPTER_BYTE_BUDGETS: dict[str, int] = {
     # (issue #1241: no tree walk or per-file git process under the lock).
     # 94900 -> 95000 (TZ2 own work): the Presence bullets replace the conversation-exact
     # cancel clause with the own-binding rule and name the forced declaration.
-    "docs/development/06-rules-by-change-class.md": 95000,
+    # 95000 -> 95150 (TZ2 descendant authority): the own-binding bullet names how a delegated
+    # descendant is a Presence caller (inherited binding authority, never speaker metadata).
+    "docs/development/06-rules-by-change-class.md": 95150,
     "docs/development/07-managed-update-rule.md": 4166,
     "docs/development/08-mutation-attribution-rule.md": 2899,
     "docs/development/09-process-custody-rule.md": 10028,

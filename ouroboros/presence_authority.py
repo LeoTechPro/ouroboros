@@ -560,10 +560,11 @@ def presence_effective_refusal(ctx: Any, task_id: str, effective: Any, *, drive_
 def presence_work_refusal(ctx: Any, task_id: str, *, drive_root: Any = None, same_tree: bool = False) -> str:
     """Refusal text when a Presence caller may not address ``task_id``, else ``""``.
 
-    A non-Presence caller is never narrowed here. ``presence_target_record``
-    decides, and a record naming another binding refuses.
-    ``same_tree`` also admits the caller's own task tree (its lineage reads).
-    ``drive_root`` defaults to the caller's task-status root.
+    A non-Presence caller is never narrowed here; a delegated descendant of a
+    Presence-bound task is one through its inherited binding authority.
+    ``presence_target_record`` decides, and a record naming another binding refuses.
+    ``same_tree`` also admits the caller's own task tree, its root included (its
+    lineage reads). ``drive_root`` defaults to the caller's task-status root.
     """
 
     binding = presence_caller_binding(ctx)
@@ -581,7 +582,7 @@ def presence_work_refusal(ctx: Any, task_id: str, *, drive_root: Any = None, sam
         metadata = getattr(ctx, "task_metadata", None)
         own_id = str(getattr(ctx, "task_id", "") or "")
         own_root = str((metadata or {}).get("root_task_id") or own_id) if isinstance(metadata, Mapping) else own_id
-        if own_id and (target == own_id or str(record.get("parent_task_id") or "") == own_id
+        if own_id and (target in {own_id, own_root} or str(record.get("parent_task_id") or "") == own_id
                        or str(record.get("root_task_id") or "") == own_root):
             return ""
     return (

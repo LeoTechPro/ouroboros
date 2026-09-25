@@ -239,6 +239,19 @@ def test_a_child_inheriting_only_the_ceiling_keeps_its_ordinary_forced_final(tmp
     assert [event["type"] for event in traces[0][1]].count("presence_result") == 0
 
 
+def test_a_child_holding_the_inherited_binding_authority_still_answers_only_its_parent(tmp_path, monkeypatch):
+    authority = {"presence_binding_authority": {"binding_id": "a" * 32}}  # it acts for the binding, never speaks
+    task = {"id": "child-4", "type": "task", "chat_id": 7, "text": "Check Q1", "delegation_role": "subagent",
+            "parent_task_id": "presence-loop", "root_task_id": "presence-loop", "metadata": dict(authority)}
+    traces = []
+    result, stored, calls, text = _run(tmp_path, monkeypatch, _forced("message", "Hello room"), task=task,
+                                       presence=False, ceiling=True, traces=traces,
+                                       metadata={"delegation_role": "subagent", **authority})
+    assert "[PRESENCE_DELIVERY]" not in str(calls[-1][-1]["content"])
+    assert result is None and "presence_declaration" not in (stored.get("metadata") or {})
+    assert [event["type"] for event in traces[0][1]].count("presence_result") == 0
+
+
 def test_duplicate_subject_evidence_survives_the_presence_arm_and_declares_nothing(tmp_path, monkeypatch):
     duplicated = ('{"delivery_control": "replace", "full_answer": "%s", "acceptance_subject": '
                   '{"owner_source_sha256": "aaa", "owner_source_sha256": "bbb"}, '

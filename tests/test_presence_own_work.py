@@ -585,3 +585,241 @@ def test_a_forked_promoted_root_reads_its_bindings_work_and_sends_from_the_canon
                                 task_metadata={"presence": presence, "budget_drive_root": str(canonical)})
     note = presence_finish_not_accepted_note(ctx, {"outcome": "tool_delivered"})
     assert '"Canonical sent reply" (live chat log only;' in note and "decoy" not in note
+
+
+# --- delegated descendants: the binding authority, never the speaker metadata -------
+
+def test_the_binding_authority_is_its_own_carrier_and_fails_closed():
+    from ouroboros.dialogue_provenance import presence_binding_authority_metadata, presence_metadata_binding
+
+    assert presence_metadata_binding({}) is None and presence_metadata_binding(None) is None
+    assert presence_metadata_binding({"presence": _presence()}) == BINDING
+    assert presence_metadata_binding({"presence_binding_authority": {"binding_id": BINDING}}) == BINDING
+    # A malformed authority is still a Presence one: it narrows to nothing, never to everything.
+    for malformed in ({}, {"binding_id": 7}, "not-a-mapping", []):
+        assert presence_metadata_binding({"presence_binding_authority": malformed}) == ""
+    # The speaker metadata decides for a Presence turn or root; its child gets the binding only.
+    assert presence_binding_authority_metadata({"presence": _presence(OTHER)}) == {
+        "presence_binding_authority": {"binding_id": OTHER}}
+    assert presence_binding_authority_metadata({"source": "owner"}) == {}
+
+
+def _parent(root, metadata, *, task_id="presence-turn-1", ceiling=True):
+    return types.SimpleNamespace(
+        task_depth=0, pending_events=[], drive_root=root, task_id=task_id, task_metadata=metadata,
+        task_contract={"capability_ceiling": presence_ceiling_payload(_ceiling())} if ceiling else {},
+        current_chat_id=4242, is_direct_chat=ceiling, is_workspace_mode=lambda: False,
+    )
+
+
+def _admitted_child(root, monkeypatch, parent):
+    """The real schedule tool, then the real supervisor admission: the queued child and its event."""
+    from ouroboros.tools.control import _schedule_task
+    from supervisor import events
+    from tests.test_nested_rights_depth import _fake_ctx
+    from tests.test_task_status_flow import _configure_test_subagent, _FakeEventQueue
+
+    _configure_test_subagent(monkeypatch)
+    parent.event_queue = _FakeEventQueue()
+    queued = _schedule_task(parent, subagent_id="api-scout", objective="Check the figures", expected_output="Findings")
+    assert "Subagent request queued" in queued, queued
+    [evt] = parent.event_queue.events
+    enqueued = []
+    events._handle_schedule_task(evt, _fake_ctx(root, enqueued))
+    [row] = enqueued
+    return evt, row
+
+
+def _worker_metadata(row):
+    """What the worker hands its tools: the queued metadata plus the row's lineage facts."""
+    lineage = ("parent_task_id", "root_task_id", "delegation_role", "budget_drive_root")
+    return {**row["metadata"], **{key: row[key] for key in lineage if row.get(key)}}
+
+
+def test_a_presence_child_inherits_only_the_binding_through_real_admission(tmp_path, monkeypatch):
+    turn = _parent(tmp_path, {"presence": _presence(), "source": "presence"})
+    evt, child = _admitted_child(tmp_path, monkeypatch, turn)
+
+    authority = {"binding_id": BINDING}
+    assert evt["presence_binding_authority"] == authority and "presence" not in evt
+    assert child["metadata"]["presence_binding_authority"] == authority
+    assert "presence" not in child["metadata"]  # no speaker: no forced reply, parser or room context
+    assert child["task_contract"]["capability_ceiling"] == turn.task_contract["capability_ceiling"]
+
+    # A grandchild inherits the same binding from its parent's authority, still without the speaker.
+    grand_evt, grandchild = _admitted_child(tmp_path, monkeypatch, _parent(
+        tmp_path, _worker_metadata(child), task_id=child["id"]))
+    assert grand_evt["presence_binding_authority"] == authority
+    assert grandchild["metadata"]["presence_binding_authority"] == authority
+    assert "presence" not in grandchild["metadata"] and grandchild["root_task_id"] == "presence-turn-1"
+
+    # An empty binding narrows its children to nothing; an ordinary parent's child is unchanged.
+    _evt, empty = _admitted_child(tmp_path, monkeypatch, _parent(tmp_path, {"presence": _presence("")},
+                                                                  task_id="presence-turn-2"))
+    assert empty["metadata"]["presence_binding_authority"] == {"binding_id": ""}
+    plain_evt, plain = _admitted_child(tmp_path, monkeypatch, _parent(tmp_path, {}, task_id="owner-root",
+                                                                       ceiling=False))
+    assert "presence_binding_authority" not in plain_evt
+    assert not {"presence", "presence_binding_authority"} & set(plain["metadata"])
+
+
+def _child_turn(root, row, supervisor_ctx, emitted):
+    turn = _steering_turn(root, supervisor_ctx, emitted)
+    turn.task_id, turn.is_direct_chat, turn.task_metadata = row["id"], False, _worker_metadata(row)
+    return turn
+
+
+def test_a_presence_child_steers_only_its_bindings_work_through_the_supervisor(tmp_path, monkeypatch):
+    import supervisor.queue as queue
+    from ouroboros.owner_mailbox import deliver_task_message, drain_owner_entries
+    from ouroboros.project_dialogue import AGENT_RECEIPT_ID_PREFIX
+    from ouroboros.tools.control import _steer_task
+    from supervisor.events import _handle_steer_task
+
+    monkeypatch.setattr(queue, "DRIVE_ROOT", str(tmp_path))
+    _evt, child = _admitted_child(tmp_path, monkeypatch, _parent(tmp_path, {"presence": _presence()}))
+    _evt, plain = _admitted_child(tmp_path, monkeypatch, _parent(tmp_path, {}, task_id="owner-root", ceiling=False))
+    queued = {"id": "queued-work", "delegation_role": "root", "chat_id": 77,
+              "metadata": {"presence": _presence(key=THREAD)}}
+    running = {"id": "running-work", "delegation_role": "root", "chat_id": 78,
+               "metadata": {"presence": _presence(key=ROOM)}}
+    foreign = {"id": "foreign-work", "delegation_role": "root", "chat_id": 79,
+               "metadata": {"presence": _presence(OTHER)}}
+    owner = {"id": "owner-work", "delegation_role": "root", "chat_id": 1, "metadata": {}}
+    supervisor_ctx = _supervisor(tmp_path, pending=[queued, foreign], running=[running, owner, child, plain])
+    emitted = []
+    turn = _child_turn(tmp_path, child, supervisor_ctx, emitted)
+
+    for target in ("queued-work", "running-work"):  # own binding, pending and live (owner Q2)
+        out = _steer_task(turn, target, "The March figures are confirmed.")
+        assert "written to its mailbox" in out and "not as owner text" in out
+        [entry] = drain_owner_entries(tmp_path, target)
+        assert (entry["provenance"], entry["source_task_id"]) == ("independent_task", child["id"])
+        assert "sender_origin" not in entry  # the child's run started from its parent, not a room
+        rendered = []
+        deliver_task_message(entry, target, None, rendered.append)
+        assert rendered[0].startswith(f"[Message from independent task {child['id']}]")
+    for target in ("foreign-work", "owner-work"):
+        refused = _steer_task(turn, target, "stop")
+        assert "STEER_REJECTED" in refused and "presence_work_not_related" in refused
+        assert drain_owner_entries(tmp_path, target) == []
+    assert all(evt["presence_binding_id"] == BINDING and evt["issuer"]["kind"] == "task" for evt in emitted)
+
+    # The supervisor fences the child by its own live row even when an event carries no stamp.
+    def unstamped(issuer, target):
+        _handle_steer_task({
+            "type": "steer_task", "routing_token": f"tok-{issuer}", "target_task_id": target,
+            "message": "unstamped", "chat_id": 4242, "client_message_id": f"{AGENT_RECEIPT_ID_PREFIX}{issuer}",
+            "issuer": {"kind": "task", "task_id": issuer, "root_task_id": issuer},
+        }, supervisor_ctx)
+        return drain_owner_entries(tmp_path, target)
+
+    assert unstamped(child["id"], "foreign-work") == []
+    assert [entry["text"] for entry in unstamped(plain["id"], "foreign-work")] == ["unstamped"]
+
+    # An ordinary child still messages any listed root, with no Presence stamp at all.
+    plain_emitted = []
+    plain_turn = _child_turn(tmp_path, plain, supervisor_ctx, plain_emitted)
+    assert "written to its mailbox" in _steer_task(plain_turn, "owner-work", "status please")
+    assert "presence_binding_id" not in plain_emitted[0]
+
+
+def test_a_presence_child_reads_its_own_tree_and_bindings_work_and_nothing_else(tmp_path, monkeypatch):
+    _evt, child = _admitted_child(tmp_path, monkeypatch, _parent(tmp_path, {"presence": _presence()}))
+    write_task_result(tmp_path, "presence-turn-1", "running", metadata={"presence": _presence()},
+                      result="The turn that started this child")
+    write_task_result(tmp_path, "sibling", "completed", parent_task_id="presence-turn-1",
+                      root_task_id="presence-turn-1", delegation_role="subagent", result="Sibling result")
+    _work(tmp_path, "done-room", "completed", key=ROOM, result="Full report text")
+    _work(tmp_path, "foreign", "completed", binding=OTHER, result="Not yours")
+    _work(tmp_path, "owner-root", "completed", binding="", result="Owner work")
+    ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id=child["id"],
+                      task_contract=child["task_contract"], task_metadata=_worker_metadata(child))
+    registry = ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path)
+    registry.set_context(ctx)
+
+    # The ceiling binds presence_scope; the inherited binding admits the tree and the binding's work.
+    for task_id, text in (("presence-turn-1", "The turn that started this child"), ("sibling", "Sibling result"),
+                          (child["id"], "Subagent"), ("done-room", "Full report text")):
+        read = registry.execute("get_task_result", {"task_id": task_id})
+        assert text in read and "PRESENCE_CAPABILITY_BLOCKED" not in read, read
+    for task_id in ("foreign", "owner-root"):
+        refused = registry.execute("get_task_result", {"task_id": task_id})
+        assert "is not independent work started from this Presence binding" in refused and "Not yours" not in refused
+    listed = json.loads(registry.execute("recent_tasks", {"limit": 20}))
+    assert [row["task_id"] for row in listed["tasks"]] == ["done-room"]
+    assert listed["presence_scope"] == {"scope": "own_binding", "binding_id": BINDING}
+
+
+def test_a_cyber_acting_presence_child_steers_and_answers_its_parent_through_the_real_loop(
+        tmp_path, tmp_path_factory, monkeypatch):
+    """Fake-model replay: under Cyber Pro an acting child holds the whole catalog, so the
+    inherited ceiling's steer_task reaches the real supervisor consumer through the registry;
+    the child then finishes as an ordinary child. Nothing is sent to any transport."""
+    import queue as stdlib_queue
+
+    import supervisor.queue as queue
+    from ouroboros import agent_task_pipeline as pipeline
+    from ouroboros import loop
+    from ouroboros.owner_mailbox import drain_owner_entries
+    from ouroboros.tools.registry import TaskConstraint
+    from supervisor.events import _handle_steer_task
+
+    monkeypatch.setattr(queue, "DRIVE_ROOT", str(tmp_path))
+    monkeypatch.setenv("OUROBOROS_TASK_REVIEW_MODE", "off")
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "cyber_pro")
+    worktree = tmp_path_factory.mktemp("shared-tree")  # disjoint from the repo and data roots
+    _evt, child = _admitted_child(tmp_path, monkeypatch, _parent(tmp_path, {"presence": _presence()}))
+    mine = {"id": "running-work", "delegation_role": "root", "chat_id": 78,
+            "metadata": {"presence": _presence(key=ROOM)}}
+    foreign = {"id": "foreign-work", "delegation_role": "root", "chat_id": 79,
+               "metadata": {"presence": _presence(OTHER)}}
+    supervisor_ctx = _supervisor(tmp_path, running=[mine, foreign, child])
+    registry = ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path)
+    ctx = registry._ctx
+    ctx.task_id, ctx.current_chat_id = child["id"], 4242
+    ctx.task_contract, ctx.task_metadata = child["task_contract"], _worker_metadata(child)
+    ctx.task_constraint = TaskConstraint(mode="acting_subagent", surface="external_workspace", write_root=str(worktree))
+    ctx.workspace_root, ctx.workspace_mode = str(worktree), "external_workspace"
+    loop_events = []
+
+    def supervisor_consumer(event, *_a, **_k):
+        # Routing reaches the real supervisor handler; the loop's other events are only kept.
+        if event.get("type") == "steer_task":
+            _handle_steer_task(event, supervisor_ctx)
+        else:
+            loop_events.append(event)
+
+    event_queue = types.SimpleNamespace(put_nowait=supervisor_consumer, put=supervisor_consumer)
+    steer = [{"id": f"steer-{target}", "type": "function", "function": {
+        "name": "steer_task", "arguments": json.dumps({"task_id": target, "message": "Figures confirmed."})}}
+        for target in ("foreign-work", "running-work")]
+    calls, replies = [], iter([{"role": "assistant", "content": None, "tool_calls": steer},
+                               {"content": "Findings: the figures are confirmed."}])
+
+    def respond(_llm, messages, *_a, **_k):
+        calls.append([dict(row) for row in messages])
+        return next(replies), 0.0
+
+    monkeypatch.setattr(loop, "call_llm_with_retry", respond)
+    task = {"id": child["id"], "type": "task", "chat_id": 4242, "text": "Check the figures",
+            "delegation_role": "subagent", "parent_task_id": "presence-turn-1", "root_task_id": "presence-turn-1",
+            "metadata": child["metadata"], "_skip_post_task_synthesis": True}
+    text, usage, trace = loop.run_llm_loop(
+        [{"role": "user", "content": "Check the figures"}], registry,
+        types.SimpleNamespace(default_model=lambda: "test-model"), tmp_path / "logs",
+        lambda *_a, **_kw: None, stdlib_queue.Queue(), task_id=child["id"], drive_root=tmp_path,
+        event_queue=event_queue,
+    )
+    events = []
+    pipeline.emit_task_results(types.SimpleNamespace(drive_root=tmp_path, repo_dir=tmp_path), None, None,
+                               events, task, text, usage, trace, 0.0, tmp_path / "logs", ctx=ctx)
+
+    results = {row["tool_call_id"]: row["content"] for row in calls[-1] if row.get("role") == "tool"}
+    assert "presence_work_not_related" in results["steer-foreign-work"]
+    assert "written to its mailbox" in results["steer-running-work"]
+    assert drain_owner_entries(tmp_path, "foreign-work") == []
+    assert [entry["source_task_id"] for entry in drain_owner_entries(tmp_path, "running-work")] == [child["id"]]
+    assert text == "Findings: the figures are confirmed."
+    assert "[PRESENCE_DELIVERY]" not in json.dumps(calls)
+    assert not [event for event in events if event["type"] == "presence_result"]  # it answers its parent

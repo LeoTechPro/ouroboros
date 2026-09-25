@@ -53,11 +53,23 @@ def _task_issued(evt: Dict[str, Any]) -> bool:
     return str(_issuer(evt).get("kind") or "") == "task"
 
 
-def _presence_target_related(evt: Dict[str, Any], task: Dict[str, Any]) -> bool:
-    """A Presence sender's live target is independent work of its own binding."""
-    from ouroboros.dialogue_provenance import presence_related_work
+def _presence_target_refused(ctx: Any, evt: Dict[str, Any], task: Dict[str, Any]) -> bool:
+    """A Presence sender's live target must be independent work of its own binding.
 
-    return presence_related_work(str(evt.get("presence_binding_id") or ""), task)
+    The sender is Presence by the host's stamp on the event or, failing that, by
+    its own live queue row (a delegated descendant's inherited binding authority),
+    so the fence never rests on one producer remembering to stamp the event.
+    """
+    from ouroboros.dialogue_provenance import presence_metadata_binding, presence_related_work
+
+    if "presence_binding_id" in evt:
+        binding = str(evt.get("presence_binding_id") or "")
+    else:
+        running = getattr(ctx, "RUNNING", None)
+        meta = running.get(str(_issuer(evt).get("task_id") or "")) if isinstance(running, dict) else None
+        row = meta.get("task") if isinstance(meta, dict) else None
+        binding = presence_metadata_binding(row.get("metadata")) if isinstance(row, dict) else None
+    return binding is not None and not presence_related_work(binding, task)
 
 
 def _refuse_steering_while_cancelling(
@@ -257,7 +269,7 @@ def _handle_steer_task(evt: Dict[str, Any], ctx: Any) -> None:
         refusal = "target_unknown"
     elif str(task.get("delegation_role") or "") == "subagent":
         refusal = "subagent_target"
-    elif task_issued and "presence_binding_id" in evt and not _presence_target_related(evt, task):
+    elif task_issued and _presence_target_refused(ctx, evt, task):
         refusal = "presence_work_not_related"
     elif not task_issued and not _owner_lane_allows(ctx, task, target, chat_id):
         refusal = "chat_mismatch"

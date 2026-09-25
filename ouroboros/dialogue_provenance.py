@@ -28,6 +28,10 @@ def is_presence_task(task: Mapping[str, Any]) -> bool:
 
 # A Presence binding's own work is reached through this scope (owner Q1/Q2).
 PRESENCE_OWN_WORK_SCOPE = "own_binding"
+# The one metadata key a DELEGATED descendant of a Presence-bound task carries:
+# the binding it acts for, never the speaker's ``metadata.presence`` (whose
+# presence arms the forced reply, the parser and the conversation context).
+PRESENCE_BINDING_AUTHORITY_KEY = "presence_binding_authority"
 
 
 def presence_record_binding(record: Any) -> str:
@@ -58,15 +62,35 @@ def presence_related_work(binding_id: str, record: Any) -> bool:
     )
 
 
+def presence_metadata_binding(metadata: Any) -> str | None:
+    """``None`` for a non-Presence task's metadata; otherwise the binding it acts for (may be empty).
+
+    A Presence turn, promoted or follow-up root speaks from ``metadata.presence``;
+    a delegated descendant holds only the host-inherited binding authority. A
+    malformed authority carrier is still a Presence one: it narrows to nothing.
+    """
+
+    if not isinstance(metadata, Mapping):
+        return None
+    presence = metadata.get("presence")
+    carrier = presence if isinstance(presence, Mapping) else metadata.get(PRESENCE_BINDING_AUTHORITY_KEY)
+    if carrier is None:
+        return None
+    value = carrier.get("binding_id") if isinstance(carrier, Mapping) else None
+    return value.strip() if isinstance(value, str) else ""
+
+
 def presence_caller_binding(ctx: Any) -> str | None:
     """``None`` for a non-Presence caller; otherwise its binding id (may be empty)."""
 
-    metadata = getattr(ctx, "task_metadata", None)
-    presence = metadata.get("presence") if isinstance(metadata, Mapping) else None
-    if not isinstance(presence, Mapping):
-        return None
-    value = presence.get("binding_id")
-    return value.strip() if isinstance(value, str) else ""
+    return presence_metadata_binding(getattr(ctx, "task_metadata", None))
+
+
+def presence_binding_authority_metadata(parent_metadata: Any) -> dict[str, Any]:
+    """What a child delegated by this task inherits: its binding authority only, or nothing."""
+
+    binding = presence_metadata_binding(parent_metadata)
+    return {} if binding is None else {PRESENCE_BINDING_AUTHORITY_KEY: {"binding_id": binding}}
 
 
 def presence_sender_origin(ctx: Any) -> dict[str, str]:
