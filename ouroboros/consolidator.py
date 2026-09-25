@@ -1012,8 +1012,17 @@ def maintain_memory_pressure(memory: Any, llm_client: Any, context: Any, *,
         identity_ref = retain_memory_source(context, "maintenance_identity", memory.identity_path().read_bytes())
         identity += "\nExact identity source, available through read_file; no identity rewrite is authorized here:\n" + json.dumps(identity_ref)
     if chat.exists() or blocks.exists():
-        usage = consolidate(chat, blocks, meta, llm_client, identity, knowledge_context=context,
-                            force_tail=True, compact_chronicle=True, pressure_fits=fits)
+        from ouroboros.memory_nomination_receipts import DialogueMetaUnreadable
+
+        try:
+            usage = consolidate(chat, blocks, meta, llm_client, identity, knowledge_context=context,
+                                force_tail=True, compact_chronicle=True, pressure_fits=fits)
+        except DialogueMetaUnreadable as exc:
+            # A damaged existing cursor is neither empty nor permission to rewrite
+            # memory. Keep the original context available to Main, with a typed
+            # maintenance gap instead of aborting its first round.
+            usage = {"_consolidation_errors": [{"kind": "dialogue_meta_unreadable",
+                                                "message": str(exc)}]}
         if usage is not None:
             usages.append(usage)
         actions.append({"owner": "dialogue_consolidation", "usage": usage})

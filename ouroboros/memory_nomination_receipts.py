@@ -14,6 +14,10 @@ from typing import Any
 KEY = "pending_knowledge_nominations"
 
 
+class DialogueMetaUnreadable(ValueError):
+    """Existing cursor or nomination obligations cannot be safely interpreted."""
+
+
 def load_meta(path: Path) -> dict[str, Any]:
     """An absent cursor is new; an unreadable existing cursor is not empty.
 
@@ -38,9 +42,11 @@ def load_meta(path: Path) -> dict[str, Any]:
             path.lstat()
         except FileNotFoundError:
             return {}
-        raise ValueError("Dialogue meta exists but cannot be read") from None
+        raise DialogueMetaUnreadable("Dialogue meta exists but cannot be read") from None
+    except (OSError, UnicodeError, ValueError) as exc:
+        raise DialogueMetaUnreadable(f"Dialogue meta unreadable: {type(exc).__name__}") from exc
     if not isinstance(value, dict):
-        raise ValueError("Dialogue meta must be a JSON object")
+        raise DialogueMetaUnreadable("Dialogue meta must be a JSON object")
     _pending(value)  # Refuse corrupt obligations before the first paid correction call.
     return value
 
@@ -49,9 +55,9 @@ def _pending(meta: dict[str, Any]) -> dict[str, dict[str, Any]]:
     rows = meta.get(KEY, [])
     if not isinstance(rows, list) or any(not isinstance(row, dict) or not isinstance(row.get("id"), str)
                                           for row in rows):
-        raise ValueError("Unreadable nomination obligations; refusing to replace their bytes")
+        raise DialogueMetaUnreadable("Unreadable nomination obligations; refusing to replace their bytes")
     if len({row["id"] for row in rows}) != len(rows):
-        raise ValueError("Duplicate nomination obligation IDs")
+        raise DialogueMetaUnreadable("Duplicate nomination obligation IDs")
     return {row["id"]: row for row in rows}
 
 

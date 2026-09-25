@@ -321,6 +321,15 @@ def test_unreadable_receipts_do_not_raise_or_shout(tmp_path, payload):
     assert not any("DIALOGUE" in line for line in context_health._memory_health_lines(env))
 
 
+def test_invalid_legacy_receipt_does_not_impersonate_unreadable_meta(tmp_path):
+    env = _health_env(tmp_path)
+    c.atomic_write_json(tmp_path / "memory" / "dialogue_meta.json",
+                        {"last_unpublished_nominations": {"failed": "many", "total": 2}})
+    lines = context_health._memory_health_lines(env)
+    assert any("LEGACY NOMINATION RECEIPT INVALID" in line for line in lines)
+    assert not any("DIALOGUE META UNREADABLE" in line for line in lines)
+
+
 def test_pending_receipt_precedes_the_note_writer_and_cannot_be_replaced_by_corrupt_meta(tmp_path, fit, monkeypatch):
     chat, blocks, meta = _paths(tmp_path)
     _write_chat(chat, count=100, text_size=0)
