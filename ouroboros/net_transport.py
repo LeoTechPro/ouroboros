@@ -40,8 +40,8 @@ def extra_ca_bundle() -> Optional[str]:
     merged with certifi into a content-addressed
     ``<data>/state/extra-ca-bundle/<digest>.pem`` and that path is returned: a
     changed owner file yields a new path, so every cache keyed on the path — the
-    SSL context below and the provider clients — rotates with it, and the stale
-    sibling files are removed.
+    SSL context below and the provider clients — rotates with it; siblings older
+    than a day are pruned (a task still holding an earlier setting keeps its file).
     Unset returns None and every client is built exactly as before the setting
     existed. An unreadable or non-PEM file raises ``ExtraCaBundleError``: a
     silent fall-back to certifi would reproduce the very TLS failure the owner
@@ -83,7 +83,9 @@ def extra_ca_bundle() -> Optional[str]:
         raise ExtraCaBundleError(f"{_EXTRA_CA_BUNDLE_KEY} holds no loadable PEM certificate: {extra} ({exc})") from exc
 
     import hashlib
-    import threading
+    import time
+
+    from ouroboros.utils import write_bytes_atomic
 
     base = pathlib.Path(certifi.where()).read_bytes()
     merged = base.rstrip(b"\n") + b"\n" + extra_bytes.rstrip(b"\n") + b"\n"
@@ -92,17 +94,15 @@ def extra_ca_bundle() -> Optional[str]:
     try:
         if not target.is_file():
             bundle_dir.mkdir(parents=True, exist_ok=True)
-            # Per-process AND per-thread temp name: two threads first building clients at once
-            # must not share one temp file (Windows refuses to replace a file another thread holds open).
-            tmp = target.with_name(f"{target.name}.{os.getpid()}-{threading.get_ident()}.tmp")
-            tmp.write_bytes(merged)
-            os.replace(tmp, target)
+            write_bytes_atomic(target, merged)
+        cutoff = time.time() - 86400
         for stale in bundle_dir.glob("*.pem"):
             if stale != target:
                 try:
-                    stale.unlink()
+                    if stale.stat().st_mtime < cutoff:
+                        stale.unlink()
                 except OSError:
-                    pass  # another process may be materializing; its own call re-resolves
+                    pass  # a sibling another process is materializing or has just pruned
     except OSError as exc:
         raise ExtraCaBundleError(f"cannot write the merged trust bundle {target}: {exc}") from exc
     _merged_bundle_cache[key] = str(target)

@@ -627,7 +627,7 @@ Bundled resources use the CLI / Headless Boundary lookup order rather than assum
 │   │   ├── usage_import_watermark.json ← resumable idempotent legacy-import watermark
 │   │   ├── request_wire_compatibility.json ← cross-process locked, schema-versioned 14-day exact-route wire evidence (request_wire_contract.py)
 │   │   ├── capability_evidence.json ← sourced model-capability evidence (capability_evidence.py)
-│   │   ├── extra-ca-bundle/<digest>.pem ← certifi plus the owner's `OUROBOROS_EXTRA_CA_BUNDLE` PEM, content-addressed so a changed owner file rotates every path-keyed cache (stale siblings removed); the one path every first-party HTTP client verifies against (net_transport.py)
+│   │   ├── extra-ca-bundle/<digest>.pem ← certifi plus the owner's `OUROBOROS_EXTRA_CA_BUNDLE` PEM, content-addressed so a changed owner file rotates every path-keyed cache (siblings older than a day pruned); the one path every first-party HTTP client verifies against (net_transport.py)
 │   │   ├── process_ledger.jsonl   ← durable process-custody ledger (process_custody.py; Runtime topology)
 │   │   ├── server_port            ← active HTTP port for launcher/browser handoff
 │   │   ├── server_port.bindings.json ← informational endpoint snapshot owned by `server_process.py`: the main, Host Service and local-model owners publish their bound host/port with pid and process fingerprint while they hold it (`record_service_binding`/`clear_service_binding`, compare-and-remove); a browser identity fact, never a grant or a custody ledger (§6 MCP and browser-facing external tools)

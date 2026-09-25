@@ -152,7 +152,14 @@ def test_setting_merges_the_owner_file_over_certifi_and_rotates_with_its_content
     extra.write_bytes(second.read_bytes())
     rotated = pathlib.Path(net_transport.extra_ca_bundle())
     assert rotated != merged and rotated.read_bytes().endswith(second.read_bytes().rstrip(b"\n") + b"\n")
-    assert not merged.exists(), "the stale sibling is removed"
+    assert merged.exists(), "a fresh sibling stays: a task still holding the earlier setting may use it"
+    import os as _os
+    import time as _time
+
+    _os.utime(merged, (_time.time() - 2 * 86400, _time.time() - 2 * 86400))
+    net_transport._merged_bundle_cache.clear()
+    assert net_transport.extra_ca_bundle() == str(rotated)
+    assert not merged.exists(), "a sibling older than a day is pruned"
     assert net_transport.trust_ssl_context() is not context, "a new owner file rotates the SSL context"
     assert net_transport.verify_kwargs()["verify"] is net_transport.trust_ssl_context()
 
@@ -226,3 +233,34 @@ def test_provider_test_names_the_trust_bundle_failure():
     result = controlled_probe_error(net_transport.ExtraCaBundleError("OUROBOROS_EXTRA_CA_BUNDLE holds no loadable PEM certificate: /x.pem"))
     assert result["ok"] is False
     assert "OUROBOROS_EXTRA_CA_BUNDLE" in result["error"]
+
+
+def test_openrouter_ground_truth_verifies_against_the_owner_bundle(monkeypatch, tmp_path):
+    """The supervisor's OpenRouter usage check is a provider call too: it must carry the trust context."""
+    import io
+    import urllib.request
+
+    from supervisor.state import check_openrouter_ground_truth
+
+    seen: dict = {}
+
+    class _Resp(io.BytesIO):
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    def fake_urlopen(req, timeout=None, context=None):
+        seen["context"] = context
+        return _Resp(b'{"data": {"usage": 1.5, "usage_daily": 0.5}}')
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "k")
+    assert check_openrouter_ground_truth() == {"total_usd": 1.5, "daily_usd": 0.5}
+    assert seen["context"] is None
+
+    extra, _cert, _key = _throwaway_ca(tmp_path)
+    monkeypatch.setenv("OUROBOROS_EXTRA_CA_BUNDLE", str(extra))
+    assert check_openrouter_ground_truth() == {"total_usd": 1.5, "daily_usd": 0.5}
+    assert seen["context"] is net_transport.trust_ssl_context()
