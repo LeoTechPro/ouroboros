@@ -734,12 +734,14 @@ ceiling and reply context rather than widening authority.
 
 Transport custody preserves provider arrival order before Host admission; the
 host serializes one conversation and enforces the installation-wide active-turn
-limit across processes. A Presence turn may find, read, message and cancel only
-independent work started from its own binding, in any of that binding's
-conversations; other bindings and the owner's tasks stay out of reach. Owner chat or Background
-Consciousness may initiate an existing binding, but the resulting cycle must use
-an explicitly selected transport tool and finish `tool_delivered` to claim that
-an external message was sent.
+limit across processes. By default, the host-provided own-work readers, messaging
+and cancellation reach only independent work started from the same nonempty binding,
+across its conversations. A profile that explicitly selects global `recent_tasks` or
+`get_task_result` retains those readers' global scope, including other bindings and
+owner work; binding-scoped steering and cancellation do not widen with those reads.
+Owner chat or Background Consciousness may initiate an existing binding, but
+its cycle must use an explicitly selected transport tool and finish
+`tool_delivered` to claim an external message was sent.
 
 #### Reporting actual Presence delivery
 
