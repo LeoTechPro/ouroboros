@@ -573,10 +573,15 @@ def scan_data_paths(root: pathlib.Path = REPO) -> frozenset[str]:
 # 295 -> 294: TZ-3 removed the destructive memory journal rewrite and its
 # ``.compact.tmp`` sibling path; PERSISTENCE.md keeps the journals, now
 # read-only observed and never age-digested.
-# 294 -> 293: TZ-3 PR-1 removed the ``knowledge_journal.jsonl`` size-telemetry
-# writer (its only reader was this inventory); ``knowledge_history.jsonl`` keeps
-# the complete captures, now host-stamped.
-EXPECTED_SCAN_PATHS = 293
+# 294 -> 296 (upstream 7.5.0): the merged extra-CA bundle is content-addressed under
+# ``state/extra-ca-bundle/`` (the directory and its ``*.pem`` members, so a changed
+# owner PEM rotates every cache); one section-2 row covers both.
+# 296 -> 297 (Presence resilience): Presence recovery inspects the retained quarantine
+# members (``task_results/quarantine/*``) before deciding whether an event ever started.
+# 297 -> 296 (TZ-3 PR-1): the ``knowledge_journal.jsonl`` size-telemetry writer is
+# removed (its only reader was this inventory); ``knowledge_history.jsonl`` keeps the
+# complete captures, now host-stamped.
+EXPECTED_SCAN_PATHS = 296
 
 # Scanned paths that must always be present — guards the scanner itself
 # against a silent regression that would shrink coverage while keeping counts

@@ -442,11 +442,14 @@ def check_openrouter_ground_truth() -> Optional[Dict[str, float]]:
         api_key = os.environ.get("OPENROUTER_API_KEY", "").strip()
         if not api_key:
             return None
+        from ouroboros.net_transport import trust_ssl_context
+
         req = urllib.request.Request(
             "https://openrouter.ai/api/v1/auth/key",
             headers={"Authorization": f"Bearer {api_key}"},
         )
-        with urllib.request.urlopen(req, timeout=10) as resp:
+        # A provider call: it verifies against the owner's trust bundle like every other one.
+        with urllib.request.urlopen(req, timeout=10, context=trust_ssl_context()) as resp:
             data = json.loads(resp.read().decode("utf-8"))
         # OpenRouter usage is dollars, not cents.
         usage_total = data.get("data", {}).get("usage", 0)

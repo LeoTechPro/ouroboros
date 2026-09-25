@@ -33,7 +33,9 @@ CHAPTER_BYTE_BUDGETS: dict[str, int] = {
     # (measured 165470 on the merged chapter).
     # 165500 -> 165550: the long-work continuity merge landed the chapter at 165507 (over by
     # 7 bytes on the official line); re-based here, no text of this chapter was touched.
-    "docs/architecture/01-high-level-architecture.md": 165550,
+    # 165550 -> 165900 (PR #1300): the net_transport row and the data-layout row for the merged
+    # extra-CA bundle; the base sat 174 bytes under the previous budget.
+    "docs/architecture/01-high-level-architecture.md": 165900,
     # 15517 -> 16200 (#1195): the session-custodied startup historical audit is a
     # new node of the startup flow (readiness no longer waits for the historical
     # seal diagnostic); the chapter had no older description of that pass to replace.
@@ -159,17 +161,24 @@ CHAPTER_BYTE_BUDGETS: dict[str, int] = {
     # 309800 -> 310100 (TZ2 + #1262 merge, measured 309985): the Presence task-message
     # own-binding boundary and forced declaration remain beside #1262's name-miss
     # contract; both are independent rules in the same chapter, not duplicate prose.
-    # 310100 -> 310800 (TZ-3 PR-1, measured 310774): the era run boundary with its
-    # `era_retry` record, the four typed memory-maintenance events and the host stamp
-    # on `source_capture` history rows are mechanisms no older text described; the
-    # sentences they extend were rewritten in place, not appended to.
-    "docs/architecture/06-agent-core.md": 310800,
+    # 310100 -> 313400 (OpenAI-family cache layout incl. the Claudexor route and the review-round wording, measured 313212): the prompt-caching
+    # paragraph gains the dated cache-unit fact, the declared-prefix projection, the
+    # per-family session rule, the wire_layout/sealed-candidate disclosure and the
+    # residuals; a mechanism the chapter lacked, so only its two stale clauses were replaced.
+    # 313400 -> 314000 (PR #1300; measured 313858 on the merged tree): the transport paragraph gains
+    # the trust-bundle seam every first-party client shares; no older text to displace.
+    # 314000 -> 314900 (TZ-3 PR-1, measured 314850 on the merged tree): the era run boundary with
+    # its `era_retry` record keyed to the executed Light binding, the four typed memory-maintenance
+    # events and the host stamp on `source_capture` history rows are mechanisms no older text
+    # described; the sentences they extend were rewritten in place, not appended to.
+    "docs/architecture/06-agent-core.md": 314900,
     # 36991 -> 37300: the facade paragraph names the three loop constants runtime_limits.py
     # gained (events batch bound, budget-projection retry interval); no older text to displace.
     # 37300 -> 38400 (PR #1207): the Z.ai (`zai::`) direct provider gets its own route
     # paragraph (plan-selected endpoint, low/high/max projection, 1113 billing) plus two
     # settings rows; the base sat 95 bytes under the previous budget, no older text to displace.
-    "docs/architecture/07-configuration.md": 38400,
+    # 38400 -> 38700 (PR #1300): one settings row for the extra-CA trust bundle; the base sat 33 bytes under.
+    "docs/architecture/07-configuration.md": 38700,
     # 18947 -> 19287: CI failure collection now documents diagnostic desktop builds while release remains gated.
     # 19287 -> 20560 (#1215): three contracts the chapter had no older text for — the
     # ONE reusable browser lane and the two triggers that share it (the unfiltered
@@ -179,7 +188,10 @@ CHAPTER_BYTE_BUDGETS: dict[str, int] = {
     # 20560 -> 20800 (PR #1255; measured 20768): the Docker subsection maps the new root
     # .dockerignore (what it keeps out of image layers and why .git/tests/ must stay in),
     # a config BIBLE P6 requires on the map.
-    "docs/architecture/08-git-branching-ci-and-build.md": 20800,
+    # 20800 -> 22000 (PR #1300; measured 21921): the Docker subsection maps the single-Dockerfile layout
+    # (browsers above the lock copy, the shared browser path, cache mounts, the CI lanes that exercise
+    # them) and points at the extra-CA setting; the base sat 16 bytes under the previous budget.
+    "docs/architecture/08-git-branching-ci-and-build.md": 22000,
     # 12405 -> 14400 (issue #1142): the ordinary-close paragraph gains the mechanism the chapter had
     # no text for — graceful stop signals the server PID only, the server half (stop event at the
     # signal, bounded uvicorn drain) is self-sufficient against an old group-SIGTERM launcher.
@@ -208,6 +220,11 @@ CHAPTER_BYTE_BUDGETS: dict[str, int] = {
     # conversation key, placeholder re-run and its lost-attempt facts, presence-local liveness,
     # previous-turn pointer and its replay repair, split in-flight budgets, silent orphaned work,
     # presence room label); the base sat 2 bytes under.
+    # 12500 -> 14300 (TZ3): the source-bound pre-effect Presence start and event
+    # identity, auth saturation, and retry/receipt boundary add contracts the old
+    # chapter could not describe. Existing transport and companion rules remain.
+    # 14300 -> 14800 (TZ3): source-bound first-round no-effect proof and successor
+    # identity must be explained beside existing Host retry/receipt custody; no new store.
     # 12500 -> 13400 (TZ2 own work): the Presence paragraph gains two contracts it had
     # no text for — what a binding's own work is and which readers/controls reach it
     # (replacing the conversation-exact cancel sentence), and the forced-final split
@@ -219,7 +236,9 @@ CHAPTER_BYTE_BUDGETS: dict[str, int] = {
     # (replacing the live-row clause), and "host diagnostics" states its ordinary-final limit.
     # 13950 -> 14100 (TZ2 review): a deferred tool-delivery finish note is
     # carried separately from prior speech in the same previous-turn pointer.
-    "docs/architecture/12-host-service-companions-and-chat-ids.md": 14100,
+    # 14100/14800 -> 17500: TZ2 binding authority and TZ3 Host retry custody
+    # coexist in one current Host/Presence map; neither overwrites the other.
+    "docs/architecture/12-host-service-companions-and-chat-ids.md": 17500,
     # 7764 -> 8600 (#1195): the fresh selected-subject + immutable peer projection
     # execution check (`skill_peer_inventory.py`, `skill_conflicts.py`) replaces
     # whole-inventory hashing; the chapter had no description of that seam to swap out.
@@ -251,7 +270,11 @@ CHAPTER_BYTE_BUDGETS: dict[str, int] = {
     # descendant is a Presence caller (inherited binding authority, never speaker metadata).
     # 95150 -> 95200 (TZ2 repair, measured 95191): the promotion/follow-up clause names the
     # one carrier it copies instead of "the Presence metadata".
-    "docs/development/06-rules-by-change-class.md": 95200,
+    # 95200 -> 96700 (OpenAI-family cache layout incl. the Claudexor route, measured 96596): the cache-friendliness
+    # bullet states the declare-in-builder / project-in-transport rule, the per-family
+    # OpenRouter session and the two enforcing tests; the notice bullet gains the second
+    # meaning of the `[SYSTEM NOTICE]` marker. The derived-identity sentence is replaced.
+    "docs/development/06-rules-by-change-class.md": 96700,
     "docs/development/07-managed-update-rule.md": 4166,
     "docs/development/08-mutation-attribution-rule.md": 2899,
     "docs/development/09-process-custody-rule.md": 10028,
