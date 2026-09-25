@@ -665,12 +665,34 @@ def apply_memory_actions(env: Any, actions: List[Dict[str, Any]], *, project_id:
     """
     pid = str(project_id or "").strip()
     applied = 0
+    events = pathlib.Path(env.drive_root) / "logs" / "events.jsonl"
+    # The reflection row that nominated an action is what its writer saw.
+    from ouroboros.project_facts import sanitize_project_id
+
+    # Project reflections live in their own durable project log; the canonical
+    # log has only a bounded pointer and cannot witness the nominated action.
+    reflection_path = (f"projects/{sanitize_project_id(pid)}/logs/{REFLECTIONS_FILENAME}"
+                       if pid else f"logs/{REFLECTIONS_FILENAME}")
+    reflection_ref = {"read": {"tool": "read_file", "arguments": {
+        "root": "runtime_data", "path": reflection_path}}}
+
+    def skipped(action: Dict[str, Any], reason: str) -> None:
+        # A lesson the host declines is a fact, not silence (I4): name it where
+        # Health and the owner can count it, with the reflection row to reread.
+        append_jsonl(events, {"ts": utc_now_iso(), "type": "reflection_memory_action_skipped",
+                              "task_id": str(action.get("task_id") or ""), "project_id": pid,
+                              "action_type": str(action.get("type") or ""), "reason": reason,
+                              "content_chars": len(str(action.get("content") or "")),
+                              "reflection_ref": reflection_ref})
+
     for action in (actions or [])[:3]:
         atype = str(action.get("type") or "")
         content = str(action.get("content") or "").strip()
         if not content:
+            skipped(action, "empty_content")
             continue
         if pid and atype in ("scratchpad_append", "identity_update_candidate"):
+            skipped(action, "project_scoped_task")
             continue
         try:
             if atype == "scratchpad_append":
@@ -685,6 +707,7 @@ def apply_memory_actions(env: Any, actions: List[Dict[str, Any]], *, project_id:
             elif atype == "knowledge_write":
                 topic = str(action.get("topic") or "").strip()
                 if not topic:
+                    skipped(action, "missing_topic")
                     continue
                 from ouroboros.consolidator import _write_knowledge_entries
                 from ouroboros.tools.registry import ToolContext
@@ -694,7 +717,9 @@ def apply_memory_actions(env: Any, actions: List[Dict[str, Any]], *, project_id:
                 ctx = ToolContext(repo_dir=getattr(env, "repo_dir", env.drive_root), drive_root=root,
                                   budget_drive_root=canonical,
                                   project_id=pid, task_id=str(action.get("task_id") or ""))
-                outcomes = _write_knowledge_entries(root / "memory" / "knowledge", [action], context=ctx)
+                outcomes = _write_knowledge_entries(
+                    root / "memory" / "knowledge", [action], context=ctx,
+                    stamp={"writer": "reflection", "writer_input_ref": {**reflection_ref, "task_id": ctx.task_id}})
                 applied += sum(row["ok"] for row in outcomes)
                 if any(not row["ok"] for row in outcomes):
                     log.warning("Reflection knowledge update was not published: %s", outcomes)

@@ -7,18 +7,10 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from ouroboros.contracts.chat_id_policy import is_a2a_chat_id
 from ouroboros import room_consolidation
-from ouroboros.utils import (
-    append_jsonl,
-    atomic_write_json,
-    replace_atomic,
-    utc_now_iso,
-    read_text,
-)
+from ouroboros.utils import append_jsonl, atomic_write_json, replace_atomic, utc_now_iso, read_text
 
 from ouroboros.platform_layer import (
-    file_lock_exclusive as _lock_ex,
-    file_lock_exclusive_nb as _lock_nb,
-    file_unlock as _unlock,
+    file_lock_exclusive as _lock_ex, file_lock_exclusive_nb as _lock_nb, file_unlock as _unlock,
 )
 
 log = logging.getLogger(__name__)
@@ -43,6 +35,22 @@ def _consolidation_route() -> Tuple[str, bool]:
     if lane.use_local_model:
         return lane.model, True
     return resolve_credentialed_model(lane.model), False
+
+
+def _light_route() -> Any:
+    """The configured Light route as a history/meta stamp; unknown when it cannot be resolved."""
+    try:
+        return dict(zip(("model", "use_local"), _consolidation_route()))
+    except Exception:
+        return "unknown"
+
+
+def _emit_event(logs_dir: pathlib.Path, kind: str, **fields: Any) -> None:
+    """A memory-maintenance outcome is a typed fact beside the chat it concerns, never silence (I4)."""
+    try:
+        append_jsonl(logs_dir / "events.jsonl", {"ts": utc_now_iso(), "type": kind, **fields})
+    except Exception:
+        log.debug("Failed to emit %s event", kind, exc_info=True)
 
 
 def retain_memory_source(context: Any, source_id: str, data: bytes, extension: str = "md") -> Dict[str, Any]:
@@ -123,13 +131,9 @@ def should_consolidate(
 
 
 def consolidate(
-    chat_path: pathlib.Path,
-    blocks_path: pathlib.Path,
-    meta_path: pathlib.Path,
-    llm_client: Any,
-    identity_text: str = "",
-    *, knowledge_context: Any = None, force_tail: bool = False, compact_chronicle: bool = False,
-    pressure_fits: Optional[Callable[[], bool]] = None,
+    chat_path: pathlib.Path, blocks_path: pathlib.Path, meta_path: pathlib.Path, llm_client: Any,
+    identity_text: str = "", *, knowledge_context: Any = None, force_tail: bool = False,
+    compact_chronicle: bool = False, pressure_fits: Optional[Callable[[], bool]] = None,
     room_registry_root: Any = None,
 ) -> Optional[Dict[str, Any]]:
     lock_path = meta_path.parent / ".consolidation.lock"
@@ -141,18 +145,14 @@ def consolidate(
             _lock_nb(lock_fd)
         except (OSError, BlockingIOError):
             log.info("Chat block consolidation already running, skipping")
+            _emit_event(chat_path.parent, "consolidation_skipped_locked", lock_path=str(lock_path),
+                        task_id=str(getattr(knowledge_context, "task_id", "") or ""))
             return None
 
         usage = _run_block_consolidation(
-            source_path=chat_path,
-            blocks_path=blocks_path,
-            meta_path=meta_path,
-            llm_client=llm_client,
-            identity_text=identity_text,
-            knowledge_context=knowledge_context,
-            force_tail=force_tail,
-            room_registry_root=room_registry_root,
-        )
+            source_path=chat_path, blocks_path=blocks_path, meta_path=meta_path, llm_client=llm_client,
+            identity_text=identity_text, knowledge_context=knowledge_context, force_tail=force_tail,
+            room_registry_root=room_registry_root)
         if (compact_chronicle and not (usage or {}).get("_consolidation_errors")
                 and not (pressure_fits is not None and pressure_fits())):
             reduced = _compact_chronicle(blocks_path, llm_client, identity_text, knowledge_context)
@@ -281,9 +281,7 @@ def _run_block_consolidation(
     if not new_entries or (len(new_entries) < BLOCK_SIZE and not force_tail):
         return None
 
-    total_usage: Dict[str, Any] = {
-        "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "cost": 0.0,
-    }
+    total_usage: Dict[str, Any] = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "cost": 0.0}
     # A failed chunk withholds only itself (its earlier sibling chunks are
     # complete units); the stale-error clear below must know whether THIS run
     # recorded a failure it would otherwise erase.
@@ -342,16 +340,14 @@ def _run_block_consolidation(
             run_failed = True
             meta["last_consolidation_error"] = dict(
                 usage["_consolidation_errors"][-1], cursor_offset=last_offset + processed,
-                chat_log_signature=segment_sigs[0], message_count=len(chunk),
-            )
+                chat_log_signature=segment_sigs[0], message_count=len(chunk))
 
         if block is None:
             log.warning("Block summary withheld for chunk %d, will retry next cycle", i)
             break
         new_blocks.append({
             "ts": utc_now_iso(), "type": "summary", "message_count": len(chunk), **block,
-            **({"knowledge_entries": usage["_knowledge_entries"]} if usage.get("_knowledge_entries") else {}),
-        })
+            **({"knowledge_entries": usage["_knowledge_entries"]} if usage.get("_knowledge_entries") else {})})
         processed += len(chunk)
 
     # Set after the last merge of this stretch: _merge_consolidation_usage forwards
@@ -372,8 +368,7 @@ def _run_block_consolidation(
     if pending_knowledge:
         source = {"path": str(source_path), "generations": segment_sigs,
                   "start_offset": last_offset, "end_offset": last_offset + processed,
-                  "nominations": [{"range": block["range"], "entries": entries}
-                                  for block, entries in pending_knowledge]}
+                  "nominations": [{"range": block["range"], "entries": entries} for block, entries in pending_knowledge]}
         source_id = hashlib.sha256(json.dumps(source, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
         ref = {"read": {"tool": "read_file", "arguments": {
             "root": "runtime_data", "path": "memory/knowledge_history.jsonl"}},
@@ -398,30 +393,22 @@ def _run_block_consolidation(
     if len(all_blocks) > MAX_SUMMARY_BLOCKS and block is not None:
         compress_count = min(ERA_COMPRESS_COUNT, len(all_blocks) - 1)
         old_blocks = all_blocks[:compress_count]
-        remaining = all_blocks[compress_count:]
-        # Gap markers are DURABLE discontinuity facts (BIBLE P1): they keep
-        # their exact chronological positions, and an era may only compress ONE
-        # CONTIGUOUS run of ordinary summary blocks — never a span that bridges
-        # a known discontinuity.
-        run_start = next((i for i, b in enumerate(old_blocks) if not _is_gap_block(b)), None)
+        # Gap markers are DURABLE discontinuity facts (BIBLE P1) that keep their
+        # chronological positions, and an earlier era is a boundary too: an era
+        # compresses ONE CONTIGUOUS run of ordinary summary blocks, never a span
+        # bridging a discontinuity and never a summary of its own summary.
+        run_start = next((i for i, b in enumerate(old_blocks) if not _is_run_boundary(b)), None)
         era = None
         if run_start is not None:
             run_end = run_start
-            while run_end < len(old_blocks) and not _is_gap_block(old_blocks[run_end]):
+            while run_end < len(old_blocks) and not _is_run_boundary(old_blocks[run_end]):
                 run_end += 1
-            era, era_usage = _compress_blocks_to_era(
-                old_blocks[run_start:run_end], llm_client, identity_text,
-                **({"knowledge_context": knowledge_context} if knowledge_context is not None else {}),
-            )
-            total_usage = _merge_consolidation_usage(total_usage, era_usage)
-        # An era is a COMPRESSION: replace the run only when it is shorter, as
-        # _compact_chronicle already requires. Per-room sections and the
-        # length-adaptive correction pass can make an era longer than the
-        # blocks it summarizes; keeping those blocks loses nothing.
-        if era is not None and len(era.get("content", "")) < sum(len(b.get("content", "")) for b in old_blocks[run_start:run_end]):
-            all_blocks = [
-                *old_blocks[:run_start], era, *old_blocks[run_end:], *remaining,
-            ]
+            era, era_usage = _era_for_run(old_blocks[run_start:run_end], meta, source_path.parent,
+                                          llm_client, identity_text, knowledge_context)
+            if era_usage is not None:
+                total_usage = _merge_consolidation_usage(total_usage, era_usage)
+        if era is not None:
+            all_blocks = [*old_blocks[:run_start], era, *old_blocks[run_end:], *all_blocks[compress_count:]]
 
     _write_locked_json(blocks_path, all_blocks)
 
@@ -430,7 +417,9 @@ def _run_block_consolidation(
         for block, entries in pending_knowledge:
             block["knowledge_writes"] = _write_knowledge_entries(
                 pathlib.Path(knowledge_context.drive_root) / "memory" / "knowledge",
-                entries, context=knowledge_context)
+                entries, context=knowledge_context, stamp={
+                    "writer": "consolidation", "route": _light_route(),
+                    "writer_input_ref": block["knowledge_source_ref"]})
             published.extend(block["knowledge_writes"])
             if any(not outcome["ok"] for outcome in block["knowledge_writes"]):
                 append_jsonl(pathlib.Path(knowledge_context.drive_root) / "memory" / "knowledge_history.jsonl", {
@@ -949,26 +938,55 @@ def _is_gap_block(block: Any) -> bool:
     return isinstance(block, dict) and bool(block.get("gap_id") or "[MEMORY GAP]" in str(block.get("content") or ""))
 
 
+def _is_run_boundary(block: Any) -> bool:
+    """Gaps and earlier eras bound a run: an era is built from summary blocks, never from an era."""
+    return _is_gap_block(block) or (isinstance(block, dict) and block.get("type") == "era")
+
+
+def _era_for_run(run: List[Dict[str, Any]], meta: Dict[str, Any], logs_dir: pathlib.Path, llm_client: Any,
+                 identity_text: str, context: Any) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
+    """The era of one run when it is a COMPRESSION; otherwise a recorded, visible refusal.
+
+    Per-room sections and the length-adaptive correction can make an era longer than
+    its blocks; keeping the blocks loses nothing. The refusal is ``era_retry`` in meta
+    (source hash + Light route, after ``consolidation_retry``): the same source on the
+    same route is not paid for again, and every refusal, attempted or not, is an
+    ``era_not_shorter`` event. Returns ``(era or None, usage or None without a call)``."""
+    fact = {"source_sha256": hashlib.sha256(json.dumps(run, ensure_ascii=False, sort_keys=True).encode()).hexdigest(),
+            "route": _light_route(), "blocks": len(run), "source_chars": sum(len(b.get("content", "")) for b in run)}
+    retry = meta.get("era_retry") or {}
+    if retry.get("source_sha256") == fact["source_sha256"] and retry.get("route") == fact["route"]:
+        _emit_event(logs_dir, "era_not_shorter", attempted=False, **fact)
+        return None, None
+    era, usage = _compress_blocks_to_era(run, llm_client, identity_text,
+                                         **({"knowledge_context": context} if context is not None else {}))
+    if era is not None and len(era.get("content", "")) >= fact["source_chars"]:
+        meta["era_retry"] = {"source_sha256": fact["source_sha256"], "route": fact["route"]}
+        _emit_event(logs_dir, "era_not_shorter", attempted=True, era_chars=len(era["content"]), **fact)
+        return None, usage
+    if era is not None:
+        meta.pop("era_retry", None)
+    return era, usage
+
+
 def _compact_chronicle(blocks_path: pathlib.Path, llm_client: Any,
                        identity_text: str, context: Any) -> Dict[str, Any]:
-    """Reduce every contiguous historical span, preserving gaps and exact sources."""
+    """Reduce every contiguous run of summary blocks, preserving gaps, earlier eras and exact sources."""
     blocks = _load_blocks(blocks_path)
     reduced, usages, start = [], [], 0
     while start < len(blocks):
-        if _is_gap_block(blocks[start]):
+        if _is_run_boundary(blocks[start]):
             reduced.append(blocks[start])
             start += 1
             continue
         end = start + 1
-        while end < len(blocks) and not _is_gap_block(blocks[end]):
+        while end < len(blocks) and not _is_run_boundary(blocks[end]):
             end += 1
         run = blocks[start:end]
-        era, usage = _compress_blocks_to_era(run, llm_client, identity_text, context)
+        # A measured-pressure pass always attempts: its throwaway meta consults no retry record.
+        era, usage = _era_for_run(run, {}, blocks_path.parent.parent / "logs", llm_client, identity_text, context)
         usages.append(usage)
-        if era and len(era["content"]) < sum(len(b.get("content", "")) for b in run):
-            reduced.append(era)
-        else:
-            reduced.extend(run)
+        reduced.extend([era] if era is not None else run)
         if usage.get("_consolidation_errors"):
             reduced.extend(blocks[end:])
             break
@@ -1054,7 +1072,8 @@ def maintain_memory_pressure(memory: Any, llm_client: Any, context: Any, *,
         if raw.strip():
             try:
                 entries = knowledge.bind_entries(json.loads(raw).get("knowledge_entries"))
-                action["writes"] = _write_knowledge_entries(shelf, entries, context=context)
+                action["writes"] = _write_knowledge_entries(shelf, entries, context=context, stamp={
+                    "writer": "knowledge_maintenance", "route": _light_route(), "writer_input_ref": source_ref})
             except (ValueError, TypeError, AttributeError) as exc:
                 action["error"] = str(exc)
         actions.append(action)
@@ -1121,17 +1140,7 @@ def _load_blocks(path: pathlib.Path) -> List[Dict[str, Any]]:
             log.error("Corrupt blocks file %s — quarantined to %s, starting fresh", path, quarantine)
         except OSError:
             log.error("Corrupt blocks file %s — quarantine failed, starting fresh", path, exc_info=True)
-        try:
-            from ouroboros.utils import append_jsonl
-
-            append_jsonl(path.parent.parent / "logs" / "events.jsonl", {
-                "ts": utc_now_iso(),
-                "type": "memory_store_corrupt",
-                "path": str(path),
-                "quarantine": str(quarantine),
-            })
-        except Exception:
-            log.debug("Failed to emit memory_store_corrupt event", exc_info=True)
+        _emit_event(path.parent.parent / "logs", "memory_store_corrupt", path=str(path), quarantine=str(quarantine))
         return []
 
 
@@ -1300,10 +1309,7 @@ def should_consolidate_scratchpad(memory: Any) -> bool:
 
 
 def consolidate_scratchpad(
-    memory: Any,
-    knowledge_dir: pathlib.Path,
-    llm_client: Any,
-    identity_text: str = "",
+    memory: Any, knowledge_dir: pathlib.Path, llm_client: Any, identity_text: str = "",
     *, pressure: bool = False, knowledge_context: Any = None,
 ) -> Optional[Dict[str, Any]]:
     blocks = memory.load_scratchpad_blocks()
@@ -1315,12 +1321,8 @@ def consolidate_scratchpad(
 
 
 def _consolidate_scratchpad_blocks(
-    memory: Any,
-    blocks: List[Dict[str, Any]],
-    knowledge_dir: pathlib.Path,
-    llm_client: Any,
-    identity_text: str,
-    *, pressure: bool = False, knowledge_context: Any = None,
+    memory: Any, blocks: List[Dict[str, Any]], knowledge_dir: pathlib.Path, llm_client: Any,
+    identity_text: str, *, pressure: bool = False, knowledge_context: Any = None,
 ) -> Optional[Dict[str, Any]]:
     total_chars = sum(len(b.get("content", "")) for b in blocks)
     if total_chars <= SCRATCHPAD_CONSOLIDATION_THRESHOLD and not pressure:
@@ -1362,6 +1364,7 @@ Respond with JSON only (no fences), after any useful knowledge reads:
 """
 
     usage: Dict[str, Any] = {}
+    outcome, source_entry_id, writes, new_blocks = "failed", "", [], blocks
     try:
         from ouroboros.tools.registry import ToolContext
 
@@ -1373,6 +1376,7 @@ Respond with JSON only (no fences), after any useful knowledge reads:
             knowledge=knowledge)
         raw = raw.strip()
         if not raw:
+            outcome = "call_failed" if usage.get("_consolidation_errors") else "empty_response"
             return usage
         if raw.startswith("```"):
             raw = raw.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
@@ -1382,45 +1386,34 @@ Respond with JSON only (no fences), after any useful knowledge reads:
         compressed_text = result.get("compressed_block", "")
         if not compressed_text or not compressed_text.strip():
             log.warning("Scratchpad block consolidation returned empty, skipping")
+            outcome = "empty_block"
             return usage
         if pressure and len(compressed_text) >= sum(len(b.get("content", "")) for b in old_blocks):
+            outcome = "not_shorter"
             return usage  # an authored expansion is not pressure relief
 
         entries = knowledge.bind_entries(result.get("knowledge_entries"))
-
-        compressed_block = {
-            "ts": utc_now_iso(),
-            "source": "consolidation",
-            "content": compressed_text.strip(),
-        }
-
-        source_bytes = json.dumps(
-            old_blocks, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
-        ).encode("utf-8")
+        compressed_block = {"ts": utc_now_iso(), "source": "consolidation", "content": compressed_text.strip()}
+        source_bytes = json.dumps(old_blocks, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
         source_entry_id = "scratchpad-consolidation:" + hashlib.sha256(source_bytes).hexdigest()
         source_ref = memory.scratchpad_journal_source_ref(source_entry_id)
         if not append_jsonl(memory.journal_path(), {
-            "ts": utc_now_iso(),
-            "type": "blocks_consolidated",
-            "entry_id": source_entry_id,
-            "source_blocks": old_blocks,
-            "source_ref": source_ref,
-            "knowledge_entries": entries,
-        }):
+                "ts": utc_now_iso(), "type": "blocks_consolidated", "entry_id": source_entry_id,
+                "source_blocks": old_blocks, "source_ref": source_ref, "knowledge_entries": entries}):
             log.error("Scratchpad consolidation source journal write failed; preserving blocks")
+            outcome = "journal_unavailable"
             return usage
         compressed_block["metadata"] = {"source_ref": source_ref}
-        writes = _write_knowledge_entries(knowledge_dir, entries, context=context)
+        writes = _write_knowledge_entries(knowledge_dir, entries, context=context, stamp={
+            "writer": "scratchpad_consolidation", "route": _light_route(), "writer_input_ref": source_ref})
         if writes:
             compressed_block["metadata"]["knowledge_writes"] = writes
             if any(not row["ok"] for row in writes):
                 compressed_block["content"] += (
                     "\n\nSome nominated knowledge updates were not published; their complete "
                     "proposals and original episode remain in the source journal referenced by this block.")
-                append_jsonl(memory.journal_path(), {
-                    "ts": utc_now_iso(), "type": "knowledge_writes_incomplete",
-                    "source_ref": source_ref, "knowledge_writes": writes,
-                })
+                append_jsonl(memory.journal_path(), {"ts": utc_now_iso(), "type": "knowledge_writes_incomplete",
+                                                     "source_ref": source_ref, "knowledge_writes": writes})
 
         # Merge-aware replace UNDER the write lock: blocks appended DURING the
         # slow LLM call live only on disk — building the new list from the
@@ -1432,6 +1425,7 @@ Respond with JSON only (no fences), after any useful knowledge reads:
             return [compressed_block] + live_blocks[len(old_blocks):]
 
         new_blocks = memory.mutate_scratchpad_blocks(_merge_survivors)
+        outcome = "replaced" if new_blocks[:1] == [compressed_block] else "source_changed"
 
         log.info("Scratchpad blocks consolidated: %d blocks (%d chars) -> %d blocks (%d chars)",
                  len(blocks), total_chars,
@@ -1442,14 +1436,29 @@ Respond with JSON only (no fences), after any useful knowledge reads:
         from ouroboros.llm_claudexor import propagate_model_error
         propagate_model_error(e)
         log.error("Scratchpad block consolidation failed: %s", e, exc_info=True)
-        return {**usage, "_consolidation_errors": [*usage.get("_consolidation_errors", []), {
+        usage = {**usage, "_consolidation_errors": [*usage.get("_consolidation_errors", []), {
             "kind": "scratchpad_consolidation_failed", "message": f"{type(e).__name__}: {e}"}]}
+        return usage
+    finally:
+        # Every exit above names its outcome; the chat_block_consolidation row is the model.
+        errors = usage.get("_consolidation_errors") or []
+        _emit_event(pathlib.Path(memory.drive_root) / "logs", "scratchpad_consolidation", outcome=outcome,
+                    pressure=pressure, blocks_before=len(blocks), chars_before=total_chars,
+                    compressed_blocks=len(old_blocks), blocks_after=len(new_blocks),
+                    chars_after=sum(len(b.get("content", "")) for b in new_blocks), source_entry_id=source_entry_id,
+                    knowledge_writes={"ok": sum(w["ok"] for w in writes), "failed": sum(not w["ok"] for w in writes)},
+                    last_error_kind=(errors[-1] or {}).get("kind") if errors else None,
+                    accounted_upper_bound_usd=round(float(usage["cost"]), 6) if usage.get("cost") is not None else None)
 
 
 def _write_knowledge_entries(
     knowledge_dir: pathlib.Path, entries: List[Dict[str, Any]], *, context: Any = None,
+    stamp: Optional[Dict[str, Any]] = None,
 ) -> List[Dict[str, Any]]:
-    """Publish only source-aware nominations through the common note writer."""
+    """Publish only source-aware nominations through the common note writer.
+
+    ``stamp`` is the caller's ``writer``/``route``/``writer_input_ref`` history
+    stamp (see ``write_knowledge_note``); an unnamed caller leaves ``unknown``."""
     from ouroboros.knowledge import KnowledgeAddress, sanitize_topic, write_knowledge_note
     from ouroboros.tools.knowledge import _address, _record_backlog_history
 
@@ -1476,7 +1485,7 @@ def _write_knowledge_entries(
                                  "reason": "backlog_merge" if merged >= 0 else "unparseable_backlog"})
                 continue
             result = write_knowledge_note(address, content, expected_revision=entry.get("expected_revision"),
-                                          task_id=str(entry.get("task_id") or ""))
+                                          task_id=str(entry.get("task_id") or ""), **(stamp or {}))
             outcomes.append({"topic": topic, "scope": address.scope, "ok": result.ok,
                              "reason": result.reason,
                              "source_ref": result.current.source_ref() if result.current else None})

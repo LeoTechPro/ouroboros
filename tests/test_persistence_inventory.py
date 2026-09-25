@@ -524,7 +524,6 @@ def scan_data_paths(root: pathlib.Path = REPO) -> frozenset[str]:
         paths.update({
             "projects/*/knowledge/*.md",
             "projects/*/knowledge_history.jsonl",
-            "projects/*/knowledge_journal.jsonl",
         })
     return frozenset(paths)
 
@@ -574,7 +573,10 @@ def scan_data_paths(root: pathlib.Path = REPO) -> frozenset[str]:
 # 295 -> 294: TZ-3 removed the destructive memory journal rewrite and its
 # ``.compact.tmp`` sibling path; PERSISTENCE.md keeps the journals, now
 # read-only observed and never age-digested.
-EXPECTED_SCAN_PATHS = 294
+# 294 -> 293: TZ-3 PR-1 removed the ``knowledge_journal.jsonl`` size-telemetry
+# writer (its only reader was this inventory); ``knowledge_history.jsonl`` keeps
+# the complete captures, now host-stamped.
+EXPECTED_SCAN_PATHS = 293
 
 # Scanned paths that must always be present — guards the scanner itself
 # against a silent regression that would shrink coverage while keeping counts

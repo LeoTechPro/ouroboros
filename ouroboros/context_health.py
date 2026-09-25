@@ -273,6 +273,15 @@ def _memory_health_lines(env: Any) -> List[str]:
                 f"WARNING: LAST DIALOGUE CONSOLIDATION FAILED — kind={error.get('kind') or 'unknown'} "
                 f"at cursor {error.get('cursor_offset')}"
             )
+        retry = meta.get("era_retry")
+        if isinstance(retry, dict):
+            route = retry.get("route")
+            lines.append(
+                f"WARNING: DIALOGUE ERA COMPRESSION WITHHELD — the era for source run "
+                f"{str(retry.get('source_sha256') or '')[:12]} on route "
+                f"{route.get('model') if isinstance(route, dict) else route} was not shorter than its blocks; "
+                "blocks retained, no paid repeat until that run or the route changes"
+            )
     return lines
 
 

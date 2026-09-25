@@ -23,6 +23,7 @@ from ouroboros.platform_layer import file_lock_exclusive, file_unlock
 from ouroboros.utils import append_jsonl, utc_now_iso, write_bytes_atomic
 
 INDEX_FILE = "index-full.md"
+UNKNOWN_STAMP = "unknown"  # a history stamp the writer could not name; legacy rows read the same way
 OVERVIEW_TOPIC = "overview"
 _INDEX_HEADER = "# Knowledge Base Index\n<!-- ouroboros:knowledge-index:1 -->\n\n"
 _LEGACY_INDEX_MARKER = "\n<!-- ouroboros:legacy-knowledge-index -->\n"
@@ -328,8 +329,17 @@ class KnowledgeWriteResult:
 def write_knowledge_note(
     address: KnowledgeAddress, content: str, mode: str = "overwrite",
     expected_revision: str | None = None, task_id: str = "", old_str: str | None = None,
+    *, writer: str = "", route: Any = None, writer_input_ref: Any = None,
 ) -> KnowledgeWriteResult:
-    """Publish a note against the actual current source, with no inference lock."""
+    """Publish a note against the actual current source, with no inference lock.
+
+    ``writer`` names the seam that authored ``content`` (turn, consolidation,
+    scratchpad_consolidation, reflection, knowledge_maintenance), ``route`` the
+    model route it ran on and ``writer_input_ref`` what it saw. They are host
+    facts stamped on the history row, never on the note body; a caller that
+    cannot name one leaves the honest ``unknown``, which is also how rows written
+    before the stamp existed read.
+    """
     if mode not in {"overwrite", "append", "edit"} or not isinstance(content, str):
         raise ValueError("content must be Markdown text; mode must be overwrite, append or edit")
     if mode != "edit" and old_str is not None:
@@ -380,6 +390,9 @@ def write_knowledge_note(
         # failed publication returns its actual current source, never success.
         history = {"ts": utc_now_iso(), "task_id": task_id, "topic": address.topic, "mode": mode,
                    "address": address.as_dict(), "publication": "source_capture",
+                   "writer": writer or UNKNOWN_STAMP, "route": route or UNKNOWN_STAMP,
+                   "writer_input_ref": writer_input_ref or UNKNOWN_STAMP,
+                   "old_chars": len(old_text), "new_chars": len(updated.text),
                    "old_sha256": hashlib.sha256(current.raw).hexdigest() if current and current.raw else "",
                    "new_sha256": updated.revision if raw else "", "old_content": old_text,
                    "new_content": updated.text, "source_ref": updated.source_ref(), "delta": delta}
@@ -397,13 +410,4 @@ def write_knowledge_note(
                 observed = None
             return KnowledgeWriteResult(False, "publication_incomplete", observed, revision,
                                         delta if observed is not None and observed.raw == raw else None)
-        try:
-            append_jsonl(address.shelf.parent / "knowledge_journal.jsonl", {
-                "ts": utc_now_iso(), "task_id": task_id, "topic": address.topic, "mode": mode,
-                "address": address.as_dict(), "revision": updated.revision,
-                "file_kb": len(raw) / 1024,
-                "total_knowledge_kb": round(sum(p.stat().st_size for p in address.shelf.rglob("*.md")) / 1024, 2),
-            }, ensure_record_boundary=True)
-        except OSError:
-            pass  # Size telemetry is not source/history publication authority.
         return KnowledgeWriteResult(True, "saved", updated, revision, delta)
