@@ -206,6 +206,7 @@ def write_owner_message(
     client_surface: Optional[Dict[str, Any]] = None,
     attachment_manifest: Optional[List[Dict[str, Any]]] = None,
     client_message_id: str = "",
+    late_answer: Optional[Dict[str, Any]] = None,
 ) -> bool:
     """Write an owner message or typed control entry to a task's mailbox.
 
@@ -213,6 +214,11 @@ def write_owner_message(
     (additively, like ``client_surface``) only when the writer knows it
     STRUCTURALLY — never parsed back out of ``msg_id``, whose shape is a
     transport key each producer composes for its own dedupe.
+
+    ``late_answer`` is the typed ``{task_id, quiz_id}`` provenance of an owner
+    message that answers a finished task's quiz card (stored additively when
+    valid): the drain rebuilds the card's frame for the model from it, while
+    ``text`` stays the owner's own words.
     """
     path = _mailbox_path(drive_root, task_id)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -224,6 +230,11 @@ def write_owner_message(
     }
     if str(client_message_id or ""):
         entry["client_message_id"] = str(client_message_id)
+    from ouroboros.owner_quiz import late_answer_ref
+
+    late_ref = late_answer_ref(late_answer)
+    if late_ref is not None:
+        entry["late_answer"] = late_ref
     if isinstance(client_surface, dict) and client_surface:
         # Owner Surface Fact (additive, like ``ts``): which client surface sent
         # this follow-up, so the loop can note a mid-task device change.
@@ -252,11 +263,14 @@ def write_task_message(
     msg_id: Optional[str] = None,
     review_feedback: Optional[Dict[str, Any]] = None,
     relation: str = "",
+    sender_origin: Optional[Dict[str, Any]] = None,
 ) -> bool:
     """Write an addressed task-tree message without forging owner provenance.
 
     ``relation`` is the peer_task sender's typed place relative to the
     recipient (``sibling`` / ``parent``); stored only when non-empty.
+    ``sender_origin`` is the sending run's host-recorded origin (a Presence
+    room/event), never the author of the words it quotes.
     """
 
     if provenance not in TASK_MESSAGE_PROVENANCES:
@@ -275,6 +289,8 @@ def write_task_message(
         entry["relayed_from_task_id"] = str(relayed_from_task_id)
     if str(relation or ""):
         entry["relation"] = str(relation)
+    if sender_origin:
+        entry["sender_origin"] = {str(key): str(value) for key, value in dict(sender_origin).items()}
     if provenance == "system" and isinstance(review_feedback, dict):
         entry["review_feedback"] = dict(review_feedback)
     try:
@@ -376,7 +392,10 @@ def deliver_task_message(
     elif provenance == PROVENANCE_INDEPENDENT_TASK:
         # A peer root's own words: never the ancestor fallback, which would
         # place a stranger above the recipient in its tree.
-        prefix = f"[Message from independent task {source}]"
+        origin = entry.get("sender_origin") if isinstance(entry.get("sender_origin"), dict) else {}
+        prefix = f"[Message from independent task {source}" + (
+            "; that task's run started from " + json.dumps(origin, ensure_ascii=False, sort_keys=True)
+            + ", which does not make it the author of any words it quotes]" if origin else "]")
     elif provenance == PROVENANCE_PEER_TASK:
         # A contribution from inside the tree without authority over the
         # recipient: the stamped relation names the sender's place, so a
@@ -672,6 +691,10 @@ def drain_owner_entries(
                 # out here is a written fact nobody can read.
                 if str(entry.get("client_message_id") or ""):
                     drained["client_message_id"] = str(entry["client_message_id"])
+                # Same for a late quiz answer's typed provenance: the drain
+                # rebuilds the card frame for the model from it.
+                if isinstance(entry.get("late_answer"), dict):
+                    drained["late_answer"] = dict(entry["late_answer"])
                 if isinstance(entry.get("attachment_manifest"), list):
                     drained["attachment_manifest"] = [
                         dict(item) for item in entry["attachment_manifest"]
@@ -691,6 +714,8 @@ def drain_owner_entries(
                     # left out of the projection it would never be delivered.
                     if str(entry.get("relation") or ""):
                         drained["relation"] = str(entry["relation"])
+                    if isinstance(entry.get("sender_origin"), dict) and entry.get("sender_origin"):
+                        drained["sender_origin"] = dict(entry["sender_origin"])  # rendered beside the words
                 entries.append(drained)
         if _read_status is not None:
             _read_status["complete"] = complete

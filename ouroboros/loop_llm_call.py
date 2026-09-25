@@ -493,6 +493,7 @@ _NON_RETRYABLE_PROVIDER_MARKERS = {
         "insufficient credits",
         "insufficient_credit",
         "insufficient_quota",
+        "1113",  # Z.ai "Insufficient balance" (HTTP 429): billing, not a rate limit
         "quota exceeded",
         "billing",
         "payment required",

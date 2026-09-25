@@ -248,6 +248,9 @@ def _route_project_chat_to_running_task(
                     else None
                 ),
                 attachment_manifest=staged_manifest if staged_manifest else None,
+                late_answer=(
+                    task_metadata.get("late_answer") if isinstance(task_metadata, dict) else None
+                ),
             ):
                 return ""
             message_written = True

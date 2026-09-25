@@ -22,7 +22,7 @@ scanned data-relative path to be covered by a row here (count-anchored both ways
   keys migrate). Governs subagent worktrees, headless/task drives, task trees,
   service logs, consumed schedule receipts,
   confirmed capability probes, delegate recovery/supervision sweeps, code_intel
-  and reconcile-failed prunes, memory-journal digesting and agent media.
+  reconcile-failed prunes, and agent media. Memory journals retain full new rows independently of this knob.
 - **Rotation** — `supervisor/state.py::rotate_jsonl_log_if_needed`: >800 KB →
   atomic rename to `archive/<prefix>_<ts>.jsonl` under the append lock.
   Applied on the supervisor tick to `chat.jsonl`, `progress.jsonl`,
@@ -98,6 +98,7 @@ scanned data-relative path to be covered by a row here (count-anchored both ways
 
 | Path | Writer | schema_version | Retention | Reset |
 |---|---|---|---|---|
+| `state/extra-ca-bundle/*.pem` | `ouroboros/net_transport.py` (`extra_ca_bundle`; tmp file + atomic replace) | none — derived (certifi followed by the owner's `OUROBOROS_EXTRA_CA_BUNDLE` PEM), each file named by the merged bytes' digest | a changed owner file writes a new file; siblings older than a day are pruned | recreated on the next client construction; nothing beyond that process's TLS trust depends on it |
 | `state/skills/<name>/` owner state (`review.json`, `review_job.json`, `grants.json`, `enabled.json`, `deps.json`, `self_authored.json`, `owner_attestation.json`, `accepted_rebuttals.json`, `health.json`, `uninstalled.json`, provenance sidecars, `auto_repair.json`, `presence_profile_state.json`) | `ouroboros/skill_loader.py`, `skill_review_runner.py`, `skill_owner_attestation.py`, `skill_review_cycles.py`, `skill_uninstall_state.py`, `extension_health.py`, `marketplace/*`, `ouroboros/gateway/marketplace.py`; allowlist SSOT `contracts/skill_payload_policy.py` | `deps.json`/`self_authored.json`/provenance: `schema_version: 1`; `review.json`/`enabled.json`/`grants.json`/`review_job.json`/`owner_attestation.json`/`accepted_rebuttals.json`: `_schema_version: 1` (ABI-2, stamp-on-write — readers keep legacy-0 tolerance, unstamped files never retrofitted); verdict/grant staleness stays pinned by `content_hash` | no age GC; hub uninstalls write an `uninstalled.json` tombstone and the startup sweep clears the dead state BY that mark — `grants.json` survives as owner authority, a reinstall self-heals the tombstone; the gateway's local delete removes the whole state dir | absent state = disabled + pending review + grants revoked (fail-closed); `owner_attestation` absence invalidates its verdict |
 | `state/skills/<name>/review_history.jsonl` + `review_dispatch/` (legacy `review_dispatch.json`) | `ouroboros/skill_review_history.py` | rows carry `usage_attribution_schema: physical_attempt_v1`; no version key — accepted (derived-counter SSOT, P7) | history unbounded per skill — accepted with BOUNDED reads: every reader windows the 4 MB tail (`find_history_job_bounded` idiom); lifecycle terminal rows persist their ordinals so counters stay exact inside the window (a group aged past it restarts low — under-counts, never over-blocks); per-skill archive rotation declined (no per-skill archive plane; disclosed) | review-cycle ceiling resets to zero; paid dispatches become free again |
 | `state/delegate_project_retirements/<sha256[:24]>.lock` | `ouroboros/delegate_custody_usage.py` (`project_retirement_lock`: exclusive file lock around one project's settlement/retirement decision; stale after 120 s, owner-aware) | none — not needed (lock file, no payload) | one file per project ever settled; reclaimed as stale by the next holder | delete freely; a live holder re-creates its lock |
@@ -143,10 +144,10 @@ scanned data-relative path to be covered by a row here (count-anchored both ways
 | `memory/scratchpad.md` + `scratchpad_blocks.json` | `ouroboros/memory.py` (derived, regenerated from blocks under lock) | none | bounded: 10 blocks, eviction journaled first (fail-closed) | regenerated; evicted history in journal |
 | `memory/WORLD.md` | `ouroboros/world_profiler.py` (write-once) | none | fixed | regenerates on restart — deletion IS the refresh mechanism |
 | `memory/registry.md`, `memory/deep_review.md` | `ouroboros/tools/memory_tools.py` (section RMW), `ouroboros/agent.py` (overwrite) | none | unbounded / last-wins — accepted | recreated lazily |
-| `memory/dialogue_blocks.json` + `dialogue_meta.json` | `ouroboros/consolidator.py` (locked atomic) | none | bounded by era compression (10 blocks, oldest 4 compressed) | blocks: compressed biography irreproducible; meta: full re-consolidation (cost, not loss) |
+| `memory/dialogue_blocks.json` + `dialogue_meta.json` | `ouroboros/consolidator.py`, `memory_nomination_receipts.py` (locked atomic) | `pending_knowledge_nominations` source-entry IDs; legacy `last_unpublished_nominations` preserved | blocks bounded by era compression (10 blocks, oldest 4); unresolved nomination index unbounded; no tool-level resolver yet, later success never retires old debt | blocks: compressed biography irreproducible; meta: cursor and unpublished-obligation evidence lost |
 | `memory/dialogue_summary.md` | none — legacy read-only (reader in context.py) | none | frozen | legacy artifact; nothing writes it |
 | `memory/knowledge/**` (topic .md + `index-full.md` + `patterns.md`) | `ouroboros/tools/knowledge.py`, `consolidator.py` (index rebuild), `reflection.py` (patterns CAS rewrite) | none | topic files unbounded — accepted (curated by consolidation); backlog topic merge-only fail-closed | recreated lazily; knowledge lost |
-| `memory/*_journal.jsonl`, `memory/knowledge_history.jsonl`, `memory/knowledge/patterns_history.jsonl` | `ouroboros/memory.py`, `tools/control_runtime.py`, `tools/knowledge.py`, `reflection.py` — every append through the `append_jsonl` sidecar-lock seam | scratchpad journal: `type` rows; others unversioned full-text snapshots; digested rows carry `content_digested: true` | full old+new text only inside GC retention: older identity/knowledge/patterns rows go digest-only (sha256+len) at startup (`memory_journal_compaction.py`, under the append lock, unreadable lines byte-preserved); scratchpad journal keeps its own eviction contract | undo/provenance record lost (live .md survives); eviction/rewrite paths fail closed when journal append fails; digested history is irreversible by design |
+| `memory/*_journal.jsonl`, `memory/knowledge_history.jsonl`, `memory/knowledge/patterns_history.jsonl` | `ouroboros/memory.py`, `tools/control_runtime.py`, `tools/knowledge.py`, `reflection.py` — every append through the `append_jsonl` sidecar-lock seam | scratchpad journal: `type` rows; others unversioned full-text snapshots; historical digested rows retain `content_digested: true` | complete new old+new snapshots are retained indefinitely; `memory_journal_compaction.py` is a read-only compatibility entry point, not a source rewriter; existing digest-only rows cannot be restored; the `memory_journal_observation` startup event gives byte sizes (or missing/unreadable) for the three named journals; scratchpad keeps its eviction journal | deleting the journals loses undo/provenance; eviction/rewrite paths fail closed when journal append fails; historically digested content remains irrecoverable |
 | `memory/owner_mailbox/<task>.jsonl` + `.acks.jsonl` | `ouroboros/owner_mailbox.py` (append-only; revocation appends, reader resolves) | `kind` discriminator | lifecycle-bounded: unlinked at task terminal; a startup sweep unlinks mailboxes whose task has a SETTLED durable result (no result / non-terminal keeps the mailbox fail-closed) | undelivered owner directives + restart-surviving hurry latch lost; acks lost ⇒ re-delivery |
 
 ## 7. Skills payloads, tasks, uploads, projects, services
@@ -180,13 +181,15 @@ scanned data-relative path to be covered by a row here (count-anchored both ways
 Always safe (pure caches, recreated): `state/pycache`, `state/code_intel`,
 `state/evolution_metrics_cache.json`, `playwright-browsers/`, `state/cx`,
 `state/betterleaks`, lock files, `state/server_port`.
-Safe with bounded cost: `WORLD.md` (regenerates), `dialogue_meta.json`
-(re-consolidation), `state/usage_import_watermark.json` (safe re-import),
+Safe with bounded cost: `WORLD.md` (regenerates),
+`state/usage_import_watermark.json` (safe re-import),
 `ui_preferences.json`, `auth_secret.key` (one re-login).
 Fail-closed losses (system stays correct, work/authority is forgone):
 skill state dirs, `advisory_review.json`, `capability_evidence.json`,
 `pending_restart_verify.json`.
 Dangerous (authority/history destruction): `settings.json`,
 `state/usage_attempts.jsonl`, `task_results/**`, `logs/events.jsonl`,
-`memory/**`, `archive/**`, `observability/**`, `state/subagent_worktrees.json`
+`memory/**` (including `dialogue_meta.json`: deletion erases cursor and pending
+nomination obligations; re-consolidation cannot reconstruct the old IDs),
+`archive/**`, `observability/**`, `state/subagent_worktrees.json`
 (leak), `claudexor/**`, `state/python-userbase` (real deps).
