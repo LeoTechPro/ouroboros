@@ -159,7 +159,7 @@ CHAPTER_BYTE_BUDGETS: dict[str, int] = {
     # 309800 -> 310100 (TZ2 + #1262 merge, measured 309985): the Presence task-message
     # own-binding boundary and forced declaration remain beside #1262's name-miss
     # contract; both are independent rules in the same chapter, not duplicate prose.
-    # 310100 -> 310800 (TZ-3 PR-1, measured 310721): the era run boundary with its
+    # 310100 -> 310800 (TZ-3 PR-1, measured 310774): the era run boundary with its
     # `era_retry` record, the four typed memory-maintenance events and the host stamp
     # on `source_capture` history rows are mechanisms no older text described; the
     # sentences they extend were rewritten in place, not appended to.

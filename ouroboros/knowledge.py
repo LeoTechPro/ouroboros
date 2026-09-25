@@ -52,9 +52,16 @@ def observed_route_stamp(usage: Any, *, model: str = "", use_local: Any = None) 
     stamp: Dict[str, Any] = {"provider": str(provider or UNKNOWN_STAMP), "model": str(resolved or UNKNOWN_STAMP)}
     served = usage.get("claudexor")
     if isinstance(served, dict) and isinstance(served.get("route"), dict):
-        for key in ("source", "account"):
-            if served["route"].get(key):
-                stamp[key] = served["route"][key]
+        route = served["route"]
+        if route.get("source"):
+            stamp["source"] = route["source"]
+        # The engine's served route names the account as ``credentialProfileId``
+        # (+ ``accountFingerprint``); ``account`` is the legacy/request spelling.
+        account = route.get("credentialProfileId") or route.get("account")
+        if account:
+            stamp["account"] = str(account)
+        if route.get("accountFingerprint"):
+            stamp["account_fingerprint"] = str(route["accountFingerprint"])
     return stamp
 
 

@@ -1439,13 +1439,7 @@ def call_llm_with_retry(
             for stale in ("_last_llm_error", "_last_llm_error_kind", "_last_llm_retry_same_request",
                           "_last_llm_status_code", "_last_llm_provider_code"):
                 accumulated_usage.pop(stale, None)
-            cost, display_model, provider, cost_estimated = _normalize_usage_cost(
-                usage, model=model, use_local=use_local,
-            )
-            # The route that ANSWERED this round, for the turn's history stamps
-            # (knowledge writes): provider + resolved model on every lane, the
-            # served account when Claudexor answered; ``_model_route`` above stays
-            # the Claudexor-only account/rotation fact.
+            cost, display_model, provider, cost_estimated = _normalize_usage_cost(usage, model=model, use_local=use_local)
             accumulated_usage["_observed_route"] = observed_route_stamp(usage, model=model, use_local=use_local)
             add_usage(accumulated_usage, usage)
             fold_retrieval_usage(accumulated_usage, usage)

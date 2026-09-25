@@ -173,7 +173,8 @@ def test_the_chronicle_pass_consults_and_records_the_same_era_retry(tmp_path, fi
     assert len(seen) == 1 and first["cost"] == 0.01
     meta = json.loads(meta_path.read_text(encoding="utf-8"))
     assert meta["last_consolidated_offset"] == 7  # the rest of meta survives the record
-    assert meta["era_retry"]["route"] == {"model": "test/model", "use_local": False}
+    (record,) = meta["era_retry"].values()
+    assert record["route"] == {"model": "test/model", "use_local": False}
     assert json.loads(blocks_path.read_text(encoding="utf-8")) == blocks
 
     second = c._compact_chronicle(blocks_path, _LLM(), "", None, meta_path=meta_path)
@@ -185,6 +186,39 @@ def test_the_chronicle_pass_consults_and_records_the_same_era_retry(tmp_path, fi
     # A pass without a meta path attempts and records nothing, as before.
     assert c._compact_chronicle(blocks_path, _LLM(), "", None)["cost"] == 0.01
     assert len(seen) == 2 and json.loads(meta_path.read_text(encoding="utf-8")) == meta
+
+
+def test_each_run_keeps_its_own_refusal_and_a_success_erases_only_its_own(tmp_path, fit, monkeypatch):
+    # Review N1: one refusal record for the whole chronicle paid again for run A on every
+    # pass once run B's refusal overwrote it, and run B's success erased run A's record.
+    blocks_path = tmp_path / "memory" / "dialogue_blocks.json"
+    meta_path = tmp_path / "memory" / "dialogue_meta.json"
+    blocks_path.parent.mkdir(parents=True)
+    gap = {"gap_id": "g1", "type": "gap", "content": "[MEMORY GAP]"}
+    run_a, run_b = _summary_blocks(2), [{**b, "range": "b-" + b["range"]} for b in _summary_blocks(2)]
+    blocks_path.write_text(json.dumps([*run_a, gap, *run_b]), encoding="utf-8")
+    c.atomic_write_json(meta_path, {})
+    seen = _fake_era(monkeypatch, shorter=False)
+    c._compact_chronicle(blocks_path, _LLM(), "", None, meta_path=meta_path)
+    assert seen == [run_a, run_b]
+    runs = c._era_retry_runs(json.loads(meta_path.read_text(encoding="utf-8")))
+    assert len(runs) == 2  # both refusals remembered, keyed by source
+    c._compact_chronicle(blocks_path, _LLM(), "", None, meta_path=meta_path)
+    assert seen == [run_a, run_b]  # neither run is paid for again
+
+    seen.clear()
+    shorter = _fake_era(monkeypatch, shorter=True)
+    monkeypatch.setattr(c, "_consolidation_route", lambda: ("other/model", False))  # a new route re-attempts
+    c._compact_chronicle(blocks_path, _LLM(), "", None, meta_path=meta_path)
+    assert shorter == [run_a, run_b]
+    assert "era_retry" not in json.loads(meta_path.read_text(encoding="utf-8"))  # each success cleared its own
+    assert [b["type"] for b in json.loads(blocks_path.read_text(encoding="utf-8"))] == ["era", "gap", "era"]
+
+
+def test_a_legacy_single_era_retry_record_is_read_as_one_run(tmp_path):
+    legacy = {"era_retry": {"source_sha256": "abc", "route": {"model": "m", "use_local": False}}}
+    assert c._era_retry_runs(legacy) == {"abc": {"route": {"model": "m", "use_local": False}}}
+    assert c._era_retry_runs({"era_retry": "garbage"}) == {} and c._era_retry_runs({}) == {}
 
 
 # --- a not-shorter era is recorded, visible, and not paid for twice -----------------
@@ -199,11 +233,12 @@ def test_a_not_shorter_era_records_era_retry_and_the_event(tmp_path, fit, monkey
     stored = json.loads(blocks_path.read_text(encoding="utf-8"))
     assert stored[:c.MAX_SUMMARY_BLOCKS] == old and not any(b["type"] == "era" for b in stored)
     retry = json.loads(meta_path.read_text(encoding="utf-8"))["era_retry"]
-    assert retry == {"source_sha256": retry["source_sha256"], "route": {"model": "test/model", "use_local": False},
-                     "observed_route": store.UNKNOWN_STAMP}  # the fake era usage names no physical route
+    (source_sha256, record), = retry.items()
+    assert record == {"route": {"model": "test/model", "use_local": False},
+                      "observed_route": store.UNKNOWN_STAMP}  # the fake era usage names no physical route
     events = _events(tmp_path, "era_not_shorter")
     assert len(events) == 1 and events[0]["attempted"] is True and events[0]["observed_route"] == store.UNKNOWN_STAMP
-    assert events[0]["source_sha256"] == retry["source_sha256"] and events[0]["blocks"] == c.ERA_COMPRESS_COUNT
+    assert events[0]["source_sha256"] == source_sha256 and events[0]["blocks"] == c.ERA_COMPRESS_COUNT
     assert events[0]["era_chars"] > events[0]["source_chars"]
 
 
@@ -223,8 +258,8 @@ def test_the_same_run_on_the_same_route_is_not_paid_again_until_either_changes(t
     _write_chat(chat, count=3 * c.BLOCK_SIZE, text_size=2)
     assert c._run_block_consolidation(chat, blocks_path, meta_path, _LLM(), "", force_tail=True)
     assert len(seen) == 2  # a new route earns a new attempt
-    assert json.loads(meta_path.read_text(encoding="utf-8"))["era_retry"]["route"] == {
-        "model": "other/model", "use_local": False}
+    (record,) = c._era_retry_runs(json.loads(meta_path.read_text(encoding="utf-8"))).values()
+    assert record["route"] == {"model": "other/model", "use_local": False}
 
 
 def test_a_shorter_era_replaces_the_run_and_clears_era_retry(tmp_path, fit, monkeypatch):
@@ -236,7 +271,8 @@ def test_a_shorter_era_replaces_the_run_and_clears_era_retry(tmp_path, fit, monk
     assert len(seen) == 1
     stored = json.loads(blocks_path.read_text(encoding="utf-8"))
     assert stored[0]["type"] == "era" and stored[1:c.MAX_SUMMARY_BLOCKS - c.ERA_COMPRESS_COUNT + 1] == old[c.ERA_COMPRESS_COUNT:]
-    assert "era_retry" not in json.loads(meta_path.read_text(encoding="utf-8"))
+    # Another run's (legacy-shaped) refusal survives this run's success; this run never had one.
+    assert c._era_retry_runs(json.loads(meta_path.read_text(encoding="utf-8"))) == {"stale": {"route": "unknown"}}
     assert _events(tmp_path, "era_not_shorter") == []
 
 
@@ -247,9 +283,11 @@ def test_health_names_a_withheld_era_without_a_timestamp(tmp_path):
     c.atomic_write_json(tmp_path / "memory" / "dialogue_meta.json", {"last_consolidated_offset": 100})
     assert not any("ERA COMPRESSION" in line for line in context_health._memory_health_lines(env))
     c.atomic_write_json(tmp_path / "memory" / "dialogue_meta.json", {
-        "era_retry": {"source_sha256": "abcdef0123456789", "route": {"model": "light/model", "use_local": False}}})
-    row = next(line for line in context_health._memory_health_lines(env) if "ERA COMPRESSION WITHHELD" in line)
-    assert "abcdef012345" in row and "light/model" in row and "2026-" not in row
+        "era_retry": {"abcdef0123456789": {"route": {"model": "light/model", "use_local": False}},
+                      "0123456789abcdef": {"route": "unknown"}}})
+    rows = [line for line in context_health._memory_health_lines(env) if "ERA COMPRESSION WITHHELD" in line]
+    assert len(rows) == 2 and "abcdef012345" in rows[0] and "light/model" in rows[0] and "2026-" not in rows[0]
+    assert "0123456789ab" in rows[1]
 
 
 # --- every scratchpad pass names its outcome ------------------------------------------
@@ -394,10 +432,14 @@ def test_the_route_stamp_is_what_answered_never_the_configuration():
         "provider": "openrouter", "model": "openai/gpt-x"}
     assert store.observed_route_stamp({"provider": "local"}, model="cfg/model", use_local=True) == {
         "provider": "local", "model": "cfg/model"}
-    served = {"provider": "claudexor", "resolved_model": "claude-fable",
-              "claudexor": {"route": {"source": "claude", "model": "claude-fable", "account": "acct-B"}}}
+    # The production-shaped served route names the account as credentialProfileId.
+    served = {"provider": "claudexor", "resolved_model": "claude-fable", "claudexor": {"route": {
+        "source": "claude", "model": "claude-fable", "credentialProfileId": "acct-B", "accountFingerprint": "fp-B"}}}
     assert store.observed_route_stamp(served) == {
-        "provider": "claudexor", "model": "claude-fable", "source": "claude", "account": "acct-B"}
+        "provider": "claudexor", "model": "claude-fable", "source": "claude", "account": "acct-B",
+        "account_fingerprint": "fp-B"}
+    rotated = {**served, "claudexor": {"route": {**served["claudexor"]["route"], "credentialProfileId": "acct-C"}}}
+    assert store.observed_route_stamp(rotated)["account"] == "acct-C"  # rotation is visible in the stamp
     # A merged consolidation usage forwards the LAST physical route of the unit.
     merged = c._merge_consolidation_usage({"cost": 0.01, "provider": "openrouter", "resolved_model": "a"},
                                           {"cost": 0.01, "provider": "openrouter", "resolved_model": "b"})
@@ -421,17 +463,28 @@ def test_a_direct_turn_stamps_itself_and_its_observed_route_when_the_loop_record
 
 def test_dialogue_consolidation_stamps_its_seam_route_and_source(tmp_path, fit):
     class _RoutedNominating(_Nominating):
+        # Review N2: provenance is per nomination. The correction that releases a
+        # room's entries may run on another account than the block's other calls.
+        rotation = ["acct-1", "acct-2"]
+
         def chat(self, **kwargs):
             msg, usage = super().chat(**kwargs)
-            return msg, {**usage, "provider": "openrouter", "resolved_model": "light/served"}
+            account = self.rotation[self.count % 2] if kwargs["messages"][0]["content"].startswith(
+                "Compare this draft memory") else "acct-draft"
+            return msg, {**usage, "provider": "claudexor", "resolved_model": "light/served",
+                         "claudexor": {"route": {"source": "codex", "credentialProfileId": account}}}
 
     chat, blocks, meta = _paths(tmp_path)
     _write_chat(chat, count=100, text_size=0)
     ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id="consolidate")
     c.consolidate(chat, blocks, meta, _RoutedNominating(), knowledge_context=ctx)
-    capture = next(row for row in _history(tmp_path) if row.get("publication") == "source_capture")
-    assert capture["writer"] == "consolidation"
-    assert capture["route"] == {"provider": "openrouter", "model": "light/served"}  # what answered, not config
+    captures = [row for row in _history(tmp_path) if row.get("publication") == "source_capture"]
+    assert captures and all(row["writer"] == "consolidation" for row in captures)
+    # Each nomination carries the account of the correction that released IT (rotation
+    # per part), never the configured Light route and never one block-wide aggregate.
+    assert {row["route"]["account"] for row in captures} <= {"acct-1", "acct-2"}
+    assert all(row["route"]["provider"] == "claudexor" and row["route"]["model"] == "light/served" for row in captures)
+    capture = captures[0]
     block = json.loads(blocks.read_text(encoding="utf-8"))[0]
     assert capture["writer_input_ref"] == block["knowledge_source_ref"]
     assert capture["writer_input_ref"]["entry_id"]

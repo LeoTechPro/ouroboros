@@ -969,20 +969,36 @@ def _is_run_boundary(block: Any) -> bool:
     return _is_gap_block(block) or (isinstance(block, dict) and block.get("type") == "era")
 
 
+ERA_RETRY_MAX_RUNS = 16  # refusals remembered per meta; the oldest run's record ages out first
+
+
+def _era_retry_runs(meta: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
+    """``era_retry`` as {source_sha256: {route, observed_route}}; a legacy single record reads as one entry."""
+    retry = meta.get("era_retry")
+    if not isinstance(retry, dict):
+        return {}
+    if "source_sha256" in retry:  # legacy single-record shape
+        return {str(retry["source_sha256"]): {key: value for key, value in retry.items() if key != "source_sha256"}}
+    return {str(key): dict(value) for key, value in retry.items() if isinstance(value, dict)}
+
+
 def _era_for_run(run: List[Dict[str, Any]], meta: Dict[str, Any], logs_dir: pathlib.Path, llm_client: Any,
                  identity_text: str, context: Any) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
     """The era of one run when it is a COMPRESSION; otherwise a recorded, visible refusal.
 
     Per-room sections and the length-adaptive correction can make an era longer than
     its blocks; keeping the blocks loses nothing. The refusal is ``era_retry`` in meta
-    (source hash + the route that ANSWERED, after ``consolidation_retry``): the same
-    source is not paid for again while the route a call would dispatch on now is the
-    one that refused, and every refusal, attempted or not, is an ``era_not_shorter``
-    event. Returns ``(era or None, usage or None without a call)``."""
+    (keyed by source hash, PER RUN — a chronicle holds several runs between gaps and
+    eras, and one run's refusal or success must not erase another's; each record keeps
+    the dispatch-route key and the route that ANSWERED): the same source is not paid
+    for again while the route a call would dispatch on now is the one that refused,
+    and every refusal, attempted or not, is an ``era_not_shorter`` event. Returns
+    ``(era or None, usage or None without a call)``."""
     fact = {"source_sha256": hashlib.sha256(json.dumps(run, ensure_ascii=False, sort_keys=True).encode()).hexdigest(),
             "route": _light_route(), "blocks": len(run), "source_chars": sum(len(b.get("content", "")) for b in run)}
-    retry = meta.get("era_retry") or {}
-    if retry.get("source_sha256") == fact["source_sha256"] and retry.get("route") == fact["route"]:
+    runs = _era_retry_runs(meta)
+    prior = runs.get(fact["source_sha256"])
+    if prior is not None and prior.get("route") == fact["route"]:
         _emit_event(logs_dir, "era_not_shorter", attempted=False, **fact)
         return None, None
     era, usage = _compress_blocks_to_era(run, llm_client, identity_text,
@@ -990,13 +1006,19 @@ def _era_for_run(run: List[Dict[str, Any]], meta: Dict[str, Any], logs_dir: path
     if era is not None and len(era.get("content", "")) >= fact["source_chars"]:
         # ``route`` is the dispatch key the next attempt compares against; the
         # observed route is what actually produced the not-shorter era.
-        meta["era_retry"] = {"source_sha256": fact["source_sha256"], "route": fact["route"],
-                             "observed_route": _route_stamp(usage)}
+        runs.pop(fact["source_sha256"], None)
+        runs[fact["source_sha256"]] = {"route": fact["route"], "observed_route": _route_stamp(usage)}
+        while len(runs) > ERA_RETRY_MAX_RUNS:
+            runs.pop(next(iter(runs)))
+        meta["era_retry"] = runs
         _emit_event(logs_dir, "era_not_shorter", attempted=True, era_chars=len(era["content"]),
                     observed_route=_route_stamp(usage), **fact)
         return None, usage
-    if era is not None:
-        meta.pop("era_retry", None)
+    if era is not None and runs.pop(fact["source_sha256"], None) is not None:
+        if runs:
+            meta["era_retry"] = runs
+        else:
+            meta.pop("era_retry", None)
     return era, usage
 
 
@@ -1506,7 +1528,9 @@ def _write_knowledge_entries(
     """Publish only source-aware nominations through the common note writer.
 
     ``stamp`` is the caller's ``writer``/``route``/``writer_input_ref`` history
-    stamp (see ``write_knowledge_note``); an unnamed caller leaves ``unknown``."""
+    stamp (see ``write_knowledge_note``); an unnamed caller leaves ``unknown``. An
+    entry carrying its own ``_nomination_route`` (stamped where it was nominated)
+    outranks the caller's block-level ``route``: provenance is per nomination."""
     from ouroboros.knowledge import KnowledgeAddress, sanitize_topic, write_knowledge_note
     from ouroboros.tools.knowledge import _address, _record_backlog_history
 
@@ -1532,8 +1556,11 @@ def _write_knowledge_entries(
                 outcomes.append({"topic": topic, "scope": "global", "ok": merged >= 0,
                                  "reason": "backlog_merge" if merged >= 0 else "unparseable_backlog"})
                 continue
+            entry_stamp = dict(stamp or {})
+            if entry.get("_nomination_route") is not None:
+                entry_stamp["route"] = entry["_nomination_route"]
             result = write_knowledge_note(address, content, expected_revision=entry.get("expected_revision"),
-                                          task_id=str(entry.get("task_id") or ""), **(stamp or {}))
+                                          task_id=str(entry.get("task_id") or ""), **entry_stamp)
             outcomes.append({"topic": topic, "scope": address.scope, "ok": result.ok,
                              "reason": result.reason,
                              "source_ref": result.current.source_ref() if result.current else None})
