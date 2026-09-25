@@ -191,6 +191,13 @@ def _presence_bound_args(ctx: Any, name: str, args: Any) -> tuple[dict[str, Any]
                 "⚠️ PRESENCE_CAPABILITY_BLOCKED: "
                 f"{name!r} is outside this presence task's positive capability ceiling."
             )
+        if ceiling is not None and name == "forward_to_worker":
+            # A selected forward keeps its own tree and reaches only this binding's work.
+            from ouroboros.presence_authority import presence_work_refusal
+
+            refusal = presence_work_refusal(ctx, str(bound.get("task_id") or ""), same_tree=True)
+            if refusal:
+                return {}, refusal
         return bound, ""
     except Exception as exc:
         return {}, f"⚠️ PRESENCE_ARGUMENT_BINDING_BLOCKED: {exc}"

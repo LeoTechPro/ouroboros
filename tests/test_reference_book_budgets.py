@@ -156,7 +156,10 @@ CHAPTER_BYTE_BUDGETS: dict[str, int] = {
     # 308900 -> 309800 (#1262): the one name-miss answer, every-mode discovery and the MCP
     # lookup-before-safety facts are mechanisms no older text held; the "Not found"
     # sentence they sit in was compressed rather than appended to (measured 309712).
-    "docs/architecture/06-agent-core.md": 309800,
+    # 309800 -> 310100 (TZ2 + #1262 merge, measured 309985): the Presence task-message
+    # own-binding boundary and forced declaration remain beside #1262's name-miss
+    # contract; both are independent rules in the same chapter, not duplicate prose.
+    "docs/architecture/06-agent-core.md": 310100,
     # 36991 -> 37300: the facade paragraph names the three loop constants runtime_limits.py
     # gained (events batch bound, budget-projection retry interval); no older text to displace.
     "docs/architecture/07-configuration.md": 37300,
@@ -198,7 +201,18 @@ CHAPTER_BYTE_BUDGETS: dict[str, int] = {
     # conversation key, placeholder re-run and its lost-attempt facts, presence-local liveness,
     # previous-turn pointer and its replay repair, split in-flight budgets, silent orphaned work,
     # presence room label); the base sat 2 bytes under.
-    "docs/architecture/12-host-service-companions-and-chat-ids.md": 12500,
+    # 12500 -> 13400 (TZ2 own work): the Presence paragraph gains two contracts it had
+    # no text for — what a binding's own work is and which readers/controls reach it
+    # (replacing the conversation-exact cancel sentence), and the forced-final split
+    # between the internal record and the declared reply; the base sat 10 bytes under.
+    # 13400 -> 13700 (TZ2 descendant authority): one sentence the chapter lacked — a
+    # delegated descendant's inherited binding authority, apart from the speaker metadata.
+    # 13700 -> 13950 (TZ2 repair, measured 13918): that sentence now names what the
+    # descendant's promote/follow-up roots carry and the canonical-first steer precedence
+    # (replacing the live-row clause), and "host diagnostics" states its ordinary-final limit.
+    # 13950 -> 14100 (TZ2 review): a deferred tool-delivery finish note is
+    # carried separately from prior speech in the same previous-turn pointer.
+    "docs/architecture/12-host-service-companions-and-chat-ids.md": 14100,
     # 7764 -> 8600 (#1195): the fresh selected-subject + immutable peer projection
     # execution check (`skill_peer_inventory.py`, `skill_conflicts.py`) replaces
     # whole-inventory hashing; the chapter had no description of that seam to swap out.
@@ -224,7 +238,13 @@ CHAPTER_BYTE_BUDGETS: dict[str, int] = {
     # chapter had 5 bytes left. Sized to the text: 5 bytes of margin.
     # 94520 -> 94900: the delegated-lane bullet names the worktree ops lock rule
     # (issue #1241: no tree walk or per-file git process under the lock).
-    "docs/development/06-rules-by-change-class.md": 94900,
+    # 94900 -> 95000 (TZ2 own work): the Presence bullets replace the conversation-exact
+    # cancel clause with the own-binding rule and name the forced declaration.
+    # 95000 -> 95150 (TZ2 descendant authority): the own-binding bullet names how a delegated
+    # descendant is a Presence caller (inherited binding authority, never speaker metadata).
+    # 95150 -> 95200 (TZ2 repair, measured 95191): the promotion/follow-up clause names the
+    # one carrier it copies instead of "the Presence metadata".
+    "docs/development/06-rules-by-change-class.md": 95200,
     "docs/development/07-managed-update-rule.md": 4166,
     "docs/development/08-mutation-attribution-rule.md": 2899,
     "docs/development/09-process-custody-rule.md": 10028,
