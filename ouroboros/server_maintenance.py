@@ -452,9 +452,8 @@ def _startup_retired_settings_notice(settings: dict) -> None:
 
 
 def _prune_event(event_type: str, keys: tuple, **reports: dict) -> None:
-    """One ``events.jsonl`` row for a GC/sweep step that did or failed something:
-    ``keys`` are its own evidence of material work, read across every report it
-    hands in, so a healthy no-op pass stays silent instead of rowing every boot."""
+    """Emit when a report has evidence under ``keys``. GC no-ops stay silent;
+    an observation report with measured journal sizes intentionally rows at boot."""
     from supervisor.state import append_jsonl
 
     if any(report.get(key) for report in reports.values() for key in keys):
@@ -565,11 +564,11 @@ def _startup_prune_sweeps(*, preserve_task_sources: bool = False) -> None:
     except Exception:
         log.debug("Stale cache prune failed", exc_info=True)
     try:
-        # CPL4-C16 (owner 4A): memory-journal snapshots older than GC retention
-        # become digest-only (sha256 + length); fresh entries keep full text.
+        # TZ-3 11A/B5 supersedes old age-digestion: measure journal growth
+        # without touching historical or new full-text snapshots.
         from ouroboros.memory_journal_compaction import compact_memory_journal_snapshots
 
-        _prune_event("memory_journal_compaction", ("digested", "digest_mismatch", "errors"),
+        _prune_event("memory_journal_observation", ("journal_bytes", "errors"),
                      report=compact_memory_journal_snapshots(DATA_DIR))
     except Exception:
         log.debug("Memory journal compaction failed", exc_info=True)

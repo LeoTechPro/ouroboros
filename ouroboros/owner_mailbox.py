@@ -252,11 +252,14 @@ def write_task_message(
     msg_id: Optional[str] = None,
     review_feedback: Optional[Dict[str, Any]] = None,
     relation: str = "",
+    sender_origin: Optional[Dict[str, Any]] = None,
 ) -> bool:
     """Write an addressed task-tree message without forging owner provenance.
 
     ``relation`` is the peer_task sender's typed place relative to the
     recipient (``sibling`` / ``parent``); stored only when non-empty.
+    ``sender_origin`` is the sending run's host-recorded origin (a Presence
+    room/event), never the author of the words it quotes.
     """
 
     if provenance not in TASK_MESSAGE_PROVENANCES:
@@ -275,6 +278,8 @@ def write_task_message(
         entry["relayed_from_task_id"] = str(relayed_from_task_id)
     if str(relation or ""):
         entry["relation"] = str(relation)
+    if sender_origin:
+        entry["sender_origin"] = {str(key): str(value) for key, value in dict(sender_origin).items()}
     if provenance == "system" and isinstance(review_feedback, dict):
         entry["review_feedback"] = dict(review_feedback)
     try:
@@ -376,7 +381,10 @@ def deliver_task_message(
     elif provenance == PROVENANCE_INDEPENDENT_TASK:
         # A peer root's own words: never the ancestor fallback, which would
         # place a stranger above the recipient in its tree.
-        prefix = f"[Message from independent task {source}]"
+        origin = entry.get("sender_origin") if isinstance(entry.get("sender_origin"), dict) else {}
+        prefix = f"[Message from independent task {source}" + (
+            "; that task's run started from " + json.dumps(origin, ensure_ascii=False, sort_keys=True)
+            + ", which does not make it the author of any words it quotes]" if origin else "]")
     elif provenance == PROVENANCE_PEER_TASK:
         # A contribution from inside the tree without authority over the
         # recipient: the stamped relation names the sender's place, so a
@@ -691,6 +699,8 @@ def drain_owner_entries(
                     # left out of the projection it would never be delivered.
                     if str(entry.get("relation") or ""):
                         drained["relation"] = str(entry["relation"])
+                    if isinstance(entry.get("sender_origin"), dict) and entry.get("sender_origin"):
+                        drained["sender_origin"] = dict(entry["sender_origin"])  # rendered beside the words
                 entries.append(drained)
         if _read_status is not None:
             _read_status["complete"] = complete

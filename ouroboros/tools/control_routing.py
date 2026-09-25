@@ -15,6 +15,7 @@ import uuid
 from pathlib import Path
 from typing import Any, Dict
 
+from ouroboros.dialogue_provenance import presence_root_carrier
 from ouroboros.tools.control_events import (
     _PROMOTE_CONFIRM_TIMEOUT_SEC,
     _emit_and_wait_for_routing,
@@ -438,18 +439,17 @@ def _promote_chat_to_task(
         "ts": utc_now_iso(),
     }
     metadata = getattr(ctx, "task_metadata", {})
-    presence = metadata.get("presence") if isinstance(metadata, dict) else None
-    if isinstance(presence, dict) and presence:
-        # A public conversation may promote long work, but it cannot choose a
-        # new Project/workspace/source authority. The immutable positive ceiling
-        # and exact return destination follow the promoted root by value.
+    presence_carrier = presence_root_carrier(metadata, task_contract=getattr(ctx, "task_contract", None))
+    if presence_carrier:
+        # A public conversation cannot choose a new Project/workspace/source authority; the immutable
+        # ceiling and return destination (a descendant's root: its binding only) follow it by value.
         evt.update({
             "project_id": "",
             "project_name": "",
             "workspace_root": "",
             "workspace": "",
             "source": "",
-            "presence": dict(presence),
+            **presence_carrier,
             "task_contract": dict(getattr(ctx, "task_contract", {}) or {}),
         })
         repo_root_note = ""  # Presence runs in its admitted folder, never over the repo
@@ -972,6 +972,7 @@ def _send_task_message(
     No origin-bytes substitution, attachments or owner client surface.
     The result says WRITTEN: the target reads it at its next checkpoint.
     """
+    from ouroboros.dialogue_provenance import presence_caller_binding, presence_sender_origin
     from ouroboros.project_dialogue import AGENT_RECEIPT_ID_PREFIX
 
     routing_token = uuid.uuid4().hex
@@ -987,6 +988,8 @@ def _send_task_message(
         "issuer": dict(issuer),
         "ts": utc_now_iso(),
     }
+    if (binding := presence_caller_binding(ctx)) is not None:  # admitted only to this binding's own work (owner Q2)
+        evt.update(presence_binding_id=binding, sender_origin=presence_sender_origin(ctx))
     mode, receipt = _emit_and_wait_for_routing(ctx, evt)
     if str(receipt.get("status") or "") == "delivered":
         return (
