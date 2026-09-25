@@ -78,6 +78,7 @@ from ouroboros.server_liveness import (  # noqa: F401
     _chat_turn_wedged,
     _start_supervisor_liveness_watchdog,
     _supervisor_loop_stalled,
+    drain_worker_events, flush_budget_projection,
 )
 from ouroboros.server_maintenance import (  # noqa: F401
     _LAST_CANCEL_INTENT_SWEEP,
@@ -658,11 +659,9 @@ def _run_supervisor(settings: dict) -> None:
             branch_dev=_workers_branch_dev, branch_stable=_workers_branch_stable,
         )
 
-        from supervisor.events import dispatch_event
         from supervisor.message_bus import send_with_budget
         from ouroboros.consciousness import BackgroundConsciousness
         import types
-        import queue as _queue_mod
 
         _migrate_startup_cancel_latches(DATA_DIR)
         prior_worker_pids = _startup_worker_pids(DATA_DIR)
@@ -780,7 +779,7 @@ def _run_supervisor(settings: dict) -> None:
     # of silent hours; the loop publishes a liveness tick at each tick PHASE. The
     # tick is MONOTONIC: it is only ever read as an elapsed gap, so a wall-clock
     # jump must not turn a healthy loop into a phantom stall (nor hide a real one).
-    from ouroboros.server_liveness import loop_phase_facts, observe_worker_event_lag
+    from ouroboros.server_liveness import loop_phase_facts
     _loop_liveness = [time.monotonic(), {}, time.thread_time(), None]  # slots: server_liveness.py
     _watchdog_stop = threading.Event()  # per-generation: stops the watchdog when THIS loop exits
     _start_supervisor_liveness_watchdog(_loop_liveness, _watchdog_stop)
@@ -806,19 +805,14 @@ def _run_supervisor(settings: dict) -> None:
             rotate_jsonl_log_if_needed(DATA_DIR, "task_reflections.jsonl", "task_reflections")
             ensure_workers_healthy()
 
-            event_q = get_event_q()
-            while True:
-                try:
-                    evt = event_q.get_nowait()
-                except _queue_mod.Empty:
-                    break
-                if evt.get("type") == "restart_request":
-                    _handle_restart_in_supervisor(evt, _event_ctx)
-                    continue
-                observe_worker_event_lag(_loop_liveness, evt)
-                dispatch_event(evt, _event_ctx)
+            # One BOUNDED events batch (count + time; the remainder waits for the next
+            # turn), so a producer that keeps the queue non-empty cannot hide intake.
+            backlog = drain_worker_events(
+                get_event_q(), _event_ctx, _loop_liveness, on_restart=_handle_restart_in_supervisor,
+            )
 
             if _restart_requested.is_set():
+                flush_budget_projection(_event_ctx)  # this turn's drained llm_usage still reaches state.json
                 break
 
             # WS3: intake new bridge messages EARLY — before the heavy steps
@@ -826,6 +820,8 @@ def _run_supervisor(settings: dict) -> None:
             # blocking step can never starve new-message intake (the wedge class
             # where no task_received fired for hours until a full restart).
             offset = _process_bridge_updates(bridge, offset, _event_ctx)
+            # The one budget-projection write of this turn (llm_usage events only mark it dirty).
+            flush_budget_projection(_event_ctx)
 
             _loop_liveness[1], _loop_liveness[0] = loop_phase_facts(_loop_liveness, "maintenance"), time.monotonic()
             enforce_task_timeouts()
@@ -863,7 +859,8 @@ def _run_supervisor(settings: dict) -> None:
                     log.warning("Consciousness alarm tick failed", exc_info=True)
 
             crash_count = 0
-            time.sleep(0.5)
+            if not backlog:
+                time.sleep(0.5)  # a turn that hit its events bound drains the backlog at full speed
 
         except Exception as exc:
             if _supervisor_stop.is_set() or _restart_requested.is_set() or _exit_signalled.is_set():
