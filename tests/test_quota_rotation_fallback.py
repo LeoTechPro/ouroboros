@@ -393,6 +393,136 @@ def test_ordinary_task_keeps_intermediate_fallback_quota_for_owner_wait(main_cal
     assert RESOURCE_REFUSAL_KEY not in usage
 
 
+def test_owner_selected_account_rebinds_fallback_before_physical_send(main_call, monkeypatch):
+    """An A->B switch on the refused fallback must bind B's capacity in the ledger.
+
+    Drive the real round dispatcher and fake engine transport, not a mocked
+    _call_round_model: the second operation's physical-context receipt is the
+    consumer of the reprepare that an in-memory route assertion cannot cover.
+    """
+    from copy import deepcopy
+    from ouroboros import context
+    from ouroboros.model_slots import MODEL_ACCOUNTS_KEY
+
+    ctx, gateway, waiter, events, _decide, _observations = main_call
+    monkeypatch.setenv("OUROBOROS_MODEL_FALLBACKS", MODEL + ",openai::dead-fallback")
+    monkeypatch.setenv("OUROBOROS_FALLBACK_ATTEMPTS_PER_MODEL", "1")
+    monkeypatch.setenv(MODEL_ACCOUNTS_KEY, json.dumps({"fallback": ["account-a", ""]}))
+    monkeypatch.setattr(fallback_cooldown, "is_cooling_down", lambda *_args: False)
+    gateway.results = [_pool_quota(), result(route=ROUTE_B)]
+    gateway.dispatch = ["not_started", "response_received"]
+    ctx.active_model = "openai::unavailable-primary"
+    ctx.context_fit_plan = replace(ctx.context_fit_plan, model=ctx.active_model, provider="openai")
+    original = deepcopy(ctx.messages)
+    observed = []
+    api_calls = _api_fallback(ctx, monkeypatch, answer=False)
+
+    def route(task, **_kwargs):
+        account = task.get("credential_profile_id") or "account-a"
+        observed.append((task["model"], account if task["model"] == MODEL else ""))
+        subscription = task["model"] == MODEL
+        return {"model": task["model"], "provider": "claudexor" if subscription else "openai"}, SimpleNamespace(
+            route_fp=f"capacity-{account}" if subscription else "api-route",
+            status="confirmed", stale=False,
+            window_tokens=160_000 if account == "account-a" else 240_000,
+            source_id="codex" if subscription else "", source="advertised",
+            credential_profile_id=account if subscription else "",
+            account_fingerprint=f"fingerprint-{account[-1]}" if subscription else "")
+
+    monkeypatch.setattr(context, "_context_fit_route", route)
+    asked = []
+
+    def owner_choice(_deferral, controller):
+        assert controller is waiter
+        asked.append(len(gateway.accepted_operations))
+        controller.overrides["fallback:0"] = {"model_account_override": "account-b"}
+        return {"resolution": "owner_selected_account"}
+
+    monkeypatch.setattr(model_wait.ResourceDeferral, "ask_owner", owner_choice)
+    ctx.accumulated_usage["_last_llm_error_kind"] = "bad_request"
+    message, active_model, _local, plan, _mode = loop._run_cross_model_fallback_chain(
+        llm=ctx.llm, ctx=ctx.tools._ctx, tools=ctx.tools, messages=ctx.messages,
+        active_model=ctx.active_model, active_use_local=False, tool_schemas=[],
+        active_effort="medium", max_retries=3, drive_logs=ctx.drive_logs,
+        task_id=ctx.task_id, round_idx=ctx.round_idx, event_queue=events,
+        accumulated_usage=ctx.accumulated_usage, task_type="task",
+        emit_progress=lambda *_a, **_kw: None, context_fit_plan=ctx.context_fit_plan,
+        active_context_mode="max")
+    assert message and active_model == MODEL and asked == [1]
+    assert api_calls == ["openai"]  # the next configured route failed before owner selection
+    assert observed[0] == (MODEL, "account-a") and observed[-1] == (MODEL, "account-b")
+    assert ("openai::dead-fallback", "") in observed
+    assert [upload[0]["account"] for upload in gateway.uploads] == [
+        {"mode": "pin", "profileId": "account-a"},
+        {"mode": "pin", "profileId": "account-b"}]
+    rows = ledger(ctx.drive_root)
+    dispatched = [row for row in rows if row["state"] == "dispatched"]
+    assert [row["physical_context"]["route_fp"] for row in dispatched] == [
+        "capacity-account-a", "capacity-account-b"]
+    assert dispatched[-1]["physical_context"]["capacity_total_tokens"] == 240_000
+    assert plan.route_fp == "capacity-account-b" and plan.window_tokens == 240_000
+    assert ctx.messages[-2:] == original[-2:]  # completed tools are not replayed
+    assert len(gateway.accepted_operations) == 2
+
+
+def test_owner_selected_account_rebinds_primary_before_physical_send(main_call, monkeypatch):
+    """The retained primary, not only a fallback, must replace A's capacity with B's."""
+    from ouroboros import context
+
+    ctx, gateway, waiter, events, _decide, _observations = main_call
+    monkeypatch.setenv("OUROBOROS_MODEL_FALLBACKS", "openai::dead-fallback")
+    monkeypatch.setenv(MODEL_ACCOUNTS_KEY, json.dumps({"main": "account-a"}))
+    monkeypatch.setattr(fallback_cooldown, "is_cooling_down", lambda *_args: False)
+    ctx.context_fit_plan = replace(ctx.context_fit_plan, window_tokens=900_000, route_fp="capacity-account-a")
+    gateway.results = [_pool_quota(), result(route=ROUTE_B)]
+    gateway.dispatch = ["not_started", "response_received"]
+    api_calls = _api_fallback(ctx, monkeypatch, answer=False)
+    observed = []
+
+    def route(task, **_kwargs):
+        if task["model"] != MODEL:
+            return {"model": task["model"], "provider": "openai"}, SimpleNamespace(
+                route_fp="api-route", status="confirmed", stale=False, window_tokens=300_000,
+                source_id="", source="advertised", credential_profile_id="", account_fingerprint="")
+        account = task.get("credential_profile_id") or "account-a"
+        observed.append(account)
+        return {"model": MODEL, "provider": "claudexor"}, SimpleNamespace(
+            route_fp=f"capacity-{account}", status="confirmed", stale=False,
+            window_tokens=900_000 if account == "account-a" else 240_000,
+            source_id="codex", source="advertised", credential_profile_id=account,
+            account_fingerprint=f"fingerprint-{account[-1]}")
+
+    monkeypatch.setattr(context, "_context_fit_route", route)
+    asked = []
+
+    def owner_choice(_deferral, controller):
+        assert controller is waiter
+        asked.append(len(gateway.accepted_operations))
+        controller.overrides["main"] = {"model_account_override": "account-b"}
+        return {"resolution": "owner_selected_account"}
+
+    monkeypatch.setattr(model_wait.ResourceDeferral, "ask_owner", owner_choice)
+    assert loop._call_round_model(ctx)[0] is None
+    message, active_model, _local, plan, _mode = loop._run_cross_model_fallback_chain(
+        llm=ctx.llm, ctx=ctx.tools._ctx, tools=ctx.tools, messages=ctx.messages,
+        active_model=ctx.active_model, active_use_local=False, tool_schemas=[],
+        active_effort="medium", max_retries=3, drive_logs=ctx.drive_logs,
+        task_id=ctx.task_id, round_idx=ctx.round_idx, event_queue=events,
+        accumulated_usage=ctx.accumulated_usage, task_type="task",
+        emit_progress=lambda *_a, **_kw: None, context_fit_plan=ctx.context_fit_plan,
+        active_context_mode="max")
+    assert message and active_model == MODEL and asked == [1] and api_calls == ["openai"]
+    assert observed[-1] == "account-b"
+    assert [upload[0]["account"] for upload in gateway.uploads] == [
+        {"mode": "pin", "profileId": "account-a"},
+        {"mode": "pin", "profileId": "account-b"}]
+    dispatched = [row for row in ledger(ctx.drive_root) if row["state"] == "dispatched"]
+    assert dispatched[-1]["physical_context"]["route_fp"] == "capacity-account-b"
+    assert dispatched[-1]["physical_context"]["capacity_total_tokens"] == 240_000
+    assert plan.route_fp == "capacity-account-b" and plan.window_tokens == 240_000
+    assert len(gateway.accepted_operations) == 2
+
+
 # -- Presence: never waits, typed temporary refusal, no speech ------------------------------------
 
 

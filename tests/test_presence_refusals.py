@@ -155,6 +155,48 @@ def test_unresolved_turn_asks_owner_once_and_never_addresses_correspondent(tmp_p
     assert load_task_result(tmp_path, task_id)["presence_recovery_owner_notified"]
 
 
+def test_concurrent_replay_sends_one_owner_recovery_notice(tmp_path, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Event
+    from supervisor import message_bus
+
+    task_id = "presence-concurrent-refusal"
+    write_task_result(tmp_path, task_id, "failed", reason_code="resource_refusal_no_resend",
+                      metadata={"source": "presence"})
+    monkeypatch.setattr(message_bus, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(message_bus, "try_get_bridge", lambda: object())
+    entered, release, second_started = Event(), Event(), Event()
+    deliveries = []
+
+    def record(*args, **kwargs):
+        deliveries.append((args, kwargs))
+        if len(deliveries) == 1:
+            entered.set()
+            assert release.wait(5)
+
+    monkeypatch.setattr(message_bus, "send_with_budget", record)
+
+    def second_reader():
+        second_started.set()
+        _notify_unresolved_turn(tmp_path, task_id)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(_notify_unresolved_turn, tmp_path, task_id)
+        assert entered.wait(5)
+        second = pool.submit(second_reader)
+        assert second_started.wait(5)
+        try:
+            # The second replay cannot race through read/check/write while the
+            # first still owes its durable stamp, even though no turn is admitted.
+            assert not second.done()
+        finally:
+            release.set()
+        first.result(timeout=5)
+        second.result(timeout=5)
+    assert len(deliveries) == 1
+    assert load_task_result(tmp_path, task_id)["presence_recovery_owner_notified"]
+
+
 def test_unrecorded_owner_question_never_gets_a_notified_stamp(tmp_path, monkeypatch):
     from supervisor import message_bus
 

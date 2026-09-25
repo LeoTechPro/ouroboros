@@ -551,12 +551,23 @@ def _cached_result(drive_root: Path, task_id: str, identity: str = "") -> Presen
 
 
 def _notify_unresolved_turn(drive_root: Path, task_id: str) -> None:
-    """Tell the owner once without speaking to the correspondent or granting a retry.
+    """Serialize one owner's recovery notice across concurrent Host replay readers.
 
-    The running result is the existing recovery record. A chat write precedes the
-    best-effort notified stamp: a crash in between can repeat the question, never
-    silently mark an undelivered question as delivered. This is not a new work queue.
+    Reuse the per-conversation gate's process and file locks, keyed by the physical
+    task id, without taking an execution slot. A crash after the required chat
+    write but before the stamp may still repeat a question; it cannot mark an
+    undelivered question as delivered. No new notification authority is stored.
     """
+    try:
+        gate = _configured_gate(drive_root)
+        key, local_lock = gate._conversation(f"owner-notice:{task_id}")
+        with local_lock, gate._file_lock(gate._conversation_file(key)):
+            _write_unresolved_notice(drive_root, task_id)
+    except Exception:
+        log.warning("Presence recovery question lock failed for %s", task_id, exc_info=True)
+
+
+def _write_unresolved_notice(drive_root: Path, task_id: str) -> None:
     stored = load_task_result(drive_root, task_id) or {}
     if stored.get("presence_recovery_owner_notified"):
         return
