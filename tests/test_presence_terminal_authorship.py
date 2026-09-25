@@ -10,7 +10,7 @@ from starlette.testclient import TestClient
 from ouroboros import agent as agent_module, agent_task_pipeline as pipeline, loop
 from ouroboros.gateway.host_service import create_host_service_app
 from ouroboros.presence_authority import presence_ceiling_payload
-from ouroboros.presence_runner import _cached_result, build_presence_result_event
+from ouroboros.presence_runner import PresenceTurnError, _cached_result, build_presence_result_event
 from ouroboros.task_results import load_task_result, write_task_result
 from ouroboros.task_finalization import provider_terminal_body
 from ouroboros.tools.registry import ToolRegistry
@@ -115,6 +115,24 @@ def test_answerless_failed_parent_keeps_only_admitted_child_custody(tmp_path, or
     assert result.work_ref == ("managed-work" if admission == "scheduled" else "")
     assert result.text == "" and stored["result"] == raw
     assert stored["status"] == "failed"
+
+
+@pytest.mark.parametrize("origin", ["host_notice", "host_salvage", "model_final"])
+@pytest.mark.parametrize("admission", ["scheduled", "rejected"])
+def test_unresolved_attempt_is_refused_whatever_authored_its_terminal(tmp_path, origin, admission):
+    """Under the unknown-outcome fence authorship decides nothing: the rail's notice, its salvage
+    and a round-one draft it stamped ``model_final`` are all unanswered events, refused back to
+    the transport on the first call and on replay with only an admitted child's custody."""
+    refused, stored, raw = _failed_parent(tmp_path, admission=admission, accepted=True, usage={
+        "execution_status": "infra_failed", "reason_code": "provider_unavailable", "terminal_origin": origin,
+        "_best_effort_extracted": origin == "model_final", "_last_llm_error_kind": "provider_outcome_unknown",
+    }, refusal="presence_attempt_outcome_unknown")
+    assert refused.work_ref == ("managed-work" if admission == "scheduled" else "")
+    assert stored["status"] == "failed" and stored["terminal_origin"] == origin and stored["result"] == raw
+    assert stored["metadata"]["presence_unknown_outcome"]["error_kind"] == "provider_outcome_unknown"
+    with pytest.raises(PresenceTurnError) as replay:
+        _cached_result(tmp_path, refused.turn_ref)
+    assert replay.value.code == "presence_attempt_outcome_unknown" and replay.value.work_ref == refused.work_ref
 
 
 @pytest.mark.parametrize("origin,frozen,outcome,expected", [
