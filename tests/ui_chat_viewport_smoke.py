@@ -51,6 +51,19 @@ def _wait_state_reads_quiescent(page, timeout=30_000):
     page.wait_for_function(_STATE_READS_QUIESCENT, timeout=timeout)
 
 
+_TEST_SOCKET_OPEN = "() => window.__testSockets?.some(socket => socket.readyState === WebSocket.OPEN)"
+
+
+def _wait_socket_open_quiescent(page, timeout=30_000):
+    """A test socket is OPEN and the socket-open census has landed (both init scripts).
+
+    A frame emitted on the test socket before that census settles is concluded
+    by absence when the census applies, exactly like a task the queue lost.
+    """
+    page.wait_for_function(_TEST_SOCKET_OPEN, timeout=timeout)
+    _wait_state_reads_quiescent(page, timeout)
+
+
 _SETTLE_TWO_FRAMES = "() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))"
 _SETTLE_RESTORE_FRAMES = """() => new Promise(resolve => {
     let remaining = 14;
