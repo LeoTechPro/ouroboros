@@ -181,6 +181,9 @@ def test_admitted_external_turn_writes_global_knowledge_and_nothing_else(tmp_pat
                     ("run_command", {"cmd": ["true"]}),
                 )
             }
+            from ouroboros.task_results import write_task_result
+
+            write_task_result(data, task["id"], "completed", metadata=task["metadata"], result="Noted.")
             return [{"type": "presence_result", "outcome": "message", "text": "Noted.", "work_ref": ""}]
 
     result = run_presence_turn(

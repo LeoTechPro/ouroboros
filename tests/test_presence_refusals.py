@@ -552,3 +552,70 @@ def test_ambiguous_start_write_never_regenerates_after_error(tmp_path, monkeypat
     again = asyncio.run(_turn(app, binding, "event"))
     assert again.status_code == 409 and json.loads(again.body)["code"] == "presence_attempt_outcome_unknown"
     assert invoked == [] and ctx.presence_turns.live() == []
+
+
+def test_unknown_outcome_fallback_terminal_never_acknowledges_the_event(tmp_path, monkeypatch):
+    """A quota-refused primary whose fallback died with an unknown outcome is not a silent answer.
+
+    The forced rail words that terminal ``provider_unavailable`` (the unknown fence outranks the
+    refusal source), so the guard cannot key on the resource-refusal word alone: the durable
+    infrastructure terminal keeps the event with the transport on the first call and on replay,
+    preserves already scheduled work, and asks the owner once — never a retry certificate.
+    """
+    child_id = "scheduled-after-quota"
+    invoked, notices = [], []
+    monkeypatch.setattr("ouroboros.presence_runner._write_unresolved_notice",
+                        lambda _root, task_id: notices.append(task_id))
+
+    class Agent:
+        def handle_task(self, task):
+            invoked.append(task["id"])
+            write_task_result(tmp_path, task["id"], "failed", result="[PROVIDER_UNAVAILABLE] host text",
+                              metadata={**task["metadata"], "presence_work_ref": child_id},
+                              reason_code="provider_unavailable", terminal_origin="host_notice",
+                              outcome_axes={"execution": {"status": "infra_failed",
+                                                          "reason_code": "provider_unavailable",
+                                                          "source": "provider_outcome_unknown_no_resend"}})
+            return [{"type": "presence_result", "outcome": "silent", "text": "", "work_ref": child_id}]
+
+    app, binding, ctx = _presence_app(tmp_path, lambda **kwargs: run_presence_turn(
+        repo_dir=tmp_path, drive_root=tmp_path, agent_factory=lambda **_kw: Agent(),
+        gate=PresenceTurnGate(1), **kwargs))
+    for _ in range(2):
+        response = asyncio.run(_turn(app, binding, "event"))
+        body = json.loads(response.body)
+        assert response.status_code == 409 and body["code"] == "presence_attempt_outcome_unknown"
+        assert body["disposition"] == "retry" and not body.get("text")
+        assert body["work_ref"] == child_id
+        assert not ctx.presence_turns.live() and not any(ctx._inflight.values())
+    assert invoked == [presence_turn_task_id(binding, "event")]
+    assert notices == [presence_turn_task_id(binding, "event")] * 2
+    stored = load_task_result(tmp_path, presence_turn_task_id(binding, "event"))
+    assert "presence_retry_proof" not in (stored.get("metadata") or {})  # unknown is not not_started
+
+
+def test_lost_terminal_write_after_start_barrier_never_acknowledges_the_event(tmp_path, monkeypatch):
+    """The in-memory envelope is not authority: a RUNNING row after handle_task is an unproven effect.
+
+    The pipeline logs and swallows a failed terminal write; the Host must then refuse with the
+    scheduled work preserved from the execution's own handoff fact, and a retry must not regenerate.
+    """
+    child_id = "scheduled-before-terminal-loss"
+    invoked = []
+
+    class Agent:
+        def handle_task(self, task):
+            invoked.append(task["id"])  # the terminal write failed after the durable start
+            return [{"type": "presence_result", "outcome": "message", "text": "answer", "work_ref": child_id}]
+
+    app, binding, ctx = _presence_app(tmp_path, lambda **kwargs: run_presence_turn(
+        repo_dir=tmp_path, drive_root=tmp_path, agent_factory=lambda **_kw: Agent(),
+        gate=PresenceTurnGate(1), **kwargs))
+    first = asyncio.run(_turn(app, binding, "event"))
+    body = json.loads(first.body)
+    assert first.status_code == 409 and body["code"] == "presence_attempt_outcome_unknown"
+    assert body["disposition"] == "retry" and not body.get("text") and body["work_ref"] == child_id
+    assert load_task_result(tmp_path, presence_turn_task_id(binding, "event"))["status"] == "running"
+    again = asyncio.run(_turn(app, binding, "event"))
+    assert again.status_code == 409 and json.loads(again.body)["code"] == "presence_attempt_outcome_unknown"
+    assert invoked == [presence_turn_task_id(binding, "event")] and ctx.presence_turns.live() == []

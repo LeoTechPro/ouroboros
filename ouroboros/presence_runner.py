@@ -524,11 +524,35 @@ def _stored_turn(drive_root: Path, task_id: str, identity: str = "") -> dict[str
         raise PresenceTurnError("presence_result_unreadable", "source_event_id", turn_ref=task_id) from exc
 
 
+def _terminal_refusal(stored: Mapping[str, Any]) -> str:
+    """The typed refusal a durable Presence row demands before its event may be acknowledged.
+
+    The durable terminal cause decides, never a draft or the in-memory envelope. A confirmed
+    resource refusal keeps the event with the transport (``presence_resources_unavailable``).
+    A row without a canonical terminal (RUNNING/INTERRUPTED, a reconciled placeholder, a
+    terminal write that failed after the start barrier) and any host-authored infrastructure
+    terminal (provider death, an unknown outcome behind a quota refusal, overflow) is an
+    attempt whose external effect is unproven (``presence_attempt_outcome_unknown``): the
+    diagnostic reason word may say ``provider_unavailable``, but no model answered this
+    event, so completed/silent would let the adapter drop it. Empty: the row may answer.
+    """
+    if str(stored.get("reason_code") or "") == "resource_refusal_no_resend":
+        return "presence_resources_unavailable"
+    if str(stored.get("status") or "") not in {STATUS_COMPLETED, STATUS_FAILED} or is_reconciled_presence_placeholder(stored):
+        return "presence_attempt_outcome_unknown"
+    axes = stored.get("outcome_axes") if isinstance(stored.get("outcome_axes"), dict) else {}
+    execution = axes.get("execution") if isinstance(axes.get("execution"), dict) else {}
+    if str(execution.get("status") or stored.get("execution_status") or "") == "infra_failed":
+        return "presence_attempt_outcome_unknown"
+    return ""
+
+
 def _cached_result(drive_root: Path, task_id: str, identity: str = "") -> PresenceTurnResult | None:
     if identity:
         task_id = _retry_target(drive_root, task_id, identity)
     stored = _stored_turn(drive_root, task_id, identity)
-    if str(stored.get("reason_code") or "") == "resource_refusal_no_resend":
+    refusal = _terminal_refusal(stored)
+    if refusal == "presence_resources_unavailable":
         metadata = stored.get("metadata") if isinstance(stored.get("metadata"), dict) else {}
         if identity and isinstance(metadata.get("presence_retry_proof"), dict):
             proof = metadata["presence_retry_proof"]
@@ -545,8 +569,16 @@ def _cached_result(drive_root: Path, task_id: str, identity: str = "") -> Presen
         _notify_unresolved_turn(drive_root, task_id)
         raise PresenceTurnError("presence_resources_unavailable", "source_event_id", turn_ref=task_id,
                                 work_ref=str(metadata.get("presence_work_ref") or ""))
-    if str(stored.get("status") or "") not in {"completed", "failed"} or is_reconciled_presence_placeholder(stored):
+    if refusal and (str(stored.get("status") or "") not in {STATUS_COMPLETED, STATUS_FAILED}
+                    or is_reconciled_presence_placeholder(stored)):
         return None  # a host-lost turn is not a result; the later admission guard refuses regeneration
+    if refusal:
+        # A failed infrastructure terminal never earns a retry certificate: unknown is not
+        # not_started. Retain the event and any already scheduled work; ask the owner once.
+        metadata = stored.get("metadata") if isinstance(stored.get("metadata"), dict) else {}
+        _notify_unresolved_turn(drive_root, task_id)
+        raise PresenceTurnError(refusal, "source_event_id", turn_ref=task_id,
+                                work_ref=str(metadata.get("presence_work_ref") or ""))
     return presence_result_from_stored(stored, task_id)
 
 
@@ -1058,16 +1090,20 @@ def run_presence_turn(
         except (OSError, ValueError) as exc:
             raise PresenceTurnError("presence_start_unwritable", "source_event_id", turn_ref=task_id) from exc
         events = agent.handle_task(task)
-        # The model can have a draft reply before every allowed route refuses quota.
-        # The durable terminal cause, not that draft or the presence_result envelope,
-        # determines whether the transport may acknowledge the original event.
+        # The model can have a draft reply before every allowed route refuses quota, and the
+        # terminal write can fail after the start barrier. The durable terminal cause, not that
+        # draft or the presence_result envelope, determines whether the transport may
+        # acknowledge the original event; a row still RUNNING here is an unproven effect.
         terminal = _stored_turn(Path(drive_root), task_id, identity)
-        if str(terminal.get("reason_code") or "") == "resource_refusal_no_resend":
+        row = next((item for item in events if item.get("type") == "presence_result"), None)
+        refusal = _terminal_refusal(terminal)
+        if refusal:
             _notify_unresolved_turn(Path(drive_root), task_id)
             metadata = terminal.get("metadata") if isinstance(terminal.get("metadata"), dict) else {}
-            raise PresenceTurnError("presence_resources_unavailable", "source_event_id", turn_ref=task_id,
-                                    work_ref=str(metadata.get("presence_work_ref") or ""))
-        row = next((item for item in events if item.get("type") == "presence_result"), None)
+            # Scheduled work survives the refusal: the durable ref when the terminal landed, else the
+            # host-built handoff fact of this execution (the terminal write itself may have failed).
+            work_ref = str(metadata.get("presence_work_ref") or (row or {}).get("work_ref") or "")
+            raise PresenceTurnError(refusal, "source_event_id", turn_ref=task_id, work_ref=work_ref)
         if not isinstance(row, dict):
             raise PresenceTurnError("presence_result_missing", "presence_result")
         result = PresenceTurnResult(

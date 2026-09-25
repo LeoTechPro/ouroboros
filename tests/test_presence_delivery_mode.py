@@ -7,6 +7,7 @@ from dataclasses import replace
 import pytest
 
 from ouroboros.presence_runner import PresenceTurnGate, run_presence_turn
+from ouroboros.task_results import write_task_result
 from ouroboros.utils import atomic_write_json
 from tests.test_presence_runner import _admission, _event
 
@@ -19,6 +20,8 @@ def test_receipt_mode_defers_only_outgoing_log_until_transport_confirmation(tmp_
     class Agent:
         def handle_task(self, task):
             captured.update(task)
+            # The durable terminal is the authority the Host reads back; the envelope alone never answers.
+            write_task_result(tmp_path / "data", task["id"], "completed", metadata=task["metadata"], result="The reply")
             return [{"type": "presence_result", "outcome": outcome, "text": "The reply", "work_ref": "work-1"}]
 
     result = run_presence_turn(

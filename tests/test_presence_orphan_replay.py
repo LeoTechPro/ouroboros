@@ -147,8 +147,14 @@ def test_only_the_orphan_placeholder_of_a_presence_turn_reopens(tmp_path, monkey
     before = task_result_path(tmp_path, task_id).read_bytes()
     assert reopen_reconciled_presence_placeholder(tmp_path, task_id) is False
     assert task_result_path(tmp_path, task_id).read_bytes() == before
-    if seed is not _non_presence_orphan:
-        assert _cached_result(tmp_path, task_id) is not None  # a real terminal replays
+    if seed is _ordinary_failure:
+        assert _cached_result(tmp_path, task_id) is not None  # the model's own terminal replays
+    elif seed is _outcome_failure:
+        # A host infrastructure terminal answered nothing: it is never reopened as a placeholder, and
+        # replay keeps the event with the transport instead of acknowledging it as silent.
+        with pytest.raises(PresenceTurnError) as refused:
+            _cached_result(tmp_path, task_id)
+        assert refused.value.code == "presence_attempt_outcome_unknown"
     write_task_result(tmp_path, task_id, STATUS_COMPLETED, result="Late answer")
     assert load_task_result(tmp_path, task_id)["status"] == STATUS_FAILED  # sticky terminal unchanged
 
@@ -605,7 +611,8 @@ def test_a_refused_retry_asks_the_owner_once_and_never_the_correspondent(tmp_pat
     assert {k: v for k, v in after.items() if k not in stamp} == {k: v for k, v in before.items() if k not in stamp}
 
     class Quiet:
-        def handle_task(self, _task):
+        def handle_task(self, task):
+            write_task_result(tmp_path, task["id"], STATUS_COMPLETED, metadata=task["metadata"], result="")
             return [{"type": "presence_result", "outcome": "silent", "text": "", "work_ref": ""}]
 
     fresh = run_presence_turn(**{**kwargs, "event": replace(kwargs["event"], source_event_id="telegram:bot-1:43"),
