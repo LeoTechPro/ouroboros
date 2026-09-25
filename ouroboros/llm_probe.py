@@ -256,7 +256,11 @@ def controlled_probe_error(exc: BaseException) -> dict[str, Any]:
             connect_types += (openai.APIConnectionError,)
         except Exception:  # pragma: no cover - dependency is shipped
             pass
-        if isinstance(exc, timeout_types):
+        from ouroboros.net_transport import ExtraCaBundleError
+
+        if isinstance(exc, ExtraCaBundleError):
+            reason = str(exc)  # the owner's trust bundle, not the provider, is what failed
+        elif isinstance(exc, timeout_types):
             reason = "Timed out"
         elif isinstance(exc, connect_types):
             reason = "Could not reach provider"

@@ -217,3 +217,12 @@ def test_no_proxy_transport_trusts_the_owner_ca_only_when_configured(monkeypatch
     net_transport._merged_bundle_cache.clear()
     with httpx.Client(transport=net_transport.remote_httpx_transport(trust_env=False), timeout=10) as client:
         assert client.get(url).text == "trusted"
+
+
+def test_provider_test_names_the_trust_bundle_failure():
+    """Provider Test must show the owner's trust-bundle error, not a generic request failure."""
+    from ouroboros.llm_probe import controlled_probe_error
+
+    result = controlled_probe_error(net_transport.ExtraCaBundleError("OUROBOROS_EXTRA_CA_BUNDLE holds no loadable PEM certificate: /x.pem"))
+    assert result["ok"] is False
+    assert "OUROBOROS_EXTRA_CA_BUNDLE" in result["error"]

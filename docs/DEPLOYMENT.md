@@ -45,6 +45,8 @@ docker run --rm -p 8765:8765 \
   ouroboros-web
 ```
 
-On a desktop install the same key lives in Settings → Advanced. It covers
-Ouroboros's own HTTP clients only: `git`, `uv`, `pip`, the Claudexor engine, the
-web-search scraper and the browsers keep their own trust stores.
+On a desktop install the same key lives in Settings → Advanced. It covers the
+provider calls: model requests, model catalogs, Provider Test, pricing and
+capability probes. Everything else keeps its own trust store: `git`, `uv`,
+`pip`, the Claudexor engine and its runtime downloads, the Telegram skill, MCP
+servers, the web-search scraper and the browsers.

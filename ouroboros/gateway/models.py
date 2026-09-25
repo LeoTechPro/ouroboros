@@ -12,7 +12,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 
 from ouroboros.config import load_settings
-from ouroboros.net_transport import extra_ca_bundle, verify_kwargs
+from ouroboros.net_transport import ExtraCaBundleError, extra_ca_bundle, verify_kwargs
 from ouroboros.gateway._helpers import json_error, json_exception
 from ouroboros.observability import redact_projection
 from ouroboros.provider_models import (
@@ -527,11 +527,19 @@ async def api_model_catalog(_request: Request) -> JSONResponse:
     specs = _provider_specs(settings)
 
     timeout = httpx.Timeout(_CATALOG_HTTP_TIMEOUT_SEC)
-    async with httpx.AsyncClient(timeout=timeout, **verify_kwargs()) as client:
-        results = await asyncio.gather(*[
-            _load_provider(client, provider_id, loader)
-            for provider_id, loader in specs
-        ])
+    try:
+        verify = verify_kwargs()
+    except ExtraCaBundleError as exc:
+        # A misconfigured trust bundle is a fact for the owner to read, not a bare 500:
+        # keep the engine catalog, name the setting, skip the API providers this turn.
+        errors.append({"provider_id": "extra_ca_bundle", "error": str(exc), "stage": "trust", "duration_ms": 0})
+        results = []
+    else:
+        async with httpx.AsyncClient(timeout=timeout, **verify) as client:
+            results = await asyncio.gather(*[
+                _load_provider(client, provider_id, loader)
+                for provider_id, loader in specs
+            ])
 
     for provider_id, provider_items, error, stage, duration_ms in results:
         if error:
