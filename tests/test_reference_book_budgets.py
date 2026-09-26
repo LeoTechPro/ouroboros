@@ -167,7 +167,11 @@ CHAPTER_BYTE_BUDGETS: dict[str, int] = {
     # residuals; a mechanism the chapter lacked, so only its two stale clauses were replaced.
     # 313400 -> 314000 (PR #1300; measured 313858 on the merged tree): the transport paragraph gains
     # the trust-bundle seam every first-party client shares; no older text to displace.
-    "docs/architecture/06-agent-core.md": 314000,
+    # 314000 -> 314900 (TZ-3 PR-1, measured 314850 on the merged tree): the era run boundary with
+    # its `era_retry` record keyed to the executed Light binding, the four typed memory-maintenance
+    # events and the host stamp on `source_capture` history rows are mechanisms no older text
+    # described; the sentences they extend were rewritten in place, not appended to.
+    "docs/architecture/06-agent-core.md": 314900,
     # 36991 -> 37300: the facade paragraph names the three loop constants runtime_limits.py
     # gained (events batch bound, budget-projection retry interval); no older text to displace.
     # 37300 -> 38400 (PR #1207): the Z.ai (`zai::`) direct provider gets its own route
