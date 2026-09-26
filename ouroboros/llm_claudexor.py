@@ -20,15 +20,13 @@ import threading
 import time
 from typing import Any
 
-from ouroboros import config
-from ouroboros import context_fit
+from ouroboros import config, context_fit
 from ouroboros._usage_response import provider_cost_value
 from ouroboros.anthropic_native_custody import scrub_native_custody
 from ouroboros.claudexor_daemon import ensure_owned_gateway, owned_engine_version, read_owned_gateway
 from ouroboros.deadline_utils import llm_transport_timeout_sec
 from ouroboros.gateways.claudexor import (
-    ClaudexorUnavailable, engine_at_least, model_failure_evidence_supported, _READ_TIMEOUT_SEC,
-)
+    ClaudexorUnavailable, engine_at_least, model_failure_evidence_supported, _READ_TIMEOUT_SEC)
 from ouroboros.llm_attempt import _attempt_request, _candidate_before_dispatch
 from ouroboros.llm_substitution import (
     AccountRotation, SubstitutionBudget, substitution_fact, failed_account_preference,
@@ -39,9 +37,7 @@ from ouroboros.observability import persist_call
 from ouroboros.transport_custody import ProviderNotDispatched
 from ouroboros.usage_accounting import (
     PhysicalAttemptPreparationFailed, current_physical_attempt_context, current_usage_scope,
-    execute_physical_attempt, execute_physical_attempt_async,
-    last_physical_attempt_capture,
-)
+    execute_physical_attempt, execute_physical_attempt_async, last_physical_attempt_capture)
 from ouroboros.utils import append_jsonl, sanitize_tool_result_for_log, utc_now_iso
 
 log = logging.getLogger(__name__)
@@ -549,9 +545,7 @@ class _ModelInvocation:
     def _control_outage(self, *, recovered: bool = False) -> bool:
         """Managed calls keep the same accepted operation through local HTTP loss."""
         from ouroboros.loop_transport import (
-            TransportWaitEpisode, emit_network_wait_event,
-            managed_transport_continuation,
-        )
+            TransportWaitEpisode, emit_network_wait_event, managed_transport_continuation)
         waiter = current_model_wait()
         ctx = getattr(waiter, "tool_context", None)
         if not managed_transport_continuation(ctx):
@@ -763,8 +757,7 @@ def _accounted_request(invocation: _ModelInvocation):
     return request, before
 
 
-def _native_retry_preparation(target: dict, payload: dict, parameters: dict,
-                              error: ClaudexorModelNotDispatched):
+def _native_retry_preparation(target: dict, payload: dict, parameters: dict, error: ClaudexorModelNotDispatched):
     """Rebind the already-authorized un-sent repair before preparing its next attempt.
 
     The engine's new account receipt replaces provisional discovery. Pass the

@@ -215,6 +215,55 @@ def test_a_thread_that_cannot_start_returns_capacity_gate_and_identity(tmp_path,
     assert retried.status_code == 200 and calls == [1]
 
 
+@pytest.mark.parametrize("outcome", ["answered", "refused"])
+def test_a_turn_retires_from_the_live_set_before_its_outcome_is_published(outcome):
+    """The live set is custody the Host reads the moment a waiter sees the terminal.
+
+    Settlement runs on the turn's own thread while the waiter wakes on the loop, so an id
+    retired only after the outcome is set can outlive a response already on the wire (CI saw
+    a settled turn still live right after its 409 and after twelve 200s). Capacity returns
+    first, the id retires, and only then does the shared future publish — for a result and
+    for a refusal alike; the probe reads the live set at the exact publication call.
+    """
+    from contextlib import ExitStack
+    from ouroboros.presence_runner import PresenceTurnExecutions, PresenceTurnLease
+
+    executions, capacity, published = PresenceTurnExecutions(), [], []
+
+    async def admit():
+        return PresenceTurnLease("room", ExitStack())
+
+    def run(_lease):
+        if outcome == "refused":
+            raise PresenceTurnError("presence_start_unwritable", "source_event_id", turn_ref="turn-1")
+        return outcome
+
+    async def scenario():
+        execution, started = executions.start_or_join(
+            "turn-1", reserve=lambda: capacity.append("held") or True, release=lambda: capacity.remove("held"),
+            admit=admit, run=run)
+        assert started
+        for name in ("set_result", "set_exception"):
+            original = getattr(execution.result, name)
+
+            def publish(*args, _original=original):
+                published.append((executions.live(), list(capacity)))
+                return _original(*args)
+
+            setattr(execution.result, name, publish)
+        waiter = asyncio.wait_for(asyncio.wrap_future(execution.result), 5)
+        if outcome == "refused":
+            with pytest.raises(PresenceTurnError):
+                await waiter
+        else:
+            assert await waiter == "answered"
+        # No quiescence wait: the waiter observes the outcome, so the id is already gone.
+        assert executions.live() == [] and capacity == []
+
+    asyncio.run(scenario())
+    assert published == [([], [])]
+
+
 @pytest.mark.parametrize("failure_at", ["context", "constructor"])
 def test_thread_preparation_failure_releases_admitted_work(failure_at, monkeypatch):
     from contextlib import ExitStack
