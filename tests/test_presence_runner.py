@@ -23,6 +23,12 @@ from ouroboros.presence_runner import (
     PresenceTurnGate,
     run_presence_turn,
 )
+from ouroboros.task_results import write_task_result
+
+
+def _terminal(drive_root, task, reply):
+    """The real pipeline's durable terminal: the Host reads it back, the envelope alone never answers."""
+    write_task_result(pathlib.Path(drive_root), task["id"], "completed", metadata=task["metadata"], result=reply)
 
 
 def _admission() -> PresenceAdmission:
@@ -84,6 +90,7 @@ def test_runner_builds_bounded_fresh_task_and_logs_shared_dialogue(tmp_path):
     class Agent:
         def handle_task(self, task):
             captured.update(task)
+            _terminal(data, task, "Hi")
             return [{"type": "presence_result", "outcome": "message", "text": "Hi", "work_ref": ""}]
 
     result = run_presence_turn(
@@ -136,6 +143,7 @@ def test_presence_initial_attachment_rejection_defaults_to_partial_staging(tmp_p
     class Agent:
         def handle_task(self, task):
             seen_tasks.append(task)
+            _terminal(data, task, "ok")
             return [{"type": "presence_result", "outcome": "message", "text": "ok"}]
 
     result = run_presence_turn(
@@ -299,6 +307,7 @@ def test_presence_turn_is_live_for_liveness_readers_but_never_an_owner_target(mo
                 seen["with_main"] = observe(task["id"])
             finally:
                 registry.unregister("main-turn")
+            _terminal(tmp_path, task, "")
             return [{"type": "presence_result", "outcome": "silent", "text": "", "work_ref": ""}]
 
     try:

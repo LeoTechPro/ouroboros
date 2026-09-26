@@ -273,6 +273,19 @@ def _memory_health_lines(env: Any) -> List[str]:
                 f"WARNING: LAST DIALOGUE CONSOLIDATION FAILED — kind={error.get('kind') or 'unknown'} "
                 f"at cursor {error.get('cursor_offset')}"
             )
+        from ouroboros.consolidator import _era_retry_runs
+        runs = _era_retry_runs(meta)
+        for shown, (source_sha256, record) in enumerate(runs.items()):
+            if shown == 3:
+                lines.append(f"WARNING: DIALOGUE ERA COMPRESSION WITHHELD — {len(runs) - 3} more run(s) recorded in era_retry")
+                break
+            route = record.get("route")
+            lines.append(
+                f"WARNING: DIALOGUE ERA COMPRESSION WITHHELD — the era for source run "
+                f"{source_sha256[:12]} on route "
+                f"{route.get('model') if isinstance(route, dict) else route} was not shorter than its blocks; "
+                "blocks retained, no paid repeat until that run or the route changes"
+            )
     return lines
 
 

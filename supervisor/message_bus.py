@@ -1297,6 +1297,7 @@ def log_chat(
     message_meta: Optional[Dict[str, Any]] = None,
     drive_root=None,
     require_write: bool = False,
+    ensure_record_boundary: bool = False,
 ) -> Optional[dict]:
     root = drive_root if drive_root is not None else DATA_DIR
     if root:
@@ -1381,7 +1382,10 @@ def log_chat(
             record["quiz"] = dict(quiz)
         if size_bytes is not None:
             record["size_bytes"] = int(size_bytes)
-        written = append_jsonl(root / "logs" / "chat.jsonl", record, require_lock=require_write)
+        written = append_jsonl(
+            root / "logs" / "chat.jsonl", record,
+            require_lock=require_write, ensure_record_boundary=ensure_record_boundary,
+        )
         if require_write:
             if not written:
                 raise RuntimeError("canonical message acceptance could not be persisted")
@@ -1396,7 +1400,9 @@ def send_with_budget(chat_id: int, text: str, log_text: Optional[str] = None,
                      progress_meta: Optional[Dict[str, Any]] = None,
                      ts: Optional[str] = None,
                      role: str = "", system_type: str = "",
-                     narration: Optional[bool] = None) -> None:
+                     narration: Optional[bool] = None,
+                     require_write: bool = False,
+                     ensure_record_boundary: bool = False) -> None:
     """Send one owner-visible message through the shared host seam.
 
     ``narration`` is the note's VOICE, the same typed fact the worker stamps on
@@ -1451,6 +1457,8 @@ def send_with_budget(chat_id: int, text: str, log_text: Optional[str] = None,
             task_id=task_id,
             record_type=system_type,
             message_meta=progress_meta,
+            require_write=require_write,
+            ensure_record_boundary=ensure_record_boundary,
         )
 
     if _text.strip() in ("", "\u200b"):

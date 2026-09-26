@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import functools
 import json
 import logging
 import pathlib
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from ouroboros._outcome_tool_errors import _OK_TOOL_STATUSES
 from ouroboros.utils import utc_now_iso, append_jsonl, write_text_atomic
@@ -350,11 +351,46 @@ def _extract_trailing_json(text: str, marker: str) -> tuple[str, Optional[list]]
     return remainder, value if isinstance(value, list) else None
 
 
-def _validate_memory_actions(raw: Any, task_id: str) -> List[Dict[str, Any]]:
-    """Keep only well-formed, allowed-type memory actions (max 3)."""
+def record_memory_action_skip(events: pathlib.Path, action: Dict[str, Any], reason: str, *,
+                              project_id: str = "", input_ref: Any = None) -> None:
+    """A lesson the host declines is a fact, not silence (I4).
+
+    One writer for every rejection seam — the validator on the model's raw output
+    and ``apply_memory_actions`` on a bound action — so the event names the reason
+    and, as ``input_ref``, what the seam that dropped the lesson had retained: the
+    validator's exact task-input prompt (the rejected reflection text itself is not
+    retained), a bound action's exact task-source copy of its reflection entry, or
+    the canonical log pointer. It can warn, never raise: an audit-write failure
+    must not discard the independent later lessons of the same batch."""
+    try:
+        recorded = append_jsonl(events, {"ts": utc_now_iso(), "type": "reflection_memory_action_skipped",
+                                         "task_id": str(action.get("task_id") or ""), "project_id": project_id,
+                                         "action_type": str(action.get("type") or "")[:80], "reason": reason,
+                                         "content_chars": len(str(action.get("content") or "")),
+                                         "input_ref": input_ref})
+        if not recorded:
+            log.warning("Reflection memory skip event was not recorded: task=%s reason=%s",
+                        action.get("task_id"), reason)
+    except Exception:
+        log.warning("Reflection memory skip event could not be written: task=%s reason=%s",
+                    action.get("task_id"), reason, exc_info=True)
+
+
+def _validate_memory_actions(raw: Any, task_id: str, *,
+                             on_skip: Optional[Callable[[Dict[str, Any], str], None]] = None) -> List[Dict[str, Any]]:
+    """Keep only well-formed, allowed-type memory actions (max 3).
+
+    ``on_skip(action, reason)`` hears every dropped dict item (``unsupported_type``,
+    ``empty_content``, ``missing_topic``): this is the seam the model's output
+    actually crosses, so the skip event fires here, before any action is bound."""
     out: List[Dict[str, Any]] = []
     if not isinstance(raw, list):
         return out
+
+    def skip(item: Dict[str, Any], action_type: str, reason: str) -> None:
+        if on_skip is not None:
+            on_skip({"type": action_type, "content": str(item.get("content") or ""), "task_id": task_id}, reason)
+
     for item in raw[:10]:
         if len(out) >= 3:
             break
@@ -362,15 +398,18 @@ def _validate_memory_actions(raw: Any, task_id: str) -> List[Dict[str, Any]]:
             continue
         action_type = str(item.get("type") or "").strip()
         if action_type not in _ALLOWED_MEMORY_ACTION_TYPES:
+            skip(item, action_type, "unsupported_type")
             continue
         content = (str(item.get("content") or "") if action_type == "knowledge_write"
                    else _truncate_with_notice(item.get("content", ""), 1200)).strip()
         if not content:
+            skip(item, action_type, "empty_content")
             continue
         action: Dict[str, Any] = {"type": action_type, "content": content, "task_id": task_id}
         if action_type == "knowledge_write":
             topic = str(item.get("topic") or "").strip()
             if not topic:
+                skip(item, action_type, "missing_topic")
                 continue
             action["topic"] = topic
             if item.get("scope") is not None:
@@ -554,6 +593,8 @@ def generate_reflection(
             reasoning_effort=resolve_effort("task"))  # the owner's Task / Chat level: one SSOT, no literal
         raw_reflection_text = raw_reflection_text.strip()
         memory_operation_errors = refl_usage.get("_consolidation_errors") or []
+        from ouroboros.knowledge import observed_route_stamp
+        reflection_route = observed_route_stamp(refl_usage)
         if not raw_reflection_text and memory_operation_errors:
             raw_reflection_text = "(reflection generation failed: " + str(memory_operation_errors[-1].get("message") or "unknown") + ")"
         task_id_str = str(task.get("id", "") or "")
@@ -596,7 +637,11 @@ def generate_reflection(
                     "priority": _truncate_with_notice(raw.get("priority", "med"), 10).strip().lower() or "med",
                     "kind": _truncate_with_notice(raw.get("kind", "improvement"), 40).strip() or "improvement",
                 })
-        memory_actions = _validate_memory_actions(raw_memory_actions, task_id_str)
+        # A rejected raw action is a typed event HERE, where production drops it
+        # (apply_memory_actions never sees it); the retained task input is its source.
+        memory_actions = _validate_memory_actions(raw_memory_actions, task_id_str, on_skip=functools.partial(
+            record_memory_action_skip, pathlib.Path(knowledge_context.drive_root) / "logs" / "events.jsonl",
+            project_id=str(getattr(knowledge_context, "project_id", "") or ""), input_ref=source_ref))
         memory_actions = [bound for action in memory_actions for bound in (
             knowledge.bind_entries([action]) if action["type"] == "knowledge_write" else [action])]
 
@@ -614,6 +659,7 @@ def generate_reflection(
         reflection_text = f"(reflection generation failed: {e})"
         backlog_candidates = []
         memory_actions = []
+        reflection_route = "unknown"
 
     return {
         "ts": utc_now_iso(),
@@ -644,6 +690,10 @@ def generate_reflection(
         "reflection": reflection_text,
         "backlog_candidates": backlog_candidates,
         "memory_actions": memory_actions,
+        # The route that ANSWERED the Light call (provider/resolved model, account
+        # when served by Claudexor), never the configured route: a model-wait
+        # override rebinds the call, and the history stamp must name what wrote.
+        "route": reflection_route,
         **({"source_ref": source_ref} if source_ref else {}),
         **({"memory_operation_errors": memory_operation_errors} if memory_operation_errors else {}),
     }
@@ -665,12 +715,29 @@ def apply_memory_actions(env: Any, actions: List[Dict[str, Any]], *, project_id:
     """
     pid = str(project_id or "").strip()
     applied = 0
+    events = pathlib.Path(env.drive_root) / "logs" / "events.jsonl"
+    # Project reflections live in a protected project store. Generic read_file
+    # cannot open it, while the canonical log contains only a bounded pointer.
+    # append_reflection_routed attaches an exact task-source copy to each action.
+    fallback_ref = ({"status": "source_unavailable", "project_id": pid} if pid else
+                    {"read": {"tool": "read_file", "arguments": {
+                        "root": "runtime_data", "path": f"logs/{REFLECTIONS_FILENAME}"}}})
+
+    def retained_input(action: Dict[str, Any]) -> Dict[str, Any]:
+        ref = action.get("_reflection_source_ref")
+        return ref if isinstance(ref, dict) and ref.get("kind") == "task_source" else fallback_ref
+
+    def skipped(action: Dict[str, Any], reason: str) -> None:
+        record_memory_action_skip(events, action, reason, project_id=pid, input_ref=retained_input(action))
+
     for action in (actions or [])[:3]:
         atype = str(action.get("type") or "")
         content = str(action.get("content") or "").strip()
         if not content:
+            skipped(action, "empty_content")
             continue
         if pid and atype in ("scratchpad_append", "identity_update_candidate"):
+            skipped(action, "project_scoped_task")
             continue
         try:
             if atype == "scratchpad_append":
@@ -685,6 +752,7 @@ def apply_memory_actions(env: Any, actions: List[Dict[str, Any]], *, project_id:
             elif atype == "knowledge_write":
                 topic = str(action.get("topic") or "").strip()
                 if not topic:
+                    skipped(action, "missing_topic")
                     continue
                 from ouroboros.consolidator import _write_knowledge_entries
                 from ouroboros.tools.registry import ToolContext
@@ -694,7 +762,10 @@ def apply_memory_actions(env: Any, actions: List[Dict[str, Any]], *, project_id:
                 ctx = ToolContext(repo_dir=getattr(env, "repo_dir", env.drive_root), drive_root=root,
                                   budget_drive_root=canonical,
                                   project_id=pid, task_id=str(action.get("task_id") or ""))
-                outcomes = _write_knowledge_entries(root / "memory" / "knowledge", [action], context=ctx)
+                outcomes = _write_knowledge_entries(
+                    root / "memory" / "knowledge", [action], context=ctx,
+                    stamp={"writer": "reflection", "route": action.get("_reflection_route") or "unknown",
+                           "writer_input_ref": {**retained_input(action), "task_id": ctx.task_id}})
                 applied += sum(row["ok"] for row in outcomes)
                 if any(not row["ok"] for row in outcomes):
                     log.warning("Reflection knowledge update was not published: %s", outcomes)
@@ -778,6 +849,7 @@ def append_reflection_routed(env: Any, task: Dict[str, Any], entry: Dict[str, An
         pid = ""
     if not pid:
         append_reflection(canonical, entry)
+        _bind_reflection_action_source(canonical, entry)
         return
     from ouroboros.project_facts import project_reflections_path
 
@@ -811,6 +883,31 @@ def append_reflection_routed(env: Any, task: Dict[str, Any], entry: Dict[str, An
         })
     except Exception:
         log.warning("Failed to write canonical reflection pointer", exc_info=True)
+    _bind_reflection_action_source(canonical, entry)
+
+
+def _bind_reflection_action_source(canonical: pathlib.Path, entry: Dict[str, Any]) -> None:
+    """Give the later action writer an exact actor-readable source and the route that nominated it."""
+    actions = entry.get("memory_actions") or []
+    if not actions:
+        return
+    for action in actions:
+        if isinstance(action, dict):
+            action["_reflection_route"] = entry.get("route") or "unknown"
+    try:
+        from types import SimpleNamespace
+
+        from ouroboros.consolidator import retain_memory_source
+
+        ref = retain_memory_source(
+            SimpleNamespace(drive_root=canonical, task_id=str(entry.get("task_id") or "reflection")),
+            "reflection_memory_actions", json.dumps(entry, ensure_ascii=False).encode("utf-8"), "json")
+        for action in actions:
+            if isinstance(action, dict):
+                action["_reflection_source_ref"] = ref
+    except Exception:
+        log.warning("Reflection action source retention failed for task %s", entry.get("task_id"), exc_info=True)
+
 
 _PATTERNS_PROMPT = """\
 You maintain a Pattern Register for Ouroboros, a self-modifying AI agent.

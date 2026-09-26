@@ -210,7 +210,8 @@ def _provider_unavailable_result(
     unknown_outcome = record or str(
         ctx.accumulated_usage.get("_last_llm_error_kind") or "") == "provider_outcome_unknown"
     is_transport_wait = wait_cause == "transport_unavailable"
-    is_context_overflow = kind == "context_overflow" and not (record or is_transport_wait)
+    is_context_overflow = (kind == "context_overflow" and not (record or is_transport_wait)
+                           and not ctx.accumulated_usage.get("resource_refusal"))
     is_deadline_exhausted = kind == "deadline_exhausted" or str(ctx.accumulated_usage.get("_last_llm_error_kind") or "") == "deadline_exhausted"
     llm_trace = getattr(ctx, "llm_trace", None)
     llm_trace = llm_trace if isinstance(llm_trace, dict) else {}
@@ -267,15 +268,17 @@ def _provider_unavailable_result(
         return with_terminal_notice(text, usage, llm_trace)
     no_call, wall = provider_no_call_source(ctx.accumulated_usage, is_deadline_exhausted)
     if no_call:
+        terminal_reason = ("resource_refusal_no_resend" if no_call == "resource_refusal_no_resend"
+                           else "provider_unavailable")
         if wall:
             _finalize_forced_services(ctx, llm_trace)
             _drain_forced_owner_directives(ctx, llm_trace)
         text, usage, llm_trace = _forced_fallback_result(
-            ctx, llm_trace, fallback, reason_code="provider_unavailable",
+            ctx, llm_trace, fallback, reason_code=terminal_reason,
             source=no_call, provider_terminal=wall,
         )
         if usage.get("execution_status") is not None:
-            usage.update(execution_status=RESULT_INFRA_FAILED, reason_code="provider_unavailable")
+            usage.update(execution_status=RESULT_INFRA_FAILED, reason_code=terminal_reason)
         return with_terminal_notice(text, usage, llm_trace)
     prompt = (
         "[DEADLINE] Primary model work reached the owner deadline. Produce the best final answer now from verified work and state what remains undone."
