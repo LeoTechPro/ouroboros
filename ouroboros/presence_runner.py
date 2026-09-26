@@ -1303,8 +1303,9 @@ class PresenceTurnExecutions:
         # custody the Host reads the moment a waiter observes the terminal, and this usually runs on
         # the turn's own thread while the waiter wakes on the loop: an id published after its outcome
         # could outlive a response already on the wire. A retry that takes the lock before this joins
-        # the running turn; one that lands after retirement starts from the durable row the turn
-        # wrote before it returned.
+        # the running turn; one that lands after retirement rechecks durable authority — a turn that
+        # reached the model left its RUNNING/terminal row, so it replays or refuses; only a turn that
+        # failed before the start barrier may have no row, and it never generated anything to repeat.
         try:
             release()
         except Exception:
