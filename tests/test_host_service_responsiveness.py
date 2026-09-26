@@ -68,6 +68,27 @@ def _answer(**kwargs):
     return SimpleNamespace(outcome="message", text=f"answer {event_id}", task_id=event_id, work_ref="")
 
 
+def _resolve_preparation_once(monkeypatch, ctx, binding_id: str) -> None:
+    """Answer the app's token, ``presence`` grant and admission from one real resolution each.
+
+    The executor pins are about WHERE preparation waits, not how fast a runner reads disk. One
+    real resolution walks the skill tree, parses manifests, hashes payloads, takes the settings
+    lock and builds a tool registry (the first also imports every tool module); a loaded Windows
+    runner spent the 5 s and 10 s windows on a dozen of them while every occupancy assertion held.
+    Each read still runs as bounded executor work (``_bounded_host_read``); only its body is
+    constant-time, and it returns what the real resolution returned.
+    """
+    identity = ctx.authenticate_token_payload(TOKEN)
+    ctx.require_permission(*identity, "presence")
+    admission = host_service._admit_presence(ctx, identity[0], binding_id)
+    authenticate, require = ctx.authenticate_token_payload, ctx.require_permission
+    monkeypatch.setattr(ctx, "authenticate_token_payload",
+                        lambda raw: identity if raw == TOKEN else authenticate(raw))
+    monkeypatch.setattr(ctx, "require_permission", lambda skill, payload, permission: (
+        None if (skill, permission) == (identity[0], "presence") else require(skill, payload, permission)))
+    monkeypatch.setattr(host_service, "_admit_presence", lambda *_args: admission)
+
+
 async def _until(predicate, timeout: float = 5.0) -> None:
     deadline = time.monotonic() + timeout
     while not predicate():
@@ -79,7 +100,7 @@ def _turn_threads() -> list[threading.Thread]:
     return [thread for thread in threading.enumerate() if thread.name.startswith("presence-turn-")]
 
 
-def test_queued_and_executing_turns_leave_the_default_executor_free(tmp_path):
+def test_queued_and_executing_turns_leave_the_default_executor_free(tmp_path, monkeypatch):
     """Four live turns, two gate slots, ONE default-executor worker: the worker stays free.
 
     Before, each turn waited inside ``asyncio.to_thread`` — the first parked turn was that
@@ -93,6 +114,7 @@ def test_queued_and_executing_turns_leave_the_default_executor_free(tmp_path):
         return _answer(**kwargs)
 
     app, binding_id, ctx = _presence_app(tmp_path, runner, account_wide=True)
+    _resolve_preparation_once(monkeypatch, ctx, binding_id)
 
     async def scenario():
         shared = ThreadPoolExecutor(max_workers=1, thread_name_prefix="shared-default")
@@ -506,6 +528,7 @@ def test_many_slow_auth_probes_do_not_fill_the_default_executor(tmp_path, monkey
 def test_slow_presence_preparation_cannot_fill_the_default_executor(tmp_path, monkeypatch):
     """Admission, staging and replay run before turn capacity; their workers still need a bound."""
     app, binding, ctx = _presence_app(tmp_path, _answer)
+    _resolve_preparation_once(monkeypatch, ctx, binding)
     entered, release = threading.Event(), threading.Event()
     lock, active, peak = threading.Lock(), [0], [0]
     original = host_service._admit_presence
@@ -528,7 +551,9 @@ def test_slow_presence_preparation_cannot_fill_the_default_executor(tmp_path, mo
     async def scenario():
         shared = ThreadPoolExecutor(max_workers=3, thread_name_prefix="admission-saturation")
         asyncio.get_running_loop().set_default_executor(shared)
-        requests = [asyncio.create_task(_turn(app, binding, f"admission-{i}")) for i in range(12)]
+        # One more request than workers, so unbounded preparation would fill them all, and fewer
+        # than the five-turn in-flight budget, so every request is answered whatever the timing.
+        requests = [asyncio.create_task(_turn(app, binding, f"admission-{i}")) for i in range(4)]
         try:
             await _until(entered.is_set)
             assert await asyncio.wait_for(asyncio.to_thread(lambda: "owner-free"), 2) == "owner-free"
