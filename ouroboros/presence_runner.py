@@ -1299,19 +1299,23 @@ class PresenceTurnExecutions:
 
     def _settle(self, execution: PresenceTurnExecution, release: Callable[[], None], *,
                 result: Any = None, error: BaseException | None = None) -> None:
-        # Capacity first, then every waiter sees the outcome, then the id retires: a retry that
-        # lands before retirement joins the settled result instead of paying for another turn.
+        # Capacity first, then the id retires, then every waiter sees the outcome. The live set is
+        # custody the Host reads the moment a waiter observes the terminal, and this usually runs on
+        # the turn's own thread while the waiter wakes on the loop: an id published after its outcome
+        # could outlive a response already on the wire. A retry that takes the lock before this joins
+        # the running turn; one that lands after retirement starts from the durable row the turn
+        # wrote before it returned.
         try:
             release()
         except Exception:
             log.warning("presence turn %s could not return its capacity", execution.turn_id, exc_info=True)
+        with self._lock:
+            if self._live.get(execution.turn_id) is execution:
+                del self._live[execution.turn_id]
         if error is None:
             execution.result.set_result(result)
         else:
             execution.result.set_exception(error)
-        with self._lock:
-            if self._live.get(execution.turn_id) is execution:
-                del self._live[execution.turn_id]
 
 
 __all__ = [
